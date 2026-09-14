@@ -1,0 +1,13 @@
+# build output
+lib/
+node_modules/
+*.tsbuildinfo
+
+# memory runtime artifacts (derived / private — never synced)
+#
+# The SQLite databases are *derived* from the git-tracked text view
+# (lessons/*.md, MEMORY.md, metrics.jsonl) and are machine-local:
+#   ~/.dsh/memory/memory.db, <repo>/.dsh/memory/memory.db
+# They are ignored here for reference; the plugin's own .gitignore template
+# (see src/store/gitignore.ts) writes the real one into memory roots.
+.memory-runtime/

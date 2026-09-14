@@ -1,0 +1,73 @@
+# dsh-memory bundle patch: mounts the layered memory plugin under the stable
+# plugin id `memory`. Every dsh profile that adds `dsh-memory` to its
+# `dsh.profile.bundles` list (nvim-tui, web, headless) gets this row.
+#
+# Because `insert` is pure-append and the loader rejects duplicate entry ids,
+# a profile's own cordis.patch.yml must NOT insert `id: memory` again — it may
+# only override the same id via a `- config:` block.
+- insert:
+    - id: memory
+      name: 'dsh-memory'
+      config:
+        enabled: true
+        # Plugin log file (never stdout — the TUI and the web server own theirs).
+        logFile: '~/.dsh/memory-plugin.log'
+
+        # Scope routing: project memory by default, global only for
+        # cross-project toolchain facts. Project writes never fall back to
+        # ~/.dsh (hard guard).
+        routing:
+          defaultScope: project
+          subagentWrite: false
+
+        # Recall channels (see docs/DESIGN.md §6).
+        prompt:
+          protocol:
+            enabled: true
+            budgetTokens: 120
+          indexSummary:
+            enabled: true
+            budgetTokens: 150
+            maxTitles: 12
+        recall:
+          autoInject: true
+          budgetTokens: 600
+          maxItems: 5
+          minScore: 0.35
+          layers: [project, global, profile]
+
+        # Learning loop (see docs/DESIGN.md §7).
+        learn:
+          collectSignals: true
+          autoDistill: true
+          distillModel:
+            provider: deepseek-official
+            model: deepseek-v4-flash
+          maxDistillPerSession: 3
+          maxDistillTokensPerDay: 200000
+          distillTimeoutMs: 3000
+          minSignals: 1
+
+        # Episodic (L1) capture: structured signals only, redacted by default.
+        episodic:
+          enabled: true
+          retentionDays: 90
+          captureUserText: redacted
+
+        # Consolidation: lazy trigger on session start.
+        consolidate:
+          enabled: true
+          everyNTasks: 5
+          everyDays: 7
+          archiveInsteadOfDelete: true
+
+        # Git-ized text view of the memory store.
+        git:
+          enabled: true
+          autoCommit: task-end
+          checkpointMinutes: 30
+          autoPush: false
+
+        sqlite:
+          journalMode: wal
+          busyTimeoutMs: 5000

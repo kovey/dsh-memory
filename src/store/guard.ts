@@ -82,12 +82,24 @@ export function assertDraftScope(record: MemoryRecord, scope: MemoryScope): void
     }
 }
 
-/** Path of one lesson inside a scope root. */
-export function lessonPath(scopeRoot: string, id: string): string {
-    return path.join(scopeRoot, 'lessons', `${id}.md`)
+/**
+ * Dash-insensitive form of a lesson id (identity, not scope).
+ *
+ * `slugify` and the legacy `memory-lesson.sh` disagree about runs of `-`:
+ * the plugin folds them and trims the ends (`dsh-session--append` →
+ * `dsh-session-append`), while the script's `sed 's/-\+/-/g;s/^-//;s/-$//'` is
+ * a GNU-ism that is a no-op under BSD sed — the real corpus still carries
+ * `-fetch--origin.md` and `dsh-session--append.md`. Both spellings name one
+ * lesson, so id lookups compare this canonical form instead of the raw string.
+ *
+ * Only dashes and case are left alone; anything else (a `zh-<sha1>` fallback,
+ * a `-2` disambiguation suffix) stays significant.
+ */
+export function normalizeDashes(id: string): string {
+    return id.replace(/-+/g, '-').replace(/^-+|-+$/g, '')
 }
 
-/** Path of one archived lesson inside a scope root. */
-export function archivePath(scopeRoot: string, id: string): string {
-    return path.join(scopeRoot, 'archive', 'lessons', `${id}.md`)
+/** True when two ids name the same lesson under `normalizeDashes`. */
+export function equivalentIds(a: string, b: string): boolean {
+    return a === b || normalizeDashes(a) === normalizeDashes(b)
 }

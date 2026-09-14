@@ -7,6 +7,7 @@
  */
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
+import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
@@ -29,7 +30,7 @@ import {
     resolveConflict,
     splitConflict,
 } from '../lib/sync/merge.js'
-import { lessonDoc, tempDir } from './helpers.ts'
+import { lessonDoc, tempDir, useGlobalMemoryHome } from './helpers.ts'
 import { parseLesson, renderLesson } from '../lib/store/frontmatter.js'
 
 function git(cwd: string, ...args: string[]): string {
@@ -436,4 +437,106 @@ test('several hunks in a non-lesson file are left for a human', () => {
 `,
     )
     assert.equal(resolveConflict(file).strategy, 'manual')
+})
+
+// ---- end-to-end conflict resolution through the real tool -------------------
+
+test('a real rebase conflict is resolved from any working directory', async (t) => {
+    // The audit found this escape: `git diff --name-only` lists repo-relative
+    // paths, the tool treated them as absolute (resolving against the process
+    // cwd), so automatic merges reported ENOENT "needs a human" — or wrote the
+    // merged lesson to an unrelated file — while the memory repo kept its
+    // conflict markers. There was no end-to-end test, which is why it survived.
+    const origin = tempDir('sync-e2e-origin')
+    git(origin, 'init', '--quiet', '--bare', '-b', 'main')
+
+    const seed = tempDir('sync-e2e-seed')
+    git(seed, 'init', '--quiet', '-b', 'main')
+    git(seed, 'config', 'user.email', 'test@example.com')
+    git(seed, 'config', 'user.name', 'dsh-memory test')
+    fs.mkdirSync(path.join(seed, 'lessons'), { recursive: true })
+    fs.writeFileSync(
+        path.join(seed, 'lessons', 'shared.md'),
+        lessonDoc({ title: 'shared lesson', body: '触发场景：本机。正确做法：本机做法。' }),
+    )
+    git(seed, 'add', '-A')
+    git(seed, 'commit', '--quiet', '-m', 'seed')
+    git(seed, 'remote', 'add', 'origin', origin)
+    git(seed, 'push', '--quiet', '-u', 'origin', 'main')
+
+    // our memory root: a clone that has diverged
+    const root = tempDir('sync-e2e-local')
+    git(root, 'clone', '--quiet', origin, root)
+    git(root, 'config', 'user.email', 'test@example.com')
+    git(root, 'config', 'user.name', 'dsh-memory test')
+    fs.writeFileSync(
+        path.join(root, 'lessons', 'shared.md'),
+        lessonDoc({
+            title: 'shared lesson',
+            body: '触发场景：本机。正确做法：本机做法，补充了这一段说明以便合并时保留更长的一侧。',
+            timesSeen: 3,
+            confidence: 0.95,
+        }),
+    )
+    git(root, 'add', '-A')
+    git(root, 'commit', '--quiet', '-m', 'local edit')
+
+    // the remote gains a different edit to the same file
+    fs.writeFileSync(
+        path.join(seed, 'lessons', 'shared.md'),
+        lessonDoc({ title: 'shared lesson', body: '触发场景：远端。正确做法：远端做法。', timesSeen: 2 }),
+    )
+    git(seed, 'add', '-A')
+    git(seed, 'commit', '--quiet', '-m', 'remote edit')
+    git(seed, 'push', '--quiet')
+
+    // `git diff --name-only` reports repo-relative paths; assert that contract
+    // without leaving the repository mid-rebase for the tool run below.
+    const probe = sync(root)
+    assert.equal(probe.action, 'conflict', JSON.stringify(probe))
+    assert.deepEqual(probe.conflicts, ['lessons/shared.md'], 'paths are reported repo-relative')
+    git(root, 'rebase', '--abort')
+
+    // The memory root *is* the clone (a standalone repository, as a global memory
+    // root is): point the global root at it and run from a directory that is not
+    // a repository, so the session's scope is exactly this root.
+    // Outside the plugin repository: a cwd inside *any* repository would resolve
+    // to that repository's project scope instead of the global root under test.
+    const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), 'sync-e2e-cwd-'))
+    clearRepoCache()
+    useGlobalMemoryHome(root)
+    const config = resolveConfig({})
+    const registry = new StoreRegistry(config)
+    const available = await registry.initialize(loadSqliteModule)
+    if (!registry.available) {
+        t.skip(`node:sqlite unavailable: ${available.probe.reason ?? 'unknown'}`)
+        return
+    }
+    const resolver = new ScopeResolver(config)
+    const store = registry.open(resolver.resolve({ cwd: elsewhere }))
+    assert.equal(store?.scope.root, root, 'the session scope is the cloned root')
+    const committer = new AutoCommitter(config)
+
+    // Run the tool from an unrelated cwd: the old code resolved `lessons/shared.md`
+    // against it.
+    const previousCwd = process.cwd()
+    process.chdir(elsewhere)
+    try {
+        const { syncTool } = await import('../lib/tools/sync.js')
+        const tool = syncTool({ config, registry, resolver, committer })
+        const report = await (tool as unknown as {
+            execute: (args: unknown, exec: unknown) => Promise<string>
+        }).execute({ resolveConflicts: true, rebuild: false }, { agent: { session: { id: 'sync-e2e', header: { cwd: elsewhere } } } })
+        assert.doesNotMatch(report, /unreadable|ENOENT/, `the merge must not fail on a path: ${report}`)
+        assert.doesNotMatch(report, /needs a human/, report)
+        assert.match(report, /resolved shared\.md: merge-lesson/, `the merge must happen by rule: ${report}`)
+    } finally {
+        process.chdir(previousCwd)
+    }
+
+    const merged = fs.readFileSync(path.join(root, 'lessons', 'shared.md'), 'utf8')
+    assert.equal(hasConflictMarkers(merged), false, 'no markers survive into the memory repo')
+    assert.match(merged, /本机做法/, 'the longer side won the body')
+    // and nothing was written into the unrelated cwd
+    assert.equal(fs.existsSync(path.join(elsewhere, 'lessons', 'shared.md')), false)
 })

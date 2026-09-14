@@ -18,6 +18,7 @@ export class SessionState {
     private readonly distill = new Map<string, DistillBudget>()
     private readonly turns = new Map<string, number>()
     private readonly startedAt = new Map<string, number>()
+    private readonly overrides = new Map<string, { autoRecall?: boolean }>()
     private readonly order: string[] = []
 
     constructor(private readonly maxSessions = 256) {}
@@ -50,6 +51,20 @@ export class SessionState {
 
     injectedCount(sessionId: string): number {
         return this.injected.get(sessionId)?.size ?? 0
+    }
+
+    /** Session-scoped overrides set by `memory_config` (never persisted). */
+    setOverride(sessionId: string, patch: { autoRecall?: boolean }): void {
+        const current = this.overrides.get(sessionId) ?? {}
+        this.overrides.set(sessionId, { ...current, ...patch })
+        this.touch(sessionId)
+    }
+
+    override(sessionId: string | undefined): { autoRecall?: boolean } {
+        if (sessionId === undefined) return {}
+        const found = this.overrides.get(sessionId)
+        this.touch(sessionId)
+        return found ?? {}
     }
 
     /** Remember when a session was first seen (duration for the metric ledger). */
@@ -98,6 +113,7 @@ export class SessionState {
         this.distill.delete(sessionId)
         this.turns.delete(sessionId)
         this.startedAt.delete(sessionId)
+        this.overrides.delete(sessionId)
         const index = this.order.indexOf(sessionId)
         if (index !== -1) this.order.splice(index, 1)
     }

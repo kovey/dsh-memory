@@ -14,11 +14,11 @@ import type { SessionState } from '../recall/session-state.js'
 import { ScopeResolver, sessionIdOf } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
 import type { StoreRegistry } from '../store/store.js'
-import { runDistillation } from '../learn/distill-runner.js'
+import { runDistillation, distillInFlightTtlMs, isDistilling } from '../learn/distill-runner.js'
 import type { DistillOutcome } from '../learn/distill.js'
 import { recordEpisode } from '../learn/episodic.js'
 import { TurnLedger } from '../learn/ledger.js'
-import { loadGroupSignals, pendingDistillations } from '../learn/pending.js'
+import { loadGroupSignals, pendingDistillations, pendingMinAgeSeconds } from '../learn/pending.js'
 import { detectResultFailure } from '../learn/signals.js'
 import type { Signal, SignalBuffer, SignalKind } from '../learn/signals.js'
 
@@ -46,9 +46,12 @@ interface ToolResultLike {
  * Pick up pain signals that were collected but never distilled — a job killed
  * with its agent on a one-shot surface, or a process that died mid-call.
  *
- * Runs off the session-start path, uses the *new* session's route/model, and is
- * naturally idempotent: any attempt writes a `distill` audit row, so a group is
- * retried until its first attempt and never again.
+ * Runs off the turn-end path, uses the *new* session's route/model, and is
+ * naturally idempotent: any attempt that passed the gate writes a `distill`
+ * audit row, so a group is retried until its first attempt and never again.
+ * Attempts refused by the gate (budget, no route) write nothing and stay
+ * pending, which is why the caller must not latch a scope that recovered
+ * nothing.
  */
 export async function recoverPendingDistillations(
     deps: LearnDeps,
@@ -69,8 +72,14 @@ export async function recoverPendingDistillations(
     // a group is recoverable when its turn is behind the turn this process has
     // observed, and it is old enough not to be mid-flight.
     const currentTurn = sessionId !== undefined ? deps.state.lastTurn(sessionId) : 0
-    const groups = pendingDistillations(store.db, { limit: limit + 2, minAgeSeconds: 5 }).filter(
-        (group) => !(sessionId !== undefined && currentTurn > 0 && group.sessionId === sessionId && group.turn >= currentTurn),
+    const minAgeSeconds = pendingMinAgeSeconds(deps.config.learn.distillTimeoutMs)
+    const inFlightTtlMs = distillInFlightTtlMs(deps.config.learn.distillTimeoutMs)
+    const groups = pendingDistillations(store.db, { limit: limit + 2, minAgeSeconds }).filter(
+        (group) =>
+            !(sessionId !== undefined && currentTurn > 0 && group.sessionId === sessionId && group.turn >= currentTurn) &&
+            // A runner in this process is already distilling the group; it only
+            // *looks* unattempted because its audit row is not written yet.
+            !isDistilling(group.sessionId, group.turn, inFlightTtlMs),
     )
     if (groups.length === 0) {
         log('debug', 'memory: no undistilled signals to recover')
@@ -236,7 +245,17 @@ function attributeAcrossRoots(
     return attributed
 }
 
-/** One recovery pass per scope per process (see pending.ts). */
+/**
+ * Scopes whose pending debt has been *attempted* in this process.
+ *
+ * Latched only when a recovery pass really attempted at least one group. A pass
+ * that was refused before spending anything (daily budget exhausted, no route)
+ * writes no audit row and leaves the debt untouched, so it must not latch:
+ * otherwise the first quiet turn of a long-lived session burns the one recovery
+ * slot this process has, and a job cancelled later in that same process is never
+ * picked up. Duplicate work is prevented by the in-flight marks in
+ * `distill-runner.ts` plus the audit row itself, not by this set.
+ */
 const recoveredScopes = new Set<string>()
 
 async function handleTurnEnd(deps: LearnDeps, payload: { agent?: AgentLike; turn?: number }): Promise<void> {
@@ -260,12 +279,16 @@ async function handleTurnEnd(deps: LearnDeps, payload: { agent?: AgentLike; turn
     if (collected.signals.length === 0) {
         // Recovery rides a *quiet* turn: the store is open, the agent is alive,
         // and it never stacks on top of this turn's own distillation (whose
-        // result the user is waiting for). Once per scope per process, and
-        // wall-clock bounded so a debt of groups cannot stall turn closure.
+        // result the user is waiting for). It is wall-clock bounded so a debt of
+        // groups cannot stall turn closure.
         if (deps.config.learn.autoDistill && !recoveredScopes.has(store.scope.root)) {
-            recoveredScopes.add(store.scope.root)
             try {
-                await recoverPendingDistillations(deps, payload.agent)
+                const recovered = await recoverPendingDistillations(deps, payload.agent)
+                // Latch only on real work. A pass that recovered nothing was
+                // either refused by the gate (nothing spent, debt still pending)
+                // or found nothing; leaving the scope unlatched lets the next
+                // quiet turn try again, which is what a cancelled job needs.
+                if (recovered > 0) recoveredScopes.add(store.scope.root)
             } catch (error) {
                 log('warn', 'memory: pending-distillation recovery failed:', error)
             }

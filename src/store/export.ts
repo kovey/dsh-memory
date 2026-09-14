@@ -13,14 +13,18 @@ import { ensureDir } from '../paths.js'
 import { assertInsideScope } from './guard.js'
 import { importLessons } from './import.js'
 import { parseLesson } from './frontmatter.js'
-import { isoToExpires, renderLesson } from './frontmatter.js'
+import { formatEvidenceSummary, isoToExpires, renderLesson } from './frontmatter.js'
+import { exportMetrics } from './metrics.js'
 import { countRecords, listRecords } from './sqlite/records.js'
+import { rowInt, rowStr } from './sqlite/db.js'
 import type { MemoryRecord, MemoryScope } from './types.js'
 
 export interface ExportResult {
     root: string
     written: number
     removed: number
+    /** Rows in the rewritten `metrics.jsonl` ledger. */
+    metrics: number
     errors: string[]
 }
 
@@ -48,7 +52,7 @@ export interface ExportOptions {
  * with no surviving record in that state are pruned.
  */
 export function exportLessons(db: DatabaseSync, scope: MemoryScope, options: ExportOptions = {}): ExportResult {
-    const result: ExportResult = { root: scope.root, written: 0, removed: 0, errors: [] }
+    const result: ExportResult = { root: scope.root, written: 0, removed: 0, metrics: 0, errors: [] }
     const activeDir = path.join(scope.root, 'lessons')
     const archiveDir = path.join(scope.root, 'archive', 'lessons')
     if (!ensureDir(activeDir)) {
@@ -60,6 +64,9 @@ export function exportLessons(db: DatabaseSync, scope: MemoryScope, options: Exp
     const expectedActive = new Set<string>()
     const expectedArchived = new Set<string>()
     const failed = new Set<string>()
+    // `listRecords` deliberately does not load evidence rows; one grouped query
+    // gives every record its `kind×count` summary instead of n+1 lookups.
+    const summaries = evidenceSummaries(db)
     for (const record of records) {
         const name = `${record.id}.md`
         const archived = record.status === 'archived'
@@ -70,7 +77,7 @@ export function exportLessons(db: DatabaseSync, scope: MemoryScope, options: Exp
                 result.errors.push(`cannot create ${archiveDir}`)
                 continue
             }
-            writeAtomic(file, renderRecord(record))
+            writeAtomic(file, renderRecord(record, summaries.get(record.id)))
             result.written += 1
             ;(archived ? expectedArchived : expectedActive).add(name)
             // a record that changed state must not leave its old copy behind
@@ -129,8 +136,36 @@ function pruneDir(scope: MemoryScope, dir: string, expected: Set<string>, result
     return removed
 }
 
+/**
+ * Evidence summary per record id, as it is written into the text view:
+ * `tool-failure×2, user-statement×1`. Only kinds and counts — `detail` is raw
+ * tool output and must not be committed to the memory repository.
+ */
+function evidenceSummaries(db: DatabaseSync): Map<string, string> {
+    const summaries = new Map<string, string>()
+    try {
+        const rows = db
+            .prepare('SELECT record_id, kind, COUNT(*) AS n FROM evidence GROUP BY record_id, kind')
+            .all()
+        const grouped = new Map<string, { kind: string; count: number }[]>()
+        for (const row of rows) {
+            const id = rowStr(row, 'record_id')
+            const kind = rowStr(row, 'kind')
+            if (id === undefined || kind === undefined) continue
+            const list = grouped.get(id) ?? []
+            list.push({ kind, count: rowInt(row, 'n', 0) })
+            grouped.set(id, list)
+        }
+        for (const [id, counts] of grouped) summaries.set(id, formatEvidenceSummary(counts))
+    } catch (error) {
+        // Losing the evidence line is bad; failing the whole export is worse.
+        log('warn', 'memory: evidence summary query failed:', error)
+    }
+    return summaries
+}
+
 /** One lesson document, frontmatter compatible with `memory-lesson.sh`. */
-export function renderRecord(record: MemoryRecord): string {
+export function renderRecord(record: MemoryRecord, evidenceSummary?: string): string {
     return renderLesson(
         {
             title: record.title,
@@ -148,6 +183,7 @@ export function renderRecord(record: MemoryRecord): string {
             created: record.createdAt.slice(0, 10),
         },
         record.body,
+        evidenceSummary !== undefined && evidenceSummary !== '' ? { evidence: evidenceSummary } : {},
     )
 }
 
@@ -208,6 +244,14 @@ export function exportAll(db: DatabaseSync, scope: MemoryScope, options: ExportO
     } catch (error) {
         result.errors.push(`index: ${error instanceof Error ? error.message : String(error)}`)
         log('warn', 'memory: MEMORY.md export failed:', error)
+    }
+    // The metric ledger is part of the text view (DESIGN §5.3): without this the
+    // jsonl was append-only and kept several lines per task_id.
+    try {
+        result.metrics = exportMetrics(db, scope)
+    } catch (error) {
+        result.errors.push(`metrics: ${error instanceof Error ? error.message : String(error)}`)
+        log('warn', 'memory: metrics.jsonl export failed:', error)
     }
     return result
 }

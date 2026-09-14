@@ -23,6 +23,7 @@ import { abortRebase, continueRebase, ensureRepo, hasRemote, repoRootOf, sync } 
 import { assertInsideScope } from '../store/guard.js'
 import { hasConflictMarkers, resolveConflict } from '../sync/merge.js'
 import type { ConflictResolution } from '../sync/merge.js'
+import { refuseWrite } from './save.js'
 
 export interface SyncToolDeps {
     config: MemoryConfig
@@ -57,6 +58,11 @@ export function syncTool(deps: SyncToolDeps) {
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
             const agent = exec.agent as unknown as AgentLike | undefined
+            // Even without push, a sync commits, may rewrite conflict files,
+            // continues a rebase and rebuilds the database — all writes, and
+            // with push=true it publishes the memory repository.
+            const refusal = refuseWrite(deps, agent, '`memory_sync` (commit/rebase/rebuild, and push when requested)')
+            if (refusal !== undefined) return refusal
             const targets = resolveTargets(deps, agent, args.scope ?? 'auto')
             const lines: string[] = []
             for (const scope of targets) {

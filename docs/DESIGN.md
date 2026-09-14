@@ -331,7 +331,14 @@ src/
 
 ### 9.2 装配与依赖
 
-- `export const name = 'dsh-memory'`；`export const inject = ['tools','agents','systemPrompt','session']`。
+- `export const name = 'dsh-memory'`；`export const inject = ['tools','systemPrompt']`。
+  只注入**实际用到的服务**：`ctx.tools.register` 与 `ctx.systemPrompt.section`。事件（`agent/created`、
+  `agent/pre-step`、`session/created|disposed`、`tools/result`…）走 `ctx.on`，不受 `inject` 约束；
+  钩子/工具调用涉及的 agent 与 session 一律来自 payload 或 `exec.agent`，从不查 `ctx.agents`/`ctx.session`；
+  `ctx.jobs` 是可选的反射式查找（`learn/distill-runner.ts`），不注入、缺失时回落 inline 蒸馏。
+  因此声明 `agents`/`session` 只会增加装配期等待，并不改变行为。
+- 能力位（协议段宣传哪些工具）来自 `registerTools` 的**实际注册结果**（`registered`/`failed`），不是硬编码；
+  注册失败的工具只记 `warn` 且不会被协议段宣传。
 - `apply(ctx, config)` 内所有注册用 `ctx.effect(() => dispose)` 收尾（cordis v4 不发 `dispose` 事件）。
 - peerDependencies 只声明 `@deepseek-ai/*`；运行期零第三方依赖。
 - 三端挂载走 **bundle 层**：各 profile 的 `package.json` → `dsh.profile.bundles` 加 `dsh-memory`；**profile patch 不得重复 insert `id: memory`**（loader 对重复 id 直接抛错）。
@@ -481,11 +488,11 @@ audit: turn 7 | model=deepseek-official/deepseek-v4-flash | in 299 / out 232 | c
 - 新增 `learn/pending.ts`：**"采到但没蒸馏"是一个查询**——`signals` 左连接 `distill` 审计表，
   没有审计行的就是待办。重试天然幂等：任何一次尝试（哪怕超时）都会写审计行，所以一组信号
   最多被捡起一次。
-- 恢复挂在 **`turn-stopping`**（每个作用域每进程一次），而不是会话启动定时器：库是开的、
+- 恢复挂在 **`turn-stopping`**（每个作用域每作用域每进程一次（仅在实际尝试过恢复时才置位）），而不是会话启动定时器：库是开的、
   agent 活着、await 与 inline 蒸馏同样有界——这正是 inline 蒸馏能work的同一个确定性时机。
 - 恢复**强制 inline**（`RunnerRequest.mode`）：一组信号正是被"取消的作业"弄丢的，
   再交给作业只会再丢一次（第一版就是这么静默失效的）。
-- 保护条件：轮次必须已结束（`turn < state.lastTurn`）+ 信号年龄 >5s（避免抢在途轮次）。
+- 保护条件：轮次必须已结束（`turn < state.lastTurn`）+ 信号年龄 > 一次蒸馏超时（按 learn.distillTimeoutMs 推导）（避免抢在途轮次）。
 
 **实测（两次会话）**：
 
@@ -525,6 +532,19 @@ audit: turn 7 | model=deepseek-official/deepseek-v4-flash | in 299 / out 232 | c
 （同 `compaction-basic` 行）；文档里常见的嵌套 `- config: [ {id, config} ]` 在这里**不生效**
 （表现为 `semantic=off`，排查花了三轮）。加上此前发现的 `dsh --patch <file>` overlay 对本插件
 config 无效，结论：**改插件配置就写 profile patch 的顶层 `- id: memory` 形式**。
+
+### 14.11 审查后的补齐（2026-09-14，第二轮）
+
+`docs/REVIEW-2026-09-14.md` 记录了完整审查（30+ 条）与两批修复。设计承诺但此前未实现的部分已补齐：
+
+- **L5 偏好层**：`<memory root>/profile/{preferences,conventions}.md` 现由常驻段①读取并按 200 tok 预算渲染；
+  `memory_save({ layer: 'profile', evidence: 'user-statement' })` 是唯一写入路径（只接受用户明说的偏好，
+  同时写入 preference 行与一条 layer=profile 的记录）。
+- **L4 晋升落技能**：巩固时把晋升提案同时落成 `proposals/<id>.SKILL.md` 草稿（人类只需移动文件；
+  插件永不直接写 `~/.dsh/skills`，人审环节保留）。
+- **`memory_config`**：会话级降噪（`autoRecall: false`），不落盘。
+- **`memory_import`**：把外部 lesson 文件导入项目/全局库（破坏性子代理被拒）。
+- **门禁三态**：`pass | regression | unknown`，四项指标全无数据不再算通过。
 
 ### 14.6 未实现 / 后续可做
 

@@ -68,9 +68,16 @@ export function clearRepoCache(): void {
 /**
  * Resolve the repository root owning `cwd`.
  *
- * Uses the *common* git dir so every worktree of one repository shares a single
- * project memory root. Returns `undefined` when `cwd` is not inside a
- * repository — callers must then choose the global scope explicitly.
+ * Uses git's own answer (`--show-toplevel`) for the two layouts where `.git` is a
+ * *file* — a linked worktree and a submodule — because the directory that holds
+ * the `.git` entry is the working tree in both cases. Only a linked worktree is
+ * folded into the main repository, so every worktree of one project shares a
+ * single memory root; a submodule keeps its own memory (its common dir is
+ * `<super>/.git/modules/<name>`, whose dirname would otherwise place project
+ * memory *inside* `.git`, shared by every submodule of the superproject).
+ *
+ * Returns `undefined` when `cwd` is not inside a repository — callers must then
+ * choose the global scope explicitly.
  */
 export function resolveRepoRoot(cwd: string | undefined): string | undefined {
     if (cwd === undefined || cwd === '') return undefined
@@ -90,10 +97,10 @@ function detectRepoRoot(start: string): string | undefined {
         if (fs.existsSync(entry)) {
             // A `.git` *directory* means `dir` owns the repository. Only a
             // `.git` *file* (worktree, submodule) needs git to resolve the
-            // common dir — and asking git in the directory case would let it
+            // working tree — and asking git in the directory case would let it
             // walk further up and return an unrelated outer repository.
             if (isDirectory(entry)) return dir
-            return gitCommonRoot(dir) ?? dir
+            return gitWorkTreeRoot(dir) ?? dir
         }
         const parent = path.dirname(dir)
         if (parent === dir) return undefined
@@ -109,17 +116,51 @@ function isDirectory(target: string): boolean {
     }
 }
 
-/** Resolve `<dir>/.git` to the repository root that owns worktrees too. */
-function gitCommonRoot(dir: string): string | undefined {
+/**
+ * Project root for a directory whose `.git` is a file: git's `--show-toplevel`,
+ * except in a linked worktree, which belongs to the main repository it shares a
+ * common dir with.
+ */
+function gitWorkTreeRoot(dir: string): string | undefined {
+    const toplevel = git(dir, ['rev-parse', '--show-toplevel'])
+    if (toplevel === undefined || toplevel === '') return undefined
+    const root = path.resolve(dir, toplevel)
+    const main = mainWorkTree(dir)
+    return main ?? root
+}
+
+/**
+ * The main repository's working tree, or undefined when `dir` is not a linked
+ * worktree (a submodule reports the *same* absolute git dir and common dir, a
+ * worktree reports its own dir inside the common one).
+ */
+function mainWorkTree(dir: string): string | undefined {
+    const gitDir = git(dir, ['rev-parse', '--absolute-git-dir']) ?? git(dir, ['rev-parse', '--git-dir'])
+    const commonDir = git(dir, ['rev-parse', '--git-common-dir'])
+    if (gitDir === undefined || commonDir === undefined) return undefined
+    const absoluteGitDir = path.resolve(dir, gitDir)
+    const absoluteCommon = path.resolve(dir, commonDir)
+    // git dir === common dir: a submodule (or a plain checkout with a relocated
+    // git dir) — it has its own working tree and therefore its own memory.
+    if (absoluteGitDir === absoluteCommon) return undefined
+    // A worktree's git dir lives inside the common dir; anything else (a fresh
+    // clone's `.git` file pointing at an unrelated repository) keeps its own root.
+    if (!isInside(absoluteCommon, absoluteGitDir)) return undefined
+    const main = path.dirname(absoluteCommon)
+    // Only trust dirname(common) when it really is the main working tree: a bare
+    // repository has no `.git` there, and memory must not land in a bare store.
+    return fs.existsSync(path.join(main, '.git')) ? main : undefined
+}
+
+/** Run one git query, returning trimmed stdout or undefined on any failure. */
+function git(dir: string, args: string[]): string | undefined {
     try {
-        const out = execFileSync('git', ['-C', dir, 'rev-parse', '--git-common-dir'], {
+        const out = execFileSync('git', ['-C', dir, ...args], {
             encoding: 'utf8',
             timeout: 3000,
             stdio: ['ignore', 'pipe', 'ignore'],
         }).trim()
-        if (out === '') return undefined
-        const abs = path.isAbsolute(out) ? out : path.resolve(dir, out)
-        return path.dirname(abs)
+        return out === '' ? undefined : out
     } catch {
         return undefined
     }

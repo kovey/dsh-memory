@@ -7,11 +7,21 @@
  *   - the process simply died mid-distillation.
  *
  * L1 is the durable record, so recovery is a query: signals with no matching
- * `distill` audit row are pending work. Retrying is safe because a completed
- * attempt *always* writes an audit row (even a timed-out one), so a group is
- * picked up at most until it produces its first attempt.
+ * `distill` audit row are pending work. Retrying is safe because an *attempt* —
+ * anything that passed `distillAllowed` and reached the model call, including a
+ * timeout and a failure while writing the candidates — always writes an audit
+ * row, so a group is picked up at most until it produces its first attempt.
+ *
+ * The two kinds of skip are deliberately different and this query is where the
+ * difference lives:
+ *   - a group that never passed the gate (distillation off, no route, budget
+ *     exhausted) spent nothing and wrote nothing, so it stays pending and a
+ *     later turn may still distil it;
+ *   - a group that was attempted is settled by its audit row, even when that
+ *     row says `created_count: 0` (all candidates rejected, timed out, failed).
  */
 import type { DatabaseSync } from 'node:sqlite'
+import { DEFAULT_CONFIG } from '../config.js'
 import { rowInt, rowStr } from '../store/sqlite/db.js'
 import type { Signal } from './signals.js'
 
@@ -26,26 +36,44 @@ export interface PendingGroup {
 export const PENDING_MAX_AGE_DAYS = 14
 
 /**
+ * Freshness guard for a group that may still be in flight.
+ *
+ * A distillation call runs for up to `distillTimeoutMs` and only writes its
+ * audit row at the end, so for that whole window the group still looks
+ * unattempted. The guard is derived from the configured timeout instead of a
+ * fixed number of seconds so it always covers one full distillation.
+ */
+export function pendingMinAgeSeconds(distillTimeoutMs: number): number {
+    return Math.ceil(Math.max(0, distillTimeoutMs) / 1_000) + 1
+}
+
+export interface PendingOptions {
+    limit?: number
+    maxAgeDays?: number
+    now?: Date
+    /**
+     * Signals younger than this are treated as belonging to a turn that may
+     * still be running (its own turn-stopping will handle them).
+     */
+    minAgeSeconds?: number
+    /**
+     * Configured `learn.distillTimeoutMs`; used to derive `minAgeSeconds` when
+     * the caller does not name one.
+     */
+    distillTimeoutMs?: number
+}
+
+/**
  * Signal groups with no distillation attempt yet, newest first.
  * Read-only; never mutates the store.
  */
-export function pendingDistillations(
-    db: DatabaseSync,
-    options: {
-        limit?: number
-        maxAgeDays?: number
-        now?: Date
-        /**
-         * Signals younger than this are treated as belonging to a turn that may
-         * still be running (its own turn-stopping will handle them).
-         */
-        minAgeSeconds?: number
-    } = {},
-): PendingGroup[] {
+export function pendingDistillations(db: DatabaseSync, options: PendingOptions = {}): PendingGroup[] {
     const limit = Math.max(1, options.limit ?? 3)
     const now = options.now ?? new Date()
     const cutoff = new Date(now.getTime() - (options.maxAgeDays ?? PENDING_MAX_AGE_DAYS) * 86_400_000).toISOString()
-    const freshCutoff = new Date(now.getTime() - (options.minAgeSeconds ?? 5) * 1_000).toISOString()
+    const minAgeSeconds =
+        options.minAgeSeconds ?? pendingMinAgeSeconds(options.distillTimeoutMs ?? DEFAULT_CONFIG.learn.distillTimeoutMs)
+    const freshCutoff = new Date(now.getTime() - minAgeSeconds * 1_000).toISOString()
     const rows = db
         .prepare(
             `SELECT s.session_id AS session_id, s.turn AS turn, COUNT(*) AS n, MAX(s.at) AS last_at

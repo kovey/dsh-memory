@@ -14,6 +14,7 @@ import { ScopeResolver } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
 import type { StoreRegistry } from '../store/store.js'
 import type { MemoryScope } from '../store/types.js'
+import { refuseWrite } from './save.js'
 
 export interface ConsolidateToolDeps {
     config: MemoryConfig
@@ -49,6 +50,14 @@ export function consolidateTool(deps: ConsolidateToolDeps) {
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
             const agent = exec.agent as unknown as AgentLike | undefined
+            // `dryRun` (the default) and `listProposals` only read; everything
+            // else archives, decays, supersedes or closes a proposal — a write.
+            const applies =
+                args.dryRun === false || args.acceptProposal !== undefined || args.rejectProposal !== undefined
+            if (applies) {
+                const refusal = refuseWrite(deps, agent, '`memory_consolidate` with dryRun=false or a proposal decision')
+                if (refusal !== undefined) return refusal
+            }
             const targets = resolveTargets(deps, agent, args.scope ?? 'auto')
             if (targets.length === 0) return 'memory store unavailable'
 
@@ -108,6 +117,10 @@ export function forgetTool(deps: ConsolidateToolDeps) {
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
             const agent = exec.agent as unknown as AgentLike | undefined
+            // Archiving is always a write: check before resolving targets so no
+            // scope is even opened for a caller that may not write.
+            const refusal = refuseWrite(deps, agent, '`memory_forget` (archiving a record)')
+            if (refusal !== undefined) return refusal
             const targets = resolveTargets(deps, agent, args.scope ?? 'auto')
             for (const scope of targets) {
                 const store = deps.registry.open(scope)

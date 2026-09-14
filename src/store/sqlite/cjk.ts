@@ -58,29 +58,74 @@ export function queryBigrams(term: string): string[] {
     return out
 }
 
+/** A query term split into the parts the index actually holds. */
+export interface TermParts {
+    /** ASCII/word runs — indexed as ordinary tokens by `unicode61`. */
+    ascii: string[]
+    /** CJK runs — indexed as bigrams in the `cjk` column. */
+    cjkRuns: string[]
+}
+
+const TERM_PARTS = new RegExp(`(${CJK_RUN.source})|([0-9A-Za-z_+#@.\-]+)`, 'g')
+
 /**
- * FTS5 clause for one CJK query term.
+ * Split a query term into ASCII runs and CJK runs.
  *
- * Short terms (<= 4 characters) use a conjunction of their bigrams, which is
- * precise; longer runs are OR-ed so a whole sentence still retrieves something
- * instead of demanding every bigram.
+ * Chinese technical writing glues the two together (`npm包`, `git仓库`, `v2版本`,
+ * `api调用`), and the old clause took bigrams of the *whole* term — `np`, `pm`,
+ * `m包` — none of which the index can ever contain, so every such query matched
+ * nothing while a pure-CJK substring of the same document matched fine.
  */
-export function cjkClause(term: string, longRunLimit = 4): string | undefined {
-    const chars = [...term]
-    if (chars.length === 0) return undefined
-    if (chars.length === 1) return `"${escapeTerm(term)}"`
-    if (chars.length <= longRunLimit) {
-        return `(${queryBigrams(term)
-            .map((bigram) => `"${escapeTerm(bigram)}"`)
-            .join(' ')})`
+export function splitTerm(term: string): TermParts {
+    const ascii: string[] = []
+    const runs: string[] = []
+    TERM_PARTS.lastIndex = 0
+    let match: RegExpExecArray | null
+    while ((match = TERM_PARTS.exec(term)) !== null) {
+        const cjk = match[1]
+        const word = match[2]
+        if (cjk !== undefined && cjk !== '') runs.push(cjk)
+        else if (word !== undefined && word !== '') ascii.push(word)
     }
-    const parts: string[] = []
-    for (let i = 0; i + 1 < chars.length; i += 2) {
-        const chunk = `${chars[i] ?? ''}${chars[i + 1] ?? ''}`
-        if (chunk.length === 2) parts.push(`"${escapeTerm(chunk)}"`)
+    return { ascii, cjkRuns: runs }
+}
+
+/**
+ * FTS5 clause for one query term, built from the parts that are actually
+ * indexed: ASCII runs become prefix queries, CJK runs become bigram
+ * conjunctions. Parts are AND-ed, so `npm包` asks for a token starting with
+ * `npm` — which the index has — instead of an impossible `m包` bigram.
+ *
+ * A two-character run is exactly one bigram, so it is matched precisely. Longer
+ * runs are OR-ed: Chinese has no word separators, so `仓库克隆` may well describe a
+ * document that says `仓库 … 克隆`, and demanding the boundary bigram `库克`
+ * retrieved nothing at all. Ranking still prefers documents that match more
+ * bigrams (bm25 over the `cjk` column), which keeps precision acceptable.
+ */
+export function cjkClause(term: string, longRunLimit = 2): string | undefined {
+    const { ascii, cjkRuns: runs } = splitTerm(term)
+    if (ascii.length === 0 && runs.length === 0) return undefined
+    const clauses: string[] = []
+    for (const word of ascii) clauses.push(`"${escapeTerm(word)}"*`)
+    for (const run of runs) {
+        const chars = [...run]
+        if (chars.length === 1) {
+            // A lone CJK character forms no bigram. Keep it only when it *is* the
+            // term (a one-character title stays searchable); inside a glued term
+            // like `npm包` it would make the clause unsatisfiable.
+            if (ascii.length === 0 && runs.length === 1) clauses.push(`"${escapeTerm(run)}"`)
+            continue
+        }
+        if (chars.length <= longRunLimit) {
+            clauses.push(`(${queryBigrams(run).map((bigram) => `"${escapeTerm(bigram)}"`).join(' ')})`)
+            continue
+        }
+        const parts = queryBigrams(run).map((bigram) => `"${escapeTerm(bigram)}"`)
+        if (parts.length > 0) clauses.push(`(${parts.join(' OR ')})`)
     }
-    if (parts.length === 0) return undefined
-    return `(${parts.join(' OR ')})`
+    if (clauses.length === 0) return undefined
+    if (clauses.length === 1) return clauses[0] as string
+    return `(${clauses.join(' ')})`
 }
 
 function escapeTerm(term: string): string {

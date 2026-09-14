@@ -270,3 +270,51 @@ test('project consolidation never touches the global store', async (t) => {
     assert.equal(getRecord(globalStore.db, 'global-lesson')?.status, 'active', 'global store untouched')
     assert.equal(countRecords(h.store.db).total, 0)
 })
+
+test('a promotion candidate gets a reviewable skill draft', async (t) => {
+    // DESIGN §3: the L3 → L4 step is human-approved. The plugin therefore leaves
+    // a ready-to-move SKILL.md inside the memory root instead of writing into
+    // ~/.dsh/skills, so accepting a proposal is a copy rather than an authoring
+    // exercise.
+    const h = await harness(t)
+    upsertRecord(
+        h.store.db,
+        record({
+            id: 'stable-lesson',
+            title: 'stable lesson',
+            body: '触发场景：无 TTY 下 pnpm install 中止。正确做法：设置 CI=true 后重试安装命令。',
+            confidence: 0.95,
+            timesSeen: 4,
+        }),
+    )
+    const report = consolidate(h.store.db, h.scope, h.store.fts5, { dryRun: false })
+    assert.equal(report.proposals.length, 1)
+    assert.equal(report.proposals[0]?.kind, 'promote-skill')
+    assert.equal(report.skillDrafts.length, 1, 'a draft is written for each proposal')
+
+    const draft = fs.readFileSync(report.skillDrafts[0] as string, 'utf8')
+    assert.match(draft, /^---\nname: mem-stable-lesson\n/m, 'host-compatible frontmatter')
+    assert.match(draft, /description: /)
+    assert.match(draft, /CI=true 后重试/, 'the lesson body travels with the draft')
+    assert.match(draft, /provenance: id=stable-lesson .*seen=4/)
+    assert.ok(report.skillDrafts[0]?.startsWith(h.scope.root), 'the draft stays inside the memory root')
+
+    // a dry run writes nothing at all
+    const proposals = path.join(h.scope.root, 'proposals')
+    fs.rmSync(proposals, { recursive: true, force: true })
+    const dry = consolidate(h.store.db, h.scope, h.store.fts5, { dryRun: true })
+    assert.equal(dry.skillDrafts.length, 0)
+    assert.equal(fs.existsSync(proposals), false)
+
+    // the next real pass rewrites it, and a draft whose proposal is gone is pruned
+    const again = consolidate(h.store.db, h.scope, h.store.fts5, { dryRun: false })
+    assert.ok(again.skillDrafts.length >= 1)
+    assert.ok(fs.existsSync(path.join(proposals, 'stable-lesson.SKILL.md')))
+    fs.writeFileSync(path.join(proposals, 'stale.SKILL.md'), 'old')
+    consolidate(h.store.db, h.scope, h.store.fts5, { dryRun: false })
+    assert.equal(
+        fs.existsSync(path.join(proposals, 'stale.SKILL.md')),
+        false,
+        'drafts without an open proposal are pruned',
+    )
+})

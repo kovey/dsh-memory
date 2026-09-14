@@ -82,7 +82,13 @@ export function importMetrics(db: DatabaseSync, scope: MemoryScope): number {
     return rows.length
 }
 
-/** Append one metric row to both the database and the JSONL view. */
+/**
+ * Append one metric row to both the database and the JSONL view.
+ *
+ * The view is upserted by `task_id` rather than appended blindly: the same task
+ * is reported more than once (a session is resumed, a ledger row is refreshed),
+ * and an append-only file grew one line per report for the same task.
+ */
 export function appendMetric(db: DatabaseSync, scope: MemoryScope, metric: TaskMetric): void {
     transact(db, () => {
         db.prepare(
@@ -105,26 +111,106 @@ export function appendMetric(db: DatabaseSync, scope: MemoryScope, metric: TaskM
             metric.tokens ?? null,
         )
     })
+    exportMetrics(db, scope)
+}
+
+/**
+ * Rewrite the JSONL view from the database, deduplicated by `task_id`.
+ *
+ * One line per task: a database row replaces the line it supersedes *in place*
+ * (so the file keeps its history order and produces a one-line diff), rows the
+ * file does not have are appended, and a line whose `task_id` the database does
+ * not know — written by hand, or by another machine's ledger that has not been
+ * imported yet — is kept verbatim. Losing those would turn an export into a
+ * silent delete of somebody else's record.
+ */
+export function exportMetrics(db: DatabaseSync, scope: MemoryScope): number {
     const file = metricsFile(scope)
     assertInsideScope(scope, file)
     ensureDir(path.dirname(file))
-    fs.appendFileSync(file, `${JSON.stringify({ ...metric })}\n`)
+
+    const entries: { taskId?: string; line: string }[] = []
+    const at = new Map<string, number>()
+    for (const line of readLines(file)) {
+        const taskId = taskIdOf(line)
+        const existing = taskId === undefined ? undefined : at.get(taskId)
+        if (existing !== undefined) {
+            // duplicate of a task already in the file: last write wins
+            entries[existing] = { taskId, line }
+            continue
+        }
+        if (taskId !== undefined) at.set(taskId, entries.length)
+        entries.push(taskId === undefined ? { line } : { taskId, line })
+    }
+
+    let written = 0
+    for (const row of db.prepare('SELECT * FROM tasks ORDER BY date ASC, task_id ASC').all()) {
+        const metric = metricOf(row)
+        const taskId = metric['task_id']
+        if (typeof taskId !== 'string') continue
+        const line = JSON.stringify(metric)
+        written += 1
+        const index = at.get(taskId)
+        if (index === undefined) {
+            at.set(taskId, entries.length)
+            entries.push({ taskId, line })
+        } else {
+            entries[index] = { taskId, line }
+        }
+    }
+
+    // An empty ledger is not worth a new file in the memory repository; an
+    // existing one is still truncated so a removed task disappears from the view.
+    if (entries.length === 0 && !fs.existsSync(file)) return written
+    writeAtomic(file, entries.length > 0 ? `${entries.map((entry) => entry.line).join('\n')}\n` : '')
+    return written
 }
 
-/** Rewrite the JSONL view from the database (used by `--rebuild` exports). */
-export function exportMetrics(db: DatabaseSync, scope: MemoryScope): number {
-    const rows = db.prepare('SELECT * FROM tasks ORDER BY date ASC, task_id ASC').all()
-    const file = metricsFile(scope)
-    assertInsideScope(scope, file)
-    const lines = rows.map((row) => {
-        const metric: Record<string, unknown> = {}
-        for (const [key, value] of Object.entries(row)) {
-            metric[key] = value
-        }
-        return JSON.stringify(metric)
-    })
-    writeAtomic(file, lines.length > 0 ? `${lines.join('\n')}\n` : '')
-    return lines.length
+function readLines(file: string): string[] {
+    let text: string
+    try {
+        text = fs.readFileSync(file, 'utf8')
+    } catch {
+        return []
+    }
+    return text
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+}
+
+/** The `task_id` of a ledger line, or undefined when it is not one of ours. */
+function taskIdOf(line: string): string | undefined {
+    try {
+        const parsed: unknown = JSON.parse(line)
+        if (parsed === null || typeof parsed !== 'object') return undefined
+        const taskId = (parsed as TaskMetric).task_id
+        return typeof taskId === 'string' && taskId !== '' ? taskId : undefined
+    } catch {
+        return undefined
+    }
+}
+
+/** Serialize a database row with a stable key order and no empty fields. */
+function metricOf(row: Record<string, unknown>): Record<string, unknown> {
+    const metric: Record<string, unknown> = {}
+    for (const key of [
+        'task_id',
+        'date',
+        'project',
+        'summary',
+        'outcome',
+        'duration_min',
+        'disturb_count',
+        'rework_rounds',
+        'lessons',
+        'tokens',
+    ]) {
+        const value = row[key]
+        if (value === null || value === undefined || value === '') continue
+        metric[key] = value
+    }
+    return metric
 }
 
 export interface MetricSummary {

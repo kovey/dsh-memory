@@ -21,10 +21,27 @@ export interface LessonFrontmatter {
     timesRecalled?: number
     successAfterRecall?: number
     failAfterRecall?: number
+    /**
+     * Compact evidence summary (`tool-failure×2, user-statement×1`), kept as the
+     * raw text so a foreign spelling survives a parse → render round trip.
+     *
+     * Only kinds and counts live in the text view: evidence `detail` is raw tool
+     * output and must never be committed to the memory repository (DESIGN §8
+     * judges quality by the kinds/counts, which is all a rebuild can restore).
+     */
+    evidence?: string
     supersededBy?: string
     created?: string
-    layer?: string
 }
+
+/** One `kind × count` pair of the evidence summary. */
+export interface EvidenceCount {
+    kind: string
+    count: number
+}
+
+/** Ceiling for a count read back from the text view (a hand-edited field). */
+const MAX_EVIDENCE_COUNT = 9999
 
 export interface ParsedLesson {
     frontmatter: LessonFrontmatter
@@ -79,11 +96,58 @@ export function parseLesson(text: string): ParsedLesson | undefined {
     if (supersededBy !== undefined && supersededBy !== '') frontmatter.supersededBy = supersededBy
     const created = fields.get('created')
     if (created !== undefined && created !== '') frontmatter.created = created
-    const layer = fields.get('layer')
-    if (layer !== undefined && layer !== '') frontmatter.layer = layer
+    const evidence = fields.get('evidence')
+    if (evidence !== undefined && evidence !== '') frontmatter.evidence = evidence
     return { frontmatter, body }
 }
 
+/**
+ * Group evidence rows into `kind → count`, most frequent first (ties by kind) so
+ * the rendered field is deterministic and a re-export produces an empty diff.
+ */
+export function countEvidence(evidence: readonly { kind: string }[]): EvidenceCount[] {
+    const counts = new Map<string, number>()
+    for (const item of evidence) counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1)
+    return sortCounts(counts)
+}
+
+/** `tool-failure×2, user-statement×1`; empty when there is nothing to record. */
+export function formatEvidenceSummary(counts: readonly EvidenceCount[]): string {
+    return counts.filter((entry) => entry.count > 0).map((entry) => `${entry.kind}×${entry.count}`).join(', ')
+}
+
+/**
+ * Inverse of `formatEvidenceSummary`. Deliberately tolerant — the field may have
+ * been written by hand or by a future version — and it never throws: an
+ * unrecognized item is dropped rather than failing the whole lesson import.
+ * Accepted shapes: `kind×2`, `kind x 2`, `kind: 2`, `kind*2`, `kind`.
+ */
+export function parseEvidenceSummary(raw: string): EvidenceCount[] {
+    const counts = new Map<string, number>()
+    for (const item of raw.split(/[,;]/)) {
+        const match = /^\s*([A-Za-z][A-Za-z0-9_-]{0,31})\s*(?:[×x*:]\s*)?(\d+)?\s*$/.exec(item)
+        const kind = match?.[1]
+        if (kind === undefined) continue
+        // Clamped, not rejected: a hand-edited `×999999` must not turn into an
+        // unbounded insert loop, and the kind is still worth keeping.
+        const count = Math.min(MAX_EVIDENCE_COUNT, Math.max(1, Number(match?.[2] ?? '1') || 1))
+        counts.set(kind, Math.min(MAX_EVIDENCE_COUNT, (counts.get(kind) ?? 0) + count))
+    }
+    return sortCounts(counts)
+}
+
+function sortCounts(counts: Map<string, number>): EvidenceCount[] {
+    return [...counts.entries()]
+        .map(([kind, count]) => ({ kind, count }))
+        .sort((a, b) => b.count - a.count || (a.kind < b.kind ? -1 : a.kind > b.kind ? 1 : 0))
+}
+
+/**
+ * Render one lesson document. `extras` carries caller-computed fields (for
+ * example the evidence summary built from the store's `evidence` rows) that are
+ * appended after the schema fields; a key already emitted above is skipped so a
+ * field can never appear twice.
+ */
 export function renderLesson(frontmatter: LessonFrontmatter, body: string, extras: Record<string, string> = {}): string {
     const lines: string[] = ['---']
     const values: Record<string, string> = {
@@ -93,25 +157,29 @@ export function renderLesson(frontmatter: LessonFrontmatter, body: string, extra
         times_seen: String(frontmatter.timesSeen),
         updated: frontmatter.updated,
     }
+    const emitted = new Set<string>(LEGACY_ORDER)
     for (const key of LEGACY_ORDER) lines.push(`${key}: ${values[key] ?? ''}`)
-    if (frontmatter.tags !== undefined && frontmatter.tags.length > 0) lines.push(`tags: ${frontmatter.tags.join(', ')}`)
-    if (frontmatter.status !== undefined && frontmatter.status !== 'active') lines.push(`status: ${frontmatter.status}`)
-    if (frontmatter.origin !== undefined && frontmatter.origin !== 'imported') lines.push(`origin: ${frontmatter.origin}`)
-    if (frontmatter.timesRecalled !== undefined && frontmatter.timesRecalled > 0) {
-        lines.push(`times_recalled: ${frontmatter.timesRecalled}`)
+    const optional: [string, string | undefined][] = [
+        ['tags', frontmatter.tags !== undefined && frontmatter.tags.length > 0 ? frontmatter.tags.join(', ') : undefined],
+        ['status', frontmatter.status !== undefined && frontmatter.status !== 'active' ? frontmatter.status : undefined],
+        ['origin', frontmatter.origin !== undefined && frontmatter.origin !== 'imported' ? frontmatter.origin : undefined],
+        ['times_recalled', frontmatter.timesRecalled !== undefined && frontmatter.timesRecalled > 0 ? String(frontmatter.timesRecalled) : undefined],
+        ['success_after_recall', frontmatter.successAfterRecall !== undefined && frontmatter.successAfterRecall > 0 ? String(frontmatter.successAfterRecall) : undefined],
+        ['fail_after_recall', frontmatter.failAfterRecall !== undefined && frontmatter.failAfterRecall > 0 ? String(frontmatter.failAfterRecall) : undefined],
+        ['evidence', frontmatter.evidence !== undefined && frontmatter.evidence !== '' ? frontmatter.evidence : undefined],
+        ['superseded_by', frontmatter.supersededBy !== undefined && frontmatter.supersededBy !== '' ? frontmatter.supersededBy : undefined],
+        ['created', frontmatter.created !== undefined && frontmatter.created !== '' ? frontmatter.created : undefined],
+    ]
+    for (const [key, value] of optional) {
+        if (value === undefined) continue
+        lines.push(`${key}: ${value}`)
+        emitted.add(key)
     }
-    if (frontmatter.successAfterRecall !== undefined && frontmatter.successAfterRecall > 0) {
-        lines.push(`success_after_recall: ${frontmatter.successAfterRecall}`)
+    for (const [key, value] of Object.entries(extras)) {
+        if (emitted.has(key)) continue
+        lines.push(`${key}: ${value}`)
+        emitted.add(key)
     }
-    if (frontmatter.failAfterRecall !== undefined && frontmatter.failAfterRecall > 0) {
-        lines.push(`fail_after_recall: ${frontmatter.failAfterRecall}`)
-    }
-    if (frontmatter.supersededBy !== undefined && frontmatter.supersededBy !== '') {
-        lines.push(`superseded_by: ${frontmatter.supersededBy}`)
-    }
-    if (frontmatter.created !== undefined && frontmatter.created !== '') lines.push(`created: ${frontmatter.created}`)
-    if (frontmatter.layer !== undefined && frontmatter.layer !== '') lines.push(`layer: ${frontmatter.layer}`)
-    for (const [key, value] of Object.entries(extras)) lines.push(`${key}: ${value}`)
     lines.push('---', '', body.trim(), '')
     return lines.join('\n')
 }

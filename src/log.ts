@@ -24,9 +24,6 @@ export function setLogFile(file: string | undefined): void {
     }
 }
 
-export function getLogFile(): string | undefined {
-    return logFile
-}
 
 function rotateIfNeeded(file: string): void {
     try {

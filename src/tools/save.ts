@@ -7,6 +7,7 @@
  * distilled memory cannot diverge in quality rules.
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { appendPreference } from '../learn/profile.js'
 import { log } from '../log.js'
 import { applyDraft } from '../learn/gate.js'
 import type { CandidateDraft } from '../learn/gate.js'
@@ -47,10 +48,45 @@ export function parseTtl(ttl: string | undefined, now = new Date()): string | un
     return /^\d{4}-\d{2}-\d{2}$/.test(ttl.trim()) ? ttl.trim() : undefined
 }
 
+/** The evidence kind the caller passed, before defaults are applied. */
+function evidenceKind0(args: { evidence?: string }): string {
+    return args.evidence ?? 'self-report'
+}
+
 /** Caps that keep a model from bloating the text view or the memory pack. */
 export const MAX_SAVE_BODY_CHARS = 4_000
 export const MAX_SAVE_TITLE_CHARS = 120
 export const MAX_SAVE_TAGS = 8
+
+/**
+ * The one refusal text every write-class tool returns to a subagent
+ * (`routing.subagentWrite` off). Shared verbatim so the model gets the same
+ * explanation no matter which write door it tried.
+ */
+export function subagentWriteRefusal(operation: string): string {
+    return [
+        `refused: ${operation} writes memory, and subagent sessions do not write memory by default (routing.subagentWrite is off).`,
+        'A subagent may search, read and report; saving, archiving, rebuilding, syncing/pushing a memory repo and freezing a baseline stay with the top-level session.',
+        'To allow subagent writes, set routing.subagentWrite=true in the dsh-memory config.',
+    ].join('\n')
+}
+
+/**
+ * `undefined` when `agent` may perform a memory-writing operation, otherwise the
+ * refusal text to return verbatim *before* touching anything.
+ *
+ * Every write door goes through this — `memory_save`, `memory_forget`,
+ * `memory_consolidate` (when it applies), `memory_sync`, `memory_reindex` and
+ * `memory_stats(setBaseline)` — so a subagent hits the same wall on all of them
+ * and can never perform a partial write first.
+ */
+export function refuseWrite(
+    deps: { resolver: ScopeResolver },
+    agent: AgentLike | undefined,
+    operation: string,
+): string | undefined {
+    return deps.resolver.mayWrite(agent) ? undefined : subagentWriteRefusal(operation)
+}
 
 export function saveTool(deps: SaveToolDeps) {
     return defineTool({
@@ -67,8 +103,9 @@ export function saveTool(deps: SaveToolDeps) {
             },
             layer: {
                 type: 'string',
-                enum: ['project', 'global'],
-                description: 'Where to store it. Default: project. Global is only for cross-project toolchain facts.',
+                enum: ['project', 'global', 'profile'],
+                description:
+                    'Where to store it. Default: project. Global is only for cross-project toolchain facts; profile (L5) is for a standing preference the user stated — it is also written to profile/preferences.md and stays resident in the prompt.',
             },
             confidence: { type: 'number', description: '0..1. Verified fixes ≈0.9; observations ≈0.7; guesses ≤0.6.' },
             ttl: { type: 'string', description: '"permanent" (default), "30d"/"180d", or an ISO date.' },
@@ -83,9 +120,8 @@ export function saveTool(deps: SaveToolDeps) {
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
             const agent = exec.agent as unknown as AgentLike | undefined
-            if (!deps.resolver.mayWrite(agent)) {
-                return 'refused: subagent sessions do not author memory (routing.subagentWrite is off)'
-            }
+            const refusal = refuseWrite(deps, agent, '`memory_save`')
+            if (refusal !== undefined) return refusal
             const title = args.title.trim().slice(0, MAX_SAVE_TITLE_CHARS)
             const body = args.body.trim()
             if (title.length < 4) return 'rejected: title is too short to be a useful lesson id'
@@ -99,6 +135,18 @@ export function saveTool(deps: SaveToolDeps) {
             const store = deps.registry.open(scope)
             if (store === undefined) return 'memory store unavailable (SQLite driver missing or memory root unwritable)'
 
+            // L5 (DESIGN §3): a standing preference is *also* written to the
+            // plain-markdown profile layer, which the resident prompt section
+            // reads — that is what makes it effective without being recalled.
+            // Only a user-stated preference belongs here, so require that the
+            // caller says so explicitly.
+            if (args.layer === 'profile') {
+                if (evidenceKind0(args) !== 'user-statement') {
+                    return 'rejected: the profile layer holds standing user preferences — pass evidence="user-statement" (and only when the user actually stated one).'
+                }
+                const file = appendPreference(store.scope, `${title}：${body}`)
+                if (file === undefined) return 'rejected: could not write the profile layer for this scope'
+            }
             const evidenceKind = (args.evidence ?? 'self-report') as EvidenceKind
             const evidence: Evidence[] = [
                 {

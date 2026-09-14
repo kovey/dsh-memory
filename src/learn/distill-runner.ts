@@ -82,15 +82,70 @@ export function optionalJobs(ctx: Context): JobsLike | undefined {
 }
 
 /**
+ * Groups this process is distilling *right now*, keyed by `sessionId\0turn`.
+ *
+ * A distillation call may run for `distillTimeoutMs` and only writes its audit
+ * row at the very end, so for that entire window the group still *looks*
+ * unattempted to `pending.ts`. Without this set a quiet turn in the same process
+ * distils the same signals a second time: two audit rows, `times_seen=2`, and a
+ * confidence the merge path raises without a single new piece of evidence —
+ * exactly the "越学越自信" failure DESIGN §12 warns about.
+ */
+const inFlight = new Map<string, number>()
+
+/** A mark may outlive its (hard-bounded) call by this much before it is stale. */
+const IN_FLIGHT_GRACE_MS = 10_000
+
+function distillationKey(sessionId: string, turn: number): string {
+    return `${sessionId}\u0000${turn}`
+}
+
+/** Mark a group as being distilled; visible to `isDistilling` immediately. */
+export function beginDistillation(sessionId: string, turn: number): void {
+    inFlight.set(distillationKey(sessionId, turn), Date.now())
+}
+
+/** Clear the mark once the attempt settled (audit row written, or the job died). */
+export function endDistillation(sessionId: string, turn: number): void {
+    inFlight.delete(distillationKey(sessionId, turn))
+}
+
+/**
+ * Whether this process is already distilling that group.
+ *
+ * `ttlMs` bounds how long a mark may outlive its distillation: a job that is
+ * killed before its producer ever runs would otherwise hide the group from
+ * recovery for the rest of the process's life.
+ */
+export function isDistilling(sessionId: string, turn: number, ttlMs: number): boolean {
+    const key = distillationKey(sessionId, turn)
+    const at = inFlight.get(key)
+    if (at === undefined) return false
+    if (Date.now() - at <= ttlMs) return true
+    inFlight.delete(key)
+    return false
+}
+
+/** How long an in-flight mark stays trustworthy, derived from the call bound. */
+export function distillInFlightTtlMs(distillTimeoutMs: number): number {
+    return Math.max(0, distillTimeoutMs) + IN_FLIGHT_GRACE_MS
+}
+
+/**
  * Run — or hand off — one turn's distillation according to
  * `learn.distillRunner`. Never throws: a failing job submission falls back to
  * the inline path.
+ *
+ * Both runners mark the group in flight for as long as it is being distilled —
+ * for the jobs path that starts *before* `jobs.start`, because the job's own LLM
+ * call is what makes the group look unattempted.
  */
 export async function runDistillation(deps: RunnerDeps, request: RunnerRequest): Promise<RunnerResult> {
     const mode = request.mode ?? deps.config.learn.distillRunner
     if (mode === 'jobs') {
         const jobs = optionalJobs(deps.ctx)
         if (jobs !== undefined) {
+            beginDistillation(request.sessionId, request.turn)
             try {
                 const jobId = jobs.start({
                     kind: 'memory-distill',
@@ -100,17 +155,23 @@ export async function runDistillation(deps: RunnerDeps, request: RunnerRequest):
                 })
                 return { mode: 'jobs', jobId }
             } catch (error) {
+                endDistillation(request.sessionId, request.turn)
                 log('warn', 'memory: job submission failed, falling back to inline distillation:', error)
             }
         } else {
             log('debug', 'memory: ctx.jobs unavailable — distilling inline')
         }
     }
-    const outcome = await distillTurn(
-        { ctx: deps.ctx, config: deps.config, registry: deps.registry, resolver: deps.resolver, state: deps.state },
-        request,
-    )
-    return { mode: 'inline', outcome }
+    beginDistillation(request.sessionId, request.turn)
+    try {
+        const outcome = await distillTurn(
+            { ctx: deps.ctx, config: deps.config, registry: deps.registry, resolver: deps.resolver, state: deps.state },
+            request,
+        )
+        return { mode: 'inline', outcome }
+    } finally {
+        endDistillation(request.sessionId, request.turn)
+    }
 }
 
 /** Producer hooks for one distillation job. */
@@ -135,6 +196,10 @@ function startJob(deps: RunnerDeps, request: RunnerRequest): {
             status: 'failed' as const,
             detail: error instanceof Error ? error.message : String(error),
         }))
+        // A cancelled or crashed job must stop hiding its group from recovery.
+        .finally(() => {
+            endDistillation(request.sessionId, request.turn)
+        })
     return {
         cancel: (reason?: string) => {
             log('debug', `memory: distillation job cancelled${reason !== undefined ? ` (${reason})` : ''}`)

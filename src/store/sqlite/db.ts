@@ -108,6 +108,21 @@ export function migrate(db: DatabaseSync, fts5: boolean): void {
         }
     }
     if (needsV2) {
+        // Order matters: `backfillCjk` UPDATEs every row, and with an *empty*
+        // external-content FTS index the update triggers the `'delete'` command
+        // against rows the index never had — node:sqlite then reports
+        // `database disk image is malformed` (errcode 267) and the database can
+        // never be opened again. Filling the index first (or dropping it) makes
+        // the same UPDATE harmless.
+        if (fts5) {
+            try {
+                db.exec('DROP TABLE IF EXISTS records_fts')
+                db.exec(FTS_SQL)
+                db.exec(FTS_REBUILD_SQL)
+            } catch (error) {
+                log('warn', 'memory: preparing the FTS index before backfill failed:', error)
+            }
+        }
         backfillCjk(db)
         rebuildFts(db, fts5)
     }

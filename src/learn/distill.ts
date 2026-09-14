@@ -132,9 +132,20 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
     const skip: DistillOutcome = { status: 'skipped', created: 0, merged: 0, rejected: 0, tokensIn: 0, tokensOut: 0, recordIds: [] }
     const gate = distillAllowed(deps, request)
     if (!gate.allowed) {
+        // Nothing was attempted and nothing was spent, so deliberately *no* audit
+        // row: `pending.ts` reads "no audit row" as "still owed a distillation"
+        // and a later turn (with budget, a route, a non-subagent session) may
+        // still do it. Skipping the gate is the only way a turn stays pending.
         log('debug', `memory: distillation skipped (${gate.reason ?? 'unknown'})`)
         return { ...skip, reason: gate.reason }
     }
+    // Past this point the turn is an *attempt*: `pending.ts` promises that a
+    // group is picked up at most until it produces its first attempt, and that
+    // promise is kept by writing exactly one audit row for every exit from the
+    // model call onwards — including a throw from the write loop. A missing row
+    // means the next quiet turn distils (and pays for) the same signals again.
+    // The three service guards just below issue no call at all, so they leave
+    // the group pending instead of settling it with an empty row.
     const store = deps.registry.open(deps.resolver.resolve({ agent: request.agent }))
     if (store === undefined) return { ...skip, reason: 'memory store unavailable' }
     const llm = optionalLlm(deps.ctx)
@@ -148,7 +159,16 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
         return { ...skip, reason: 'no model route available' }
     }
 
-    const prompt = buildPrompt(request)
+    let tokensIn = 0
+    let tokensOut = 0
+    let audited = false
+    /** The write is once-per-attempt even when several exits race to report it. */
+    const auditOnce = (created: number, timedOut: boolean): void => {
+        if (audited) return
+        audited = true
+        audit(store.db, request, `${route.provider}/${route.model}`, tokensIn, tokensOut, created, timedOut)
+    }
+
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), deps.config.learn.distillTimeoutMs)
     const external = request.signal
@@ -166,120 +186,135 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
     let finishNote: string | undefined
     const callStartedAt = Date.now()
     try {
-        const assembler = new BlockAssembler()
-        const stream = llm.stream({
-            provider: route.provider,
-            model: route.model,
-            messages: [
-                createUserMessage({
-                    content: [{ type: 'text', text: prompt }],
-                    source: { kind: 'plugin', plugin: 'dsh-memory', form: 'notice', summary: '记忆蒸馏输入' },
-                }),
-            ],
-            system: SYSTEM_PROMPT,
-            maxTokens: deps.config.learn.distillMaxTokens,
-            ...(deps.config.learn.distillReasoningEffort !== ''
-                ? { reasoningEffort: ReasoningEffortId(deps.config.learn.distillReasoningEffort) }
-                : {}),
-            // The route field is branded by the harness; the value is the raw id.
-            sessionId: request.sessionId as unknown as NonNullable<GenerateOptions['sessionId']>,
-            signal: controller.signal,
-        })
-        for await (const chunk of stream) assembler.push(chunk)
-        // The runtime normalizes an adapter failure into a terminal `finish`
-        // chunk instead of throwing, so an empty answer must be diagnosed from
-        // the finish reason or it looks like "the model said nothing".
-        const finish: unknown = assembler.finish
-        // Our own deadline aborts the call; the runtime reports that as a
-        // terminal `aborted` finish rather than a throw, so the timeout has to
-        // be recognized here too.
-        if (controller.signal.aborted) timedOut = true
-        const finishKind =
-            finish !== null && typeof finish === 'object' && 'kind' in finish
-                ? String((finish as { kind?: unknown }).kind)
-                : String(finish)
-        if (finishKind !== 'stop') {
-            const failure =
-                finish !== null && typeof finish === 'object' && 'failure' in finish
-                    ? (finish as { failure?: { code?: string; message?: string } }).failure
-                    : undefined
-            finishNote =
-                finishKind === 'max-tokens'
-                    ? `model hit maxTokens ${deps.config.learn.distillMaxTokens} (reasoning tokens count) — raise learn.distillMaxTokens`
-                    : `${finishKind}${failure !== undefined ? `: ${failure.code ?? ''} ${failure.message ?? ''}`.trimEnd() : ''}`
-            log('warn', `memory: distillation model call ended with ${finishNote}`)
+        // Inside the attempt guard: even building the prompt cannot escape
+        // without settling the group.
+        const prompt = buildPrompt(request)
+        tokensIn = estimateTokens(prompt) + estimateTokens(SYSTEM_PROMPT)
+        try {
+            const assembler = new BlockAssembler()
+            const stream = llm.stream({
+                provider: route.provider,
+                model: route.model,
+                messages: [
+                    createUserMessage({
+                        content: [{ type: 'text', text: prompt }],
+                        source: { kind: 'plugin', plugin: 'dsh-memory', form: 'notice', summary: '记忆蒸馏输入' },
+                    }),
+                ],
+                system: SYSTEM_PROMPT,
+                maxTokens: deps.config.learn.distillMaxTokens,
+                ...(deps.config.learn.distillReasoningEffort !== ''
+                    ? { reasoningEffort: ReasoningEffortId(deps.config.learn.distillReasoningEffort) }
+                    : {}),
+                // The route field is branded by the harness; the value is the raw id.
+                sessionId: request.sessionId as unknown as NonNullable<GenerateOptions['sessionId']>,
+                signal: controller.signal,
+            })
+            for await (const chunk of stream) assembler.push(chunk)
+            // The runtime normalizes an adapter failure into a terminal `finish`
+            // chunk instead of throwing, so an empty answer must be diagnosed from
+            // the finish reason or it looks like "the model said nothing".
+            const finish: unknown = assembler.finish
+            // Our own deadline aborts the call; the runtime reports that as a
+            // terminal `aborted` finish rather than a throw, so the timeout has to
+            // be recognized here too.
+            if (controller.signal.aborted) timedOut = true
+            const finishKind =
+                finish !== null && typeof finish === 'object' && 'kind' in finish
+                    ? String((finish as { kind?: unknown }).kind)
+                    : String(finish)
+            if (finishKind !== 'stop') {
+                const failure =
+                    finish !== null && typeof finish === 'object' && 'failure' in finish
+                        ? (finish as { failure?: { code?: string; message?: string } }).failure
+                        : undefined
+                finishNote =
+                    finishKind === 'max-tokens'
+                        ? `model hit maxTokens ${deps.config.learn.distillMaxTokens} (reasoning tokens count) — raise learn.distillMaxTokens`
+                        : `${finishKind}${failure !== undefined ? `: ${failure.code ?? ''} ${failure.message ?? ''}`.trimEnd() : ''}`
+                log('warn', `memory: distillation model call ended with ${finishNote}`)
+            }
+            text = assembler
+                .blocks()
+                .filter((block) => block.type === 'text')
+                .map((block) => block.text)
+                .join('\n')
+        } catch (error) {
+            timedOut = controller.signal.aborted
+            log('warn', `memory: distillation ${timedOut ? 'timed out' : 'failed'}:`, error)
+        } finally {
+            clearTimer()
         }
-        text = assembler
-            .blocks()
-            .filter((block) => block.type === 'text')
-            .map((block) => block.text)
-            .join('\n')
-    } catch (error) {
-        timedOut = controller.signal.aborted
-        log('warn', `memory: distillation ${timedOut ? 'timed out' : 'failed'}:`, error)
-    } finally {
-        clearTimer()
-    }
 
-    const tokensIn = estimateTokens(prompt) + estimateTokens(SYSTEM_PROMPT)
-    const tokensOut = estimateTokens(text)
-    deps.state.chargeDistill(request.sessionId, tokensIn + tokensOut)
+        tokensOut = estimateTokens(text)
+        deps.state.chargeDistill(request.sessionId, tokensIn + tokensOut)
 
-    if (text.trim() === '') {
-        audit(store.db, request, `${route.provider}/${route.model}`, tokensIn, tokensOut, 0, timedOut)
-        const reason = timedOut
-            ? `distillation timed out after ${Date.now() - callStartedAt}ms (limit ${deps.config.learn.distillTimeoutMs}ms)`
-            : (finishNote ?? 'model returned no text')
-        log('warn', `memory: distillation produced nothing (${reason})`)
+        if (text.trim() === '') {
+            auditOnce(0, timedOut)
+            const reason = timedOut
+                ? `distillation timed out after ${Date.now() - callStartedAt}ms (limit ${deps.config.learn.distillTimeoutMs}ms)`
+                : (finishNote ?? 'model returned no text')
+            log('warn', `memory: distillation produced nothing (${reason})`)
+            return {
+                ...skip,
+                status: timedOut ? 'timeout' : 'error',
+                tokensIn,
+                tokensOut,
+                reason,
+            }
+        }
+
+        const candidates = parseCandidates(text)
+        const evidence = evidenceFromSignals(request.signals)
+        let created = 0
+        let merged = 0
+        let rejected = 0
+        const recordIds: string[] = []
+        for (const candidate of candidates) {
+            const draft: CandidateDraft = {
+                title: candidate.title,
+                body: candidate.body,
+                confidence: candidateConfidence(candidate.confidence, evidence.length),
+                tags: candidate.tags,
+                evidence,
+                origin: 'distilled',
+                source: { sessionId: request.sessionId, turn: request.turn },
+            }
+            const result = applyDraft(store.db, store.scope, store.fts5, draft)
+            if (result.action === 'reject') rejected += 1
+            else {
+                recordIds.push(result.recordId)
+                if (result.action === 'merge') merged += 1
+                else created += 1
+            }
+        }
+        auditOnce(created + merged, timedOut)
+        if (created + merged > 0) {
+            deps.registry.exportScope(store.scope)
+            log(
+                'info',
+                `memory: distilled ${created} new + ${merged} merged record(s) from turn ${request.turn} via ${route.provider}/${route.model}`,
+            )
+        }
         return {
-            ...skip,
-            status: timedOut ? 'timeout' : 'error',
+            status: created > 0 ? 'created' : merged > 0 ? 'merged' : 'rejected',
+            created,
+            merged,
+            rejected,
             tokensIn,
             tokensOut,
-            reason,
+            recordIds,
         }
-    }
-
-    const candidates = parseCandidates(text)
-    const evidence = evidenceFromSignals(request.signals)
-    let created = 0
-    let merged = 0
-    let rejected = 0
-    const recordIds: string[] = []
-    for (const candidate of candidates) {
-        const draft: CandidateDraft = {
-            title: candidate.title,
-            body: candidate.body,
-            confidence: candidateConfidence(candidate.confidence, evidence.length),
-            tags: candidate.tags,
-            evidence,
-            origin: 'distilled',
-            source: { sessionId: request.sessionId, turn: request.turn },
-        }
-        const result = applyDraft(store.db, store.scope, store.fts5, draft)
-        if (result.action === 'reject') rejected += 1
-        else {
-            recordIds.push(result.recordId)
-            if (result.action === 'merge') merged += 1
-            else created += 1
-        }
-    }
-    audit(store.db, request, `${route.provider}/${route.model}`, tokensIn, tokensOut, created + merged, timedOut)
-    if (created + merged > 0) {
-        deps.registry.exportScope(store.scope)
-        log(
-            'info',
-            `memory: distilled ${created} new + ${merged} merged record(s) from turn ${request.turn} via ${route.provider}/${route.model}`,
-        )
-    }
-    return {
-        status: created > 0 ? 'created' : merged > 0 ? 'merged' : 'rejected',
-        created,
-        merged,
-        rejected,
-        tokensIn,
-        tokensOut,
-        recordIds,
+    } catch (error) {
+        // Anything that escaped the write loop still settles the attempt:
+        // `created_count: 0` (the loop never finished) and an `error` outcome,
+        // rather than no audit row at all — a missing row would let the next
+        // recovery pass distil (and pay for) the same signals again.
+        clearTimer()
+        auditOnce(0, timedOut)
+        const reason = error instanceof Error ? error.message : String(error)
+        log('warn', 'memory: distillation attempt failed:', error)
+        return { ...skip, status: 'error', tokensIn, tokensOut, reason }
     }
 }
 

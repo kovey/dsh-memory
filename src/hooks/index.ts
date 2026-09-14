@@ -163,6 +163,14 @@ export function registerHooks(ctx: Context, deps: HookDeps): HookHandle {
                     )
                 }
             }
+            // Bounded resources (DESIGN §5.2): a long-lived host opening many
+            // project roots must not keep every connection.
+            try {
+                const released = deps.registry.closeIdle(deps.config.sqlite.maxOpenRoots)
+                if (released.length > 0) log('debug', `memory: released ${released.length} idle store(s)`)
+            } catch (error) {
+                log('debug', 'memory: idle store release failed:', error)
+            }
             deps.state.forget(session.id)
             deps.signals.forget(session.id)
             deps.ledger.forget(session.id)

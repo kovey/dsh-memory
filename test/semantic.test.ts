@@ -419,3 +419,104 @@ test('a semantic-only hit is admitted by minSimilarity, not by the lexical score
         `the semantically-near lesson must survive the lexical floor, got ${outcome.hits.map((hit) => hit.record.id).join(',')}`,
     )
 })
+
+// ---- audit fixes ------------------------------------------------------------
+
+test('the embedding budget covers the whole run, not each batch', async () => {
+    let calls = 0
+    const slow: typeof fetch = async (_input, init) => {
+        calls += 1
+        await new Promise((resolve) => setTimeout(resolve, 60))
+        const body = JSON.parse(String(init?.body ?? '{}')) as { input?: string[] }
+        return new Response(
+            JSON.stringify({ data: (body.input ?? []).map(() => ({ embedding: [1, 0, 0] })) }),
+            { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+    }
+    const provider = createRemoteProvider({
+        baseUrl: 'http://fake/v1',
+        model: 'm',
+        timeoutMs: 5_000,
+        budgetMs: 120,
+        batchSize: 1,
+        fetchImpl: slow,
+    })
+    const started = Date.now()
+    const vectors = await provider.embed(['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])
+    const elapsed = Date.now() - started
+    assert.ok(elapsed < 1_000, `the run must stop at its budget, took ${elapsed}ms`)
+    assert.ok(calls < 8, `not every batch may be attempted (calls=${calls})`)
+    assert.ok(vectors === undefined || vectors.length >= 1, 'partial work is returned rather than discarded')
+})
+
+test('an already-aborted signal never reaches the network', async () => {
+    let calls = 0
+    const provider = createRemoteProvider({
+        baseUrl: 'http://fake/v1',
+        model: 'm',
+        timeoutMs: 1_000,
+        fetchImpl: async () => {
+            calls += 1
+            return new Response(JSON.stringify({ data: [{ embedding: [1, 0, 0] }] }), { status: 200 })
+        },
+    })
+    const controller = new AbortController()
+    controller.abort()
+    const vectors = await provider.embed(['x'], controller.signal)
+    assert.equal(calls, 0, 'no request may be sent after cancellation')
+    assert.equal(vectors, undefined)
+    assert.match(String(provider.lastError()), /abort/i)
+})
+
+test('vectors from a different embedding space are ignored, never compared', async (t) => {
+    // Same model name, different dimension (an endpoint changed behind it): the
+    // old code compared prefixes with min-length cosine and returned a number.
+    assert.equal(cosine(new Float32Array([1, 0, 0, 0]), new Float32Array([1, 0])), 0)
+
+    const module_ = await loadSqliteModule()
+    if (module_ === undefined) return
+    const h = await harness(t)
+    saveVectors(h.store.db, 'm', [
+        { recordId: 'right-dim', vector: [1, 0, 0], hash: 'h-right' },
+        { recordId: 'wrong-dim', vector: [1, 0], hash: 'h-wrong' },
+    ])
+    const loaded = loadVectors(h.store.db, 'm', 3)
+    assert.deepEqual([...loaded.keys()], ['right-dim'])
+    assert.equal(loadVectors(h.store.db, 'm').size, 2, 'without an expected dimension everything loads')
+})
+
+test('the query cache is keyed by the embedded text, not a term prefix', async (t) => {
+    const h = await harness(t, { enabled: true, provider: 'remote', baseUrl: 'http://fake', model: 'fake-embed', minLexicalHits: 99 })
+    const provider = fakeProvider()
+    const cache = new QueryVectorCache()
+    const first = 'a'.repeat(30) + ' 第一个查询'
+    const second = 'a'.repeat(30) + ' 第二个查询'
+    const results = [
+        await semanticRecall({ config: h.config, registry: h.registry, provider, cache }, h.store, first, 0),
+        await semanticRecall({ config: h.config, registry: h.registry, provider, cache }, h.store, second, 0),
+    ]
+    assert.equal(results.filter((outcome) => outcome.used).length, 2)
+    assert.ok(provider.calls >= 2, 'two different queries must not share one cached vector')
+})
+
+test('maxAdditions caps the whole query, not each root', async (t) => {
+    const h = await harness(t, { enabled: true, provider: 'remote', baseUrl: 'http://fake', model: 'fake-embed', minLexicalHits: 99, maxAdditions: 1 })
+    const provider = fakeProvider()
+    // a second root (global) with its own semantically-near record
+    const global = h.registry.open(h.resolver.globalScope())
+    assert.ok(global)
+    upsertRecord(
+        global.db,
+        materialize({ title: 'global near', body: '无 TTY 环境下 pnpm 安装会中止，用 CI=true 重试。', layer: 'global', scopeKind: 'global', confidence: 0.9 }),
+    )
+    await ensureEmbeddings(global.db, provider, 'fake-embed', { limit: -1 })
+    upsertRecord(
+        h.store.db,
+        materialize({ title: 'project near', body: '无 TTY 环境下 pnpm 安装会中止，用 CI=true 重试。', layer: 'project', scopeKind: 'project', repo: h.repo, confidence: 0.9 }),
+    )
+    const outcome = await recall(
+        { config: h.config, registry: h.registry, resolver: h.resolver, semantic: { provider, cache: new QueryVectorCache() } },
+        { agent: h.agent, terms: ['终端环境依赖'], text: '怎么在没有终端的环境装依赖', minScore: 0 },
+    )
+    assert.ok((outcome.semantic?.semanticOnly ?? 0) <= 1, `expected at most 1 addition across roots, got ${outcome.semantic?.semanticOnly}`)
+})

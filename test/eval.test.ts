@@ -19,11 +19,15 @@ import {
     windowSummary,
 } from '../lib/eval/baseline.js'
 import { clearRepoCache } from '../lib/paths.js'
+import { setLogFile } from '../lib/log.js'
 import { ScopeResolver } from '../lib/scope/resolver.js'
 import { loadSqliteModule } from '../lib/store/sqlite/db.js'
 import { StoreRegistry } from '../lib/store/store.js'
+import { AutoCommitter } from '../lib/sync/autocommit.js'
+import { consolidateTool, forgetTool } from '../lib/tools/consolidate.js'
 import { statsTool } from '../lib/tools/stats.js'
-import { fakeRepo, memoryFixture, useGlobalMemoryHome } from './helpers.ts'
+import { syncTool } from '../lib/tools/sync.js'
+import { fakeRepo, memoryFixture, tempDir, useGlobalMemoryHome } from './helpers.ts'
 
 const BASELINE_DOC = `# 任务回放基准 (Baseline)
 
@@ -133,8 +137,10 @@ test('metrics snapshot, freeze and reload round-trip', async (t) => {
 
 test('the gate passes on ties and improvements, fails on regressions', () => {
     const base = { at: '2026-09-01T00:00:00.000Z', tasks: 4, successRate: 0.8, avgDuration: 100, avgDisturb: 1, avgRework: 1 }
-    assert.equal(evaluateGate(base, undefined).verdict, 'no-baseline')
-    assert.equal(evaluateGate(base, { ...base, tasks: 0 }).verdict, 'no-baseline')
+    assert.equal(evaluateGate(base, undefined).verdict, 'unknown')
+    assert.equal(evaluateGate(base, undefined).unknownReason, 'no-baseline')
+    assert.equal(evaluateGate(base, { ...base, tasks: 0 }).verdict, 'unknown')
+    assert.equal(evaluateGate(base, { ...base, tasks: 0 }).unknownReason, 'no-baseline')
     assert.equal(evaluateGate({ ...base, tasks: 8 }, base).verdict, 'pass')
 
     const dropSuccess = evaluateGate({ ...base, tasks: 8, successRate: 0.5 }, base)
@@ -153,6 +159,53 @@ test('the gate passes on ties and improvements, fails on regressions', () => {
     assert.equal(evaluateGate({ ...base, tasks: 8, successRate: 0.78, avgDuration: 108, avgDisturb: 1.2 }, base).verdict, 'pass')
     const unknown = evaluateGate({ ...base, tasks: 8, avgDuration: null }, base)
     assert.equal(unknown.comparisons.find((item) => item.metric === 'avgDuration')?.verdict, 'unknown')
+})
+
+test('the gate is three-state: no comparable data is UNKNOWN, never PASS', () => {
+    const empty = {
+        at: '2026-09-01T00:00:00.000Z',
+        tasks: 3,
+        successRate: null,
+        avgDuration: null,
+        avgDisturb: null,
+        avgRework: null,
+    }
+    // a baseline that exists but carries no metric at all
+    const allNull = evaluateGate(empty, { ...empty, tasks: 2 })
+    assert.equal(allNull.verdict, 'unknown', 'four null metrics must not read as a pass')
+    assert.equal(allNull.unknownReason, 'no-comparable-metrics')
+    assert.deepEqual(allNull.regressed, [])
+    assert.ok(allNull.comparisons.every((item) => item.verdict === 'unknown'))
+    assert.equal(allNull.baseline?.tasks, 2)
+
+    // a current window with no metrics yet, against a full baseline: same state
+    const noCurrentData = evaluateGate({ ...empty, tasks: 9 }, { ...empty, tasks: 2, successRate: 0.8, avgDuration: 100 })
+    assert.equal(noCurrentData.verdict, 'unknown')
+    assert.equal(noCurrentData.unknownReason, 'no-comparable-metrics')
+
+    // one comparable metric is enough to decide — and only if it does not regress
+    const oneMetric = { ...empty, tasks: 4, successRate: 0.9 }
+    assert.equal(evaluateGate({ ...oneMetric, tasks: 8 }, oneMetric).verdict, 'pass')
+    assert.equal(evaluateGate({ ...oneMetric, tasks: 8, successRate: 1 }, oneMetric).verdict, 'pass')
+    assert.equal(evaluateGate({ ...oneMetric, tasks: 8, successRate: 0.5 }, oneMetric).verdict, 'regression')
+})
+
+test('the rendered gate prints UNKNOWN（无数据）rather than PASS when nothing is comparable', async (t) => {
+    const h = await harness(t)
+    h.store.db
+        .prepare('INSERT INTO baseline_snapshots (at, scope, tasks, success_rate, avg_duration, avg_disturb, avg_rework, note) VALUES (?,?,?,?,?,?,?,?)')
+        .run('2026-09-01T00:00:00.000Z', 'project:demo', 2, null, null, null, null, null)
+    const gate = evaluateGate(snapshotMetrics(h.store.db), latestBaseline(h.store.db))
+    assert.equal(gate.verdict, 'unknown')
+    const trend = { current: windowSummary(h.store.db, 30), previous: windowSummary(h.store.db, 30, 30) }
+    const text = renderEvaluation(gate, healthDigest(h.store.db), trend, []).join('\n')
+    assert.match(text, /verdict: UNKNOWN（无数据）/)
+    assert.doesNotMatch(text, /PASS/)
+
+    // the tool surface says the same thing
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(report, /verdict: UNKNOWN（无数据）/)
+    assert.doesNotMatch(report, /PASS/)
 })
 
 test('success rate ignores tasks with no outcome and reports n/a without data', async (t) => {
@@ -230,7 +283,11 @@ test('memory_stats freezes a baseline and then reports the regression', async (t
     fs.writeFileSync(path.join(h.scope.root, 'baseline.md'), BASELINE_DOC)
 
     const tool = statsTool(h.deps)
-    const frozen = String(await tool.execute({ setBaseline: true, note: 'good week' } as never, { agent: h.agent } as never))
+    const frozen = String(
+        await tool.execute({ setBaseline: true, baselineReason: 'user asked after a good week', note: 'good week' } as never, {
+            agent: h.agent,
+        } as never),
+    )
     assert.match(frozen, /baseline frozen: 1 task/)
     assert.match(frozen, /verdict: PASS/)
 
@@ -243,4 +300,109 @@ test('memory_stats freezes a baseline and then reports the regression', async (t
 
     const readBack = readBaseline(h.scope)
     assert.equal(readBack?.tasks.length, 2)
+})
+
+// ---- baseline freezing is a human-review step --------------------------------
+
+test('memory_stats refuses setBaseline without a reason, and refuses subagents entirely', async (t) => {
+    const h = await harness(t)
+    insertTask(h.store.db, { id: 'good', date: '2026-09-01', outcome: 'success' })
+    const tool = statsTool(h.deps)
+    const snapshots = (): unknown => h.store.db.prepare('SELECT COUNT(*) AS n FROM baseline_snapshots').get()?.['n']
+
+    const noReason = String(await tool.execute({ setBaseline: true } as never, { agent: h.agent } as never))
+    assert.match(noReason, /refused/)
+    assert.match(noReason, /human-review/)
+    assert.match(noReason, /baselineReason/)
+    assert.equal(snapshots(), 0, 'a refused freeze must not write a snapshot')
+
+    const blankReason = String(
+        await tool.execute({ setBaseline: true, baselineReason: '   ' } as never, { agent: h.agent } as never),
+    )
+    assert.match(blankReason, /refused/)
+    assert.equal(snapshots(), 0)
+
+    const subagent = { session: { id: 'm5-sub', header: { cwd: h.repo, origin: 'subagent' } } }
+    const asSubagent = String(
+        await tool.execute({ setBaseline: true, baselineReason: 'the subagent felt like it' } as never, {
+            agent: subagent,
+        } as never),
+    )
+    assert.match(asSubagent, /refused/)
+    assert.match(asSubagent, /subagentWrite/)
+    assert.equal(snapshots(), 0, 'a subagent must not freeze the gate reference')
+
+    // reading the report is still allowed for the same subagent
+    const readOnly = String(await tool.execute({} as never, { agent: subagent } as never))
+    assert.doesNotMatch(readOnly, /refused/)
+})
+
+test('a permitted freeze is logged with its reason and the calling session id', async (t) => {
+    const h = await harness(t)
+    insertTask(h.store.db, { id: 'good', date: '2026-09-01', outcome: 'success' })
+    const logFile = path.join(tempDir('m5-log'), 'memory.log')
+    setLogFile(logFile)
+
+    const output = String(
+        await statsTool(h.deps).execute(
+            { setBaseline: true, baselineReason: 'user: 冻结基线，M5 验收通过' } as never,
+            { agent: h.agent } as never,
+        ),
+    )
+    assert.match(output, /baseline frozen: 1 task/)
+    assert.match(output, /reason: user: 冻结基线，M5 验收通过/)
+    assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM baseline_snapshots').get()?.['n'], 1)
+
+    const logged = fs.readFileSync(logFile, 'utf8')
+    assert.match(logged, /baseline frozen/)
+    assert.match(logged, /session m5/, 'the log must name the calling session')
+    assert.match(logged, /user: 冻结基线，M5 验收通过/, 'the log must carry the reason')
+})
+
+// ---- write authorization for subagent sessions -------------------------------
+
+test('a subagent cannot archive, reindex or sync memory, and nothing is written', async (t) => {
+    const h = await harness(t)
+    const now = new Date().toISOString()
+    h.store.db
+        .prepare('INSERT INTO records (id, layer, scope_kind, title, body, tags, confidence, times_seen, status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)')
+        .run('keep-me', 'project', 'project', 'a lesson', 'body', '[]', 0.9, 1, 'active', now, now)
+    const subagent = { session: { id: 'm5-sub', header: { cwd: h.repo, origin: 'subagent' } } }
+    const statusOf = (): unknown => h.store.db.prepare('SELECT status FROM records WHERE id = ?').get('keep-me')?.['status']
+
+    const forget = forgetTool({ config: h.resolved, registry: h.registry, resolver: h.resolver })
+    const refused = String(await forget.execute({ id: 'keep-me', reason: 'subagent tries to archive' } as never, { agent: subagent } as never))
+    assert.match(refused, /refused/)
+    assert.match(refused, /subagent sessions do not write memory by default/)
+    assert.match(refused, /routing\.subagentWrite/)
+    assert.equal(statusOf(), 'active', 'a refused forget must leave the record untouched')
+    assert.ok(!fs.existsSync(path.join(h.scope.root, 'archive', 'lessons', 'keep-me.md')))
+
+    const consolidate = consolidateTool({ config: h.resolved, registry: h.registry, resolver: h.resolver })
+    const applied = String(await consolidate.execute({ dryRun: false } as never, { agent: subagent } as never))
+    assert.match(applied, /refused/)
+    const decided = String(await consolidate.execute({ acceptProposal: 'keep-me' } as never, { agent: subagent } as never))
+    assert.match(decided, /refused/)
+    assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM consolidate_runs').get()?.['n'], 0, 'no pass may have run')
+    // the read-only shapes of the same tool stay available to a subagent
+    const dryRun = String(await consolidate.execute({} as never, { agent: subagent } as never))
+    assert.doesNotMatch(dryRun, /refused/)
+    const proposals = String(await consolidate.execute({ listProposals: true } as never, { agent: subagent } as never))
+    assert.doesNotMatch(proposals, /refused/)
+
+    const sync = syncTool({
+        config: h.resolved,
+        registry: h.registry,
+        resolver: h.resolver,
+        committer: new AutoCommitter(h.resolved),
+    })
+    const syncRefused = String(await sync.execute({ push: true } as never, { agent: subagent } as never))
+    assert.match(syncRefused, /refused/)
+    assert.ok(!fs.existsSync(path.join(h.scope.root, '.git')), 'a refused sync must not even git-init the memory root')
+
+    // the same write from the top-level session still goes through
+    const allowed = String(await forget.execute({ id: 'keep-me', reason: 'user asked to retire it' } as never, { agent: h.agent } as never))
+    assert.doesNotMatch(allowed, /refused/)
+    assert.match(allowed, /retired: keep-me/)
+    assert.equal(statusOf(), 'archived')
 })

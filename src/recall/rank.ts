@@ -83,9 +83,23 @@ export function usageBoost(successAfterRecall: number, failAfterRecall: number):
     return Math.max(0.7, Math.min(1.3, 1 + 0.15 * ratio))
 }
 
-/** Frequency: repeated observations are more trustworthy, with diminishing returns. */
-export function recallBoost(timesSeen: number): number {
-    return 1 + 0.05 * Math.min(Math.max(timesSeen, 1), 10)
+/**
+ * Frequency: repeated observations are more trustworthy, with diminishing
+ * returns. DESIGN §6 budgets one 0.05 coefficient across the two history
+ * factors, so each takes half — the maximum combined boost is unchanged.
+ */
+export function frequencyBoost(timesSeen: number): number {
+    return 1 + 0.025 * Math.min(Math.max(timesSeen, 1), 10)
+}
+
+/**
+ * History: a record that has actually been recalled (and survived) is worth more
+ * than one that merely exists. This is the factor DESIGN §6 calls
+ * `times_recalled` — it used to be fed `times_seen`, so the recall history that
+ * the usage table records never influenced ranking at all.
+ */
+export function recallBoost(timesRecalled: number): number {
+    return 1 + 0.025 * Math.min(Math.max(timesRecalled, 0), 10)
 }
 
 /**
@@ -116,10 +130,11 @@ export function scoreRecord(record: MemoryRecord, options: RankOptions = {}): Sc
     const confidence = 0.5 + 0.5 * clamp01(record.confidence)
     const fresh = freshness(record.updatedAt, now, options.freshnessHalfLifeDays ?? 120)
     const layerWeight = options.layerWeights?.[record.layer] ?? LAYER_WEIGHT[record.layer] ?? 1
-    const frequency = recallBoost(record.timesSeen)
+    const frequency = frequencyBoost(record.timesSeen)
+    const history = recallBoost(record.timesRecalled)
     const usage = usageBoost(record.successAfterRecall, record.failAfterRecall)
     const lexical = lexicalBoost(record, options.queryTerms)
-    const score = relevance * confidence * fresh * layerWeight * frequency * usage * lexical
+    const score = relevance * confidence * fresh * layerWeight * frequency * history * usage * lexical
     return {
         record,
         score,

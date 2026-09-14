@@ -72,6 +72,8 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
     const merged: { item: ScoredRecord; scope: MemoryScope }[] = []
     /** Records admitted by semantic similarity alone (their id set). */
     const semanticOnlyIds = new Set<string>()
+    /** Semantic-only candidates across every root, capped once per query. */
+    const semanticCandidates: { id: string; score: number }[] = []
     let considered = 0
     let semanticUsed = false
     let semanticEmbedded = 0
@@ -102,28 +104,15 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
                     deps.config.semantic.weight,
                     deps.config.semantic.minSimilarity,
                 )
-                // Semantic-only finds are the whole point (lexical missed them),
-                // but unbounded they pad every pack: keep the best few.
-                const cap = deps.config.semantic.maxAdditions
-                let kept = 0
-                const bounded = new Map<string, number>()
-                const additions = blended.semanticOnly
-                    .map((id) => ({ id, score: outcome.scores.get(id) ?? 0 }))
-                    .sort((a, b) => b.score - a.score)
-                    .slice(0, cap)
-                    .map((entry) => entry.id)
-                for (const [id, score] of blended.relevance) {
-                    const semanticOnlyHit = blended.semanticOnly.includes(id)
-                    if (semanticOnlyHit) {
-                        if (!additions.includes(id)) continue
-                        kept += 1
-                    }
-                    bounded.set(id, score)
+                // Semantic-only finds are the whole point (lexical missed them).
+                // The cap is applied once per *query* after every root has been
+                // consulted — applying it per store gave a project+global session
+                // twice the configured additions.
+                for (const id of blended.semanticOnly) {
+                    semanticCandidates.push({ id, score: outcome.scores.get(id) ?? 0 })
                 }
-                relevance = bounded
-                for (const id of additions) semanticOnlyIds.add(id)
+                for (const [id, score] of blended.relevance) relevance.set(id, score)
                 semanticUsed = true
-                semanticOnly += kept
             } else if (outcome.reason !== undefined) {
                 semanticReason = outcome.reason
             }
@@ -136,6 +125,20 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
         for (const item of rankRecords(records, { relevance, queryTerms: request.terms })) {
             merged.push({ item, scope: store.scope })
         }
+    }
+
+    // Cap the semantic-only additions once per query, and drop the rest from the
+    // candidate set entirely: leaving them in would keep them eligible whenever
+    // the caller lowered `minScore`, i.e. the cap would not actually cap.
+    const rejectedSemantic = new Set<string>()
+    if (semanticCandidates.length > 0) {
+        const cap = Math.max(0, deps.config.semantic.maxAdditions)
+        const admitted = [...semanticCandidates].sort((a, b) => b.score - a.score).slice(0, cap)
+        for (const candidate of admitted) semanticOnlyIds.add(candidate.id)
+        for (const candidate of semanticCandidates) {
+            if (!semanticOnlyIds.has(candidate.id)) rejectedSemantic.add(candidate.id)
+        }
+        semanticOnly = semanticOnlyIds.size
     }
 
     merged.sort((a, b) => b.item.score - a.item.score)
@@ -152,6 +155,7 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
     const minScore = request.minScore ?? deps.config.recall.minScore
     const ranked = merged
         .map(({ item }) => item)
+        .filter((item) => !rejectedSemantic.has(item.record.id))
         .filter((item) => item.score >= minScore || semanticOnlyIds.has(item.record.id))
     const budgetTokens = Math.max(0, (request.budgetTokens ?? deps.config.recall.budgetTokens) - estimateTokens(HEADER))
     const scopeOf = (item: ScoredRecord): MemoryScope => scopeByItem.get(item) ?? stores[0]!.scope

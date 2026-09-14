@@ -15,9 +15,12 @@ import { listRecords } from '../store/sqlite/records.js'
 import type { MemoryRecord, MemoryScope } from '../store/types.js'
 import { activeRecords, applyConflicts, detectConflicts } from './conflicts.js'
 import { applyDecay, markConsolidated, planDecay } from './decay.js'
+import { pruneSkillDrafts, writeSkillDraft } from './promote.js'
 
 export interface ConsolidateOptions {
     dryRun?: boolean
+    /** Write a reviewable `proposals/<id>.SKILL.md` for each promotion (default true). */
+    writeSkillDrafts?: boolean
     resolveConflicts?: boolean
     now?: Date
     /** Promotion floor: repetitions required (DESIGN §8: >= 3). */
@@ -45,6 +48,8 @@ export interface ConsolidateReport {
     conflictsRecorded: number
     conflictsResolved: number
     proposals: ProposalDraft[]
+    /** Files written for the promotion proposals (empty in a dry run). */
+    skillDrafts: string[]
     errors: string[]
 }
 
@@ -124,6 +129,7 @@ export function consolidate(
         conflictsRecorded: 0,
         conflictsResolved: 0,
         proposals: [],
+        skillDrafts: [],
         errors: [],
     }
 
@@ -161,7 +167,24 @@ export function consolidate(
             title: record.title,
             rationale: `seen ${record.timesSeen}× at confidence ${record.confidence.toFixed(2)} — stable enough to become a skill or project convention`,
         }))
-        if (!dryRun) recordProposals(db, report.proposals, now)
+        if (!dryRun) {
+            recordProposals(db, report.proposals, now)
+            // Hand the human a ready-to-move SKILL.md instead of a row in a table
+            // (DESIGN §3: the L3 → L4 step stays human-approved, so this is a
+            // draft inside the memory root, never a write into ~/.dsh/skills).
+            if (options.writeSkillDrafts !== false) {
+                const written: string[] = []
+                for (const proposal of report.proposals) {
+                    const record = listRecords(db).find((candidate) => candidate.id === proposal.recordId)
+                    if (record === undefined) continue
+                    const file = writeSkillDraft(scope, record, now)
+                    if (file !== undefined) written.push(file)
+                }
+                report.skillDrafts = written
+                const open = openProposals(db, 500).map((proposal) => proposal.recordId)
+                pruneSkillDrafts(scope, open)
+            }
+        }
     } catch (error) {
         report.errors.push(`proposals: ${message(error)}`)
     }

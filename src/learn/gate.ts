@@ -8,10 +8,10 @@
  */
 import type { DatabaseSync } from 'node:sqlite'
 import { cjkBigrams } from '../store/sqlite/cjk.js'
-import { extractTerms, getRecord, materialize, rawSearch, upsertRecord } from '../store/sqlite/records.js'
+import { extractTerms, getRecord, listRecords, materialize, rawSearch, upsertRecord } from '../store/sqlite/records.js'
 import type { Evidence, MemoryRecord, MemoryScope } from '../store/types.js'
 import { nextConfidence, statusFor } from './confidence.js'
-import { assertDraftScope } from '../store/guard.js'
+import { assertDraftScope, equivalentIds } from '../store/guard.js'
 
 export interface CandidateDraft {
     title: string
@@ -116,7 +116,12 @@ function similarRecords(db: DatabaseSync, fts5: boolean, draft: CandidateDraft):
         .filter((record): record is MemoryRecord => record !== undefined)
     if (records.length > 0) return records
     // backstop: the slug may collide even when the text drifted
-    const byId = getRecord(db, slugOf(draft.title))
+    // Dash-equivalent ids count as the same record: the fallback script writes
+    // `dsh-session--append` where this plugin writes `dsh-session-append`, and
+    // treating them as different lessons duplicated one lesson into two rows.
+    const byId =
+        getRecord(db, slugOf(draft.title)) ??
+        listRecords(db).find((record) => equivalentIds(record.id, slugOf(draft.title)))
     return byId === undefined ? [] : [byId]
 }
 

@@ -20,6 +20,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveConfig } from './config.js'
 import { createHookDeps, registerHooks } from './hooks/index.js'
+import type { PromptCapabilities } from './hooks/prompt.js'
 import { log, setLogFile } from './log.js'
 import { expandHome } from './paths.js'
 import { createEmbeddingProvider, QueryVectorCache } from './recall/semantic.js'
@@ -29,10 +30,20 @@ import { StoreRegistry } from './store/store.js'
 import { registerTools } from './tools/index.js'
 
 export const name = 'dsh-memory'
+/**
+ * Only the two services this plugin actually touches:
+ *   - `tools`        — `ctx.tools.register(...)` for the memory tool surface
+ *   - `systemPrompt` — `ctx.systemPrompt.section(...)` for the two prompt sections
+ *
+ * `agents` and `session` are deliberately *not* injected: events arrive through
+ * `ctx.on` (which `inject` does not gate), and the agent/session a hook or tool
+ * call refers to always comes from the hook payload or from `exec.agent` — the
+ * plugin never looks up `ctx.agents` / `ctx.session`. `ctx.jobs` (optional job
+ * runner) is resolved reflectively without `inject` in
+ * `learn/distill-runner.ts`, so a host without it degrades to inline
+ * distillation instead of failing to load. DESIGN §9.2 matches this list.
+ */
 export const inject = ['tools', 'systemPrompt']
-
-/** The protocol section only advertises tools that are actually registered. */
-const CAPABILITIES = { save: true }
 
 export function apply(ctx: Context, config: unknown = {}): void {
     try {
@@ -44,9 +55,13 @@ export function apply(ctx: Context, config: unknown = {}): void {
         const registry = new StoreRegistry(resolved)
         const resolver = new ScopeResolver(resolved)
         const semantic = { provider: createEmbeddingProvider(resolved), cache: new QueryVectorCache() }
-        const deps = createHookDeps(resolved, registry, resolver, CAPABILITIES, semantic)
+        // Derived from the registration result below — never hardcoded. The prompt
+        // sections close over this same object, so `memory:protocol` can only
+        // advertise a tool the host actually accepted.
+        const capabilities: PromptCapabilities = { save: false, search: false, get: false }
+        const deps = createHookDeps(resolved, registry, resolver, capabilities, semantic)
 
-        const toolDisposers = registerTools(ctx, {
+        const tools = registerTools(ctx, {
             config: resolved,
             registry,
             resolver,
@@ -54,10 +69,23 @@ export function apply(ctx: Context, config: unknown = {}): void {
             committer: deps.committer,
             semantic,
         })
+        capabilities.save = tools.registered.includes('memory_save')
+        capabilities.search = tools.registered.includes('memory_search')
+        capabilities.get = tools.registered.includes('memory_get')
+        for (const failed of tools.failed) {
+            log('warn', `memory: tool ${failed} failed to register — it is unavailable and is not advertised in the prompt protocol`)
+        }
+        if (tools.failed.length > 0) {
+            log(
+                'warn',
+                `memory: ${tools.registered.length}/${tools.registered.length + tools.failed.length} memory tools registered (failed: ${tools.failed.join(', ')})`,
+            )
+        }
+
         const hooks = registerHooks(ctx, deps)
 
         ctx.effect(() => () => {
-            for (const dispose of toolDisposers) {
+            for (const dispose of tools.disposers) {
                 try {
                     dispose()
                 } catch (error) {

@@ -14,6 +14,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { MemoryConfig } from '../config.js'
 import { log } from '../log.js'
+import { readProfile, renderProfile } from '../learn/profile.js'
 import { estimateTokens } from '../recall/rank.js'
 import { ScopeResolver } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
@@ -23,22 +24,42 @@ import type { StoreRegistry } from '../store/store.js'
 export const PROTOCOL_SECTION = 'memory:protocol'
 export const INDEX_SECTION = 'memory:index'
 
+/**
+ * Which tools the host actually registered (see `registerTools`). The protocol
+ * text is rendered from this object and from nothing else, so a tool whose
+ * registration failed is never advertised.
+ *
+ * `search`/`get` are optional for callers that only track the write capability:
+ * an explicit `false` suppresses the line, `undefined` keeps the historical
+ * default of mentioning the read tools.
+ */
+export interface PromptCapabilities {
+    save: boolean
+    search?: boolean
+    get?: boolean
+}
+
 export interface PromptDeps {
     config: MemoryConfig
     registry: StoreRegistry
     resolver: ScopeResolver
-    /** Which writing tools exist, so the protocol never advertises a missing tool. */
-    capabilities: { save: boolean }
+    /** Which tools exist, so the protocol never advertises a missing tool. */
+    capabilities: PromptCapabilities
 }
 
 /** Static protocol text. Kept short: ~120 tokens at the default budget. */
-export function protocolText(config: MemoryConfig, capabilities: { save: boolean } = { save: false }): string {
+export function protocolText(config: MemoryConfig, capabilities: PromptCapabilities = { save: false }): string {
     const lines = [
         '记忆系统（dsh-memory）已启用：',
         '- 任务开始时会自动召回相关的历史经验（项目记忆 + 跨项目工具链教训），你无需手动检索即可看到它们。',
-        '- 需要更深入的历史信息时用 `memory_search`（检索）与 `memory_get`（读全文）；不要凭印象复述记忆内容。',
-        '- 记忆条目带 confidence：< 0.7 只是线索，必须自行验证后再执行；与当前事实冲突时以当前事实为准。',
     ]
+    if (capabilities.search !== false) {
+        lines.push('- 需要更深入的历史信息时用 `memory_search` 检索（项目记忆 + 关键词命中的全局教训）。')
+    }
+    if (capabilities.get !== false) {
+        lines.push('- 命中后用 `memory_get(id)` 读全文；不要凭印象复述记忆内容。')
+    }
+    lines.push('- 记忆条目带 confidence：< 0.7 只是线索，必须自行验证后再执行；与当前事实冲突时以当前事实为准。')
     if (capabilities.save) {
         lines.push('- 值得长期保留的经验（真踩坑/真修复，或用户明确要求记住）用 `memory_save` 写入：默认写项目级；只有跨项目工具链事实才写全局。')
     }
@@ -96,6 +117,10 @@ export function indexSummaryText(deps: PromptDeps, agent: AgentLike | undefined)
         const lines = [
             `${label}：${counts.total} 条（active ${counts.active} / pending ${counts.pending}${counts.archived > 0 ? ` / archived ${counts.archived}` : ''}）。`,
         ]
+        // L5 rides the resident section (DESIGN §6 ①): a preference must be in
+        // effect without being recalled, and it is short by construction.
+        const profile = renderProfile(readProfile(store.scope), deps.config.prompt.indexSummary.profileBudgetTokens)
+        if (profile !== '') lines.push(profile)
         if (recent.length > 0) {
             lines.push(`最近更新：${recent.map((record) => record.title).join('；')}`)
         }

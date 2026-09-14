@@ -9,14 +9,15 @@
 import type { DatabaseSync } from 'node:sqlite'
 import type { MemoryConfig } from '../config.js'
 import { log } from '../log.js'
-import { ensureDir, globalMemoryRoot, projectMemoryRoot } from '../paths.js'
+import { ensureDir } from '../paths.js'
 import { exportAll, exportIndex } from './export.js'
 import { bootstrapImport, importLessons } from './import.js'
 import { importMetrics } from './metrics.js'
-import { openDatabase, probeSqlite, rebuildFts } from './sqlite/db.js'
-import type { SqliteProbe } from './sqlite/db.js'
+import { backfillCjk, getMeta, openDatabase, probeSqlite, rebuildFts, rowStr, setMeta } from './sqlite/db.js'
+import type { OpenDbOptions, SqliteProbe } from './sqlite/db.js'
 import { countRecords } from './sqlite/records.js'
 import type { RecordCounts } from './sqlite/records.js'
+import { CORE_TABLES_SQL, FTS_REBUILD_SQL, FTS_SQL, SCHEMA_VERSION } from './sqlite/schema.js'
 import type { MemoryScope } from './types.js'
 
 type SqliteModule = typeof import('node:sqlite')
@@ -26,6 +27,8 @@ export interface ScopeStore {
     db: DatabaseSync
     fts5: boolean
     openedAt: string
+    /** Last time this root was opened or used; `closeIdle` releases the oldest. */
+    lastUsedAt: string
 }
 
 export interface OpenReport {
@@ -33,6 +36,20 @@ export interface OpenReport {
     opened: number
     errors: string[]
 }
+
+/**
+ * Drop the derived FTS index so it can be created and repopulated from scratch.
+ *
+ * Mirrors the FTS half of `MIGRATE_V2_SQL` (schema.ts owns the index definition;
+ * this is the repair path for a store that a broken migration left behind).
+ * Only derived data is lost — `records` itself is never touched.
+ */
+const DROP_FTS_INDEX_SQL = `
+DROP TRIGGER IF EXISTS records_fts_ai;
+DROP TRIGGER IF EXISTS records_fts_ad;
+DROP TRIGGER IF EXISTS records_fts_au;
+DROP TABLE IF EXISTS records_fts;
+`
 
 export class StoreRegistry {
     private readonly stores = new Map<string, ScopeStore>()
@@ -72,26 +89,64 @@ export class StoreRegistry {
     /** Open (or reuse) the database for `scope`. Returns undefined when unavailable. */
     open(scope: MemoryScope): ScopeStore | undefined {
         const existing = this.stores.get(scope.root)
-        if (existing !== undefined) return existing
+        if (existing !== undefined) {
+            this.touch(existing)
+            return existing
+        }
         if (this.module === undefined || !this.probe.available) return undefined
         if (!ensureDir(scope.root)) {
             log('warn', `memory: cannot create memory root ${scope.root} (sandbox denial?)`)
             return undefined
         }
+        const db = this.openDatabaseFor(scope)
+        if (db === undefined) return undefined
+        const now = new Date().toISOString()
+        const store: ScopeStore = { scope, db, fts5: this.probe.fts5, openedAt: now, lastUsedAt: now }
+        this.stores.set(scope.root, store)
+        this.bootstrap(store)
+        return store
+    }
+
+    /**
+     * Open one root's database, surviving a failed schema migration.
+     *
+     * A migration that throws used to be fatal in the worst possible way: the
+     * exception escaped through `openDatabase`, `schema_version` stayed at its old
+     * value, and every later open repeated the same half-applied migration — the
+     * store was locked until somebody deleted `memory.db` by hand. Now the failure
+     * is logged with its version and original error, the derived FTS index is
+     * rebuilt and the migration retried once; only if that also fails is the root
+     * reported as unavailable (the text view keeps working meanwhile).
+     */
+    private openDatabaseFor(scope: MemoryScope): DatabaseSync | undefined {
+        const mod = this.module
+        if (mod === undefined) return undefined
+        const options: OpenDbOptions = {
+            file: `${scope.root}/memory.db`,
+            journalMode: this.config.sqlite.journalMode,
+            busyTimeoutMs: this.config.sqlite.busyTimeoutMs,
+            fts5: this.probe.fts5,
+        }
         try {
-            const db = openDatabase(this.module, {
-                file: `${scope.root}/memory.db`,
-                journalMode: this.config.sqlite.journalMode,
-                busyTimeoutMs: this.config.sqlite.busyTimeoutMs,
-                fts5: this.probe.fts5,
-            })
-            const store: ScopeStore = { scope, db, fts5: this.probe.fts5, openedAt: new Date().toISOString() }
-            this.stores.set(scope.root, store)
-            this.bootstrap(store)
-            return store
+            return openDatabase(mod, options)
         } catch (error) {
-            log('error', `memory: cannot open ${scope.root}/memory.db:`, error)
-            return undefined
+            const version = readSchemaVersion(mod, options.file)
+            log(
+                'error',
+                `memory: schema migration failed for ${options.file} (schema_version=${version ?? 'unknown'}): ${describe(error)}`,
+            )
+            if (!repairFtsIndex(mod, options)) {
+                log('error', `memory: ${options.file} is unavailable; memory stays read-only from the text view`)
+                return undefined
+            }
+            try {
+                const db = openDatabase(mod, options)
+                log('warn', `memory: recovered ${options.file} — rebuilt the FTS index and re-ran the migration`)
+                return db
+            } catch (retry) {
+                log('error', `memory: ${options.file} still unusable after the FTS repair: ${describe(retry)}`)
+                return undefined
+            }
         }
     }
 
@@ -109,6 +164,17 @@ export class StoreRegistry {
         }
     }
 
+    /** Store for `scope`, marked as used (the LRU order of `closeIdle`). */
+    private lookup(scope: MemoryScope): ScopeStore | undefined {
+        const store = this.stores.get(scope.root)
+        if (store !== undefined) this.touch(store)
+        return store
+    }
+
+    private touch(store: ScopeStore): void {
+        store.lastUsedAt = new Date().toISOString()
+    }
+
     /** Re-import the text view into an already-open store. */
     reimport(scope: MemoryScope): number {
         const store = this.open(scope)
@@ -120,7 +186,7 @@ export class StoreRegistry {
 
     /** Export the store's records back to the git-tracked text view. */
     exportScope(scope: MemoryScope): boolean {
-        const store = this.stores.get(scope.root)
+        const store = this.lookup(scope)
         if (store === undefined) return false
         try {
             const result = exportAll(store.db, store.scope)
@@ -133,7 +199,7 @@ export class StoreRegistry {
     }
 
     exportIndexOnly(scope: MemoryScope): boolean {
-        const store = this.stores.get(scope.root)
+        const store = this.lookup(scope)
         if (store === undefined) return false
         try {
             exportIndex(store.db, store.scope)
@@ -145,7 +211,7 @@ export class StoreRegistry {
     }
 
     counts(scope: MemoryScope): RecordCounts | undefined {
-        const store = this.stores.get(scope.root)
+        const store = this.lookup(scope)
         return store === undefined ? undefined : countRecords(store.db)
     }
 
@@ -165,24 +231,98 @@ export class StoreRegistry {
         this.stores.delete(root)
     }
 
+    /**
+     * Release least-recently-used roots until at most `maxOpen` stay open.
+     *
+     * The host keeps several projects alive at once and `session/disposed` fires
+     * per session, so this is the API that actually releases a root while the
+     * process runs (`closeAll` only runs at plugin dispose). Closing is safe
+     * between operations: the next `open` for that root reopens the database and
+     * re-reads whatever the text view has. Returns the roots that were closed.
+     */
+    closeIdle(maxOpen: number): string[] {
+        const limit = Math.max(0, Math.floor(maxOpen))
+        const closed: string[] = []
+        while (this.stores.size > limit) {
+            let oldest: ScopeStore | undefined
+            for (const store of this.stores.values()) {
+                if (oldest === undefined || store.lastUsedAt < oldest.lastUsedAt) oldest = store
+            }
+            if (oldest === undefined) break
+            this.close(oldest.scope.root)
+            closed.push(oldest.scope.root)
+        }
+        return closed
+    }
+
     closeAll(): void {
         for (const root of [...this.stores.keys()]) this.close(root)
     }
 }
 
-/** Resolve the root directory a scope owns (used by path guards and tests). */
-export function scopeRootOf(scope: MemoryScope, dshHome: string): string {
-    if (scope.kind === 'project') {
-        if (scope.repo === undefined) throw new Error('project scope without a repository root')
-        return projectMemoryRoot(scope.repo)
+/** `schema_version` of a database file, or undefined when it cannot be read. */
+function readSchemaVersion(mod: SqliteModule, file: string): string | undefined {
+    let db: DatabaseSync | undefined
+    try {
+        db = new mod.DatabaseSync(file, { readOnly: true })
+        return getMeta(db, 'schema_version')
+    } catch {
+        return undefined
+    } finally {
+        try {
+            db?.close()
+        } catch {
+            // the caller's error is the useful one
+        }
     }
-    return globalMemoryRoot(dshHome)
 }
 
-/** Counts for every open root — the raw material of `memory_stats`. */
-export function openRootCounts(registry: StoreRegistry): { scope: MemoryScope; counts: RecordCounts }[] {
-    return registry.listOpen().flatMap((store) => {
-        const counts = countRecords(store.db)
-        return [{ scope: store.scope, counts }]
-    })
+/**
+ * Repair a store whose migration failed: recreate the derived FTS index from
+ * `records` *before* anything updates a row, then apply the v1→v2 backfill.
+ *
+ * Order is the whole point. `records_fts` is an external-content index, so an
+ * UPDATE on `records` fires the trigger's `'delete'` command; against an index
+ * that is still empty (exactly what "rebuild the schema, then backfill" leaves
+ * behind) SQLite answers `database disk image is malformed`. Filling the index
+ * first makes the same backfill legal, and it never touches `records` content.
+ */
+function repairFtsIndex(mod: SqliteModule, options: OpenDbOptions): boolean {
+    let db: DatabaseSync | undefined
+    try {
+        db = new mod.DatabaseSync(options.file, { enableForeignKeyConstraints: true })
+        db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.floor(options.busyTimeoutMs))}`)
+        db.exec(CORE_TABLES_SQL)
+        if (!hasColumn(db, 'records', 'cjk')) {
+            db.exec("ALTER TABLE records ADD COLUMN cjk TEXT NOT NULL DEFAULT ''")
+        }
+        if (options.fts5) {
+            db.exec(DROP_FTS_INDEX_SQL)
+            db.exec(FTS_SQL)
+            db.exec(FTS_REBUILD_SQL)
+        }
+        backfillCjk(db)
+        if (options.fts5) db.exec(FTS_REBUILD_SQL)
+        setMeta(db, 'schema_version', String(SCHEMA_VERSION))
+        setMeta(db, 'schema_updated_at', new Date().toISOString())
+        return true
+    } catch (error) {
+        log('error', `memory: FTS repair of ${options.file} failed: ${describe(error)}`)
+        return false
+    } finally {
+        try {
+            db?.close()
+        } catch {
+            // the caller's error is the useful one
+        }
+    }
+}
+
+function hasColumn(db: DatabaseSync, table: string, column: string): boolean {
+    const rows = db.prepare('SELECT name FROM pragma_table_info(?)').all(table)
+    return rows.some((row) => rowStr(row, 'name') === column)
+}
+
+function describe(error: unknown): string {
+    return error instanceof Error ? `${error.name}: ${error.message}` : String(error)
 }

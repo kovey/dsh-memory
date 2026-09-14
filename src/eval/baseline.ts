@@ -168,7 +168,11 @@ export function latestBaseline(db: DatabaseSync): MetricSnapshot | undefined {
 }
 
 export type MetricVerdict = 'better' | 'same' | 'worse' | 'unknown'
-export type GateVerdict = 'pass' | 'regression' | 'no-baseline'
+/**
+ * Three-state gate. `unknown` is the *absence* of a judgement, not a pass:
+ * a gate that cannot compare anything must never read as "no regression".
+ */
+export type GateVerdict = 'pass' | 'regression' | 'unknown'
 
 export interface MetricComparison {
     metric: 'successRate' | 'avgDuration' | 'avgDisturb' | 'avgRework'
@@ -187,6 +191,8 @@ export interface GateReport {
     current: MetricSnapshot
     comparisons: MetricComparison[]
     regressed: string[]
+    /** Why the verdict is `unknown`; absent whenever the gate actually decided. */
+    unknownReason?: 'no-baseline' | 'no-comparable-metrics'
 }
 
 /** Tolerance so noise in a small ledger does not read as a regression. */
@@ -196,10 +202,14 @@ export const TOLERANCE = { successRate: 0.05, duration: 0.15, disturb: 0.5, rewo
  * Compare current metrics against the frozen baseline. The gate is asymmetric on
  * purpose: regressions fail it, improvements pass it, and missing data is
  * "unknown" rather than a silent pass.
+ *
+ * `pass` therefore needs at least one comparison that actually had data on both
+ * sides; a baseline whose four metrics are all `null` (or a current window with
+ * no metrics yet) is `unknown`, never `pass`.
  */
 export function evaluateGate(current: MetricSnapshot, baseline: MetricSnapshot | undefined): GateReport {
     if (baseline === undefined || baseline.tasks === 0) {
-        return { verdict: 'no-baseline', current, comparisons: [], regressed: [] }
+        return { verdict: 'unknown', unknownReason: 'no-baseline', current, comparisons: [], regressed: [] }
     }
     const comparisons: MetricComparison[] = [
         compare('successRate', '成功率', 'up', baseline.successRate, current.successRate, TOLERANCE.successRate),
@@ -208,13 +218,15 @@ export function evaluateGate(current: MetricSnapshot, baseline: MetricSnapshot |
         compare('avgRework', '平均返工轮数', 'down', baseline.avgRework, current.avgRework, TOLERANCE.rework),
     ]
     const regressed = comparisons.filter((item) => item.verdict === 'worse').map((item) => item.label)
-    return {
-        verdict: regressed.length > 0 ? 'regression' : 'pass',
-        baseline,
-        current,
-        comparisons,
-        regressed,
+    if (regressed.length > 0) {
+        return { verdict: 'regression', baseline, current, comparisons, regressed }
     }
+    // Every metric had `null` on at least one side: nothing was compared, so
+    // there is nothing to pass.
+    if (comparisons.every((item) => item.verdict === 'unknown')) {
+        return { verdict: 'unknown', unknownReason: 'no-comparable-metrics', baseline, current, comparisons, regressed: [] }
+    }
+    return { verdict: 'pass', baseline, current, comparisons, regressed: [] }
 }
 
 function compare(
@@ -358,13 +370,23 @@ export function renderEvaluation(
 ): string[] {
     const lines: string[] = []
     lines.push('evaluation gate:')
-    if (gate.verdict === 'no-baseline') {
+    const noBaseline = gate.verdict === 'unknown' && (gate.baseline === undefined || gate.unknownReason === 'no-baseline')
+    if (noBaseline) {
         lines.push(
-            `  no baseline snapshot yet — run memory_stats({ setBaseline: true }) after a good period to freeze one (tasks so far: ${gate.current.tasks})`,
+            `  verdict: UNKNOWN — no baseline snapshot yet (tasks so far: ${gate.current.tasks})`,
+        )
+        lines.push(
+            '  freeze one only after a good period and an explicit user request: memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })',
         )
     } else {
+        // `unknown` is a decision *not* to decide: it must never print PASS.
+        const label = gate.verdict === 'pass' ? 'PASS' : gate.verdict === 'regression' ? 'REGRESSION' : 'UNKNOWN（无数据）'
+        const suffix =
+            gate.verdict === 'unknown'
+                ? ' — none of the four metrics has data on both sides, so the gate cannot judge this period'
+                : ''
         lines.push(
-            `  verdict: ${gate.verdict === 'pass' ? 'PASS' : 'REGRESSION'} (baseline ${gate.baseline?.at.slice(0, 19) ?? '?'} · ${gate.baseline?.tasks ?? 0} tasks → now ${gate.current.tasks} tasks)`,
+            `  verdict: ${label}${suffix} (baseline ${gate.baseline?.at.slice(0, 19) ?? '?'} · ${gate.baseline?.tasks ?? 0} tasks → now ${gate.current.tasks} tasks)`,
         )
         for (const item of gate.comparisons) {
             const base = item.baseline === null ? 'n/a' : String(item.baseline)

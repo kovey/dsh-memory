@@ -18,17 +18,19 @@ import {
     windowSummary,
 } from '../eval/baseline.js'
 import { episodeDigest } from '../learn/episodic.js'
+import { log } from '../log.js'
 import { openProposalsCount } from '../learn/stats.js'
 import { conflictCount } from '../learn/conflicts.js'
 import { recallStats } from '../recall/usage.js'
 import { indexStats } from '../recall/semantic.js'
 import type { EmbeddingProvider } from '../recall/semantic.js'
-import { ScopeResolver } from '../scope/resolver.js'
+import { ScopeResolver, sessionIdOf } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
 import { summarizeMetrics } from '../store/metrics.js'
 import { countRecords } from '../store/sqlite/records.js'
 import type { StoreRegistry, ScopeStore } from '../store/store.js'
 import type { MemoryScope } from '../store/types.js'
+import { refuseWrite } from './save.js'
 
 export interface StatsToolDeps {
     config: MemoryConfig
@@ -43,16 +45,42 @@ export function statsTool(deps: StatsToolDeps) {
     return defineTool({
         name: 'memory_stats',
         description:
-            'Report memory-store health and the evaluation gate: record counts, recall hit rate, learning cost, open conflicts/proposals, task-metric trends, and whether the current period regressed against the frozen baseline. Pass setBaseline=true to freeze the current metrics as the reference after a good period.',
+            'Report memory-store health and the evaluation gate: record counts, recall hit rate, learning cost, open conflicts/proposals, task-metric trends, and whether the current period regressed against the frozen baseline. Freezing a new baseline is a human-review step: setBaseline=true is refused unless the user explicitly asked for it and a non-empty baselineReason is passed.',
         parameters: {
             scope: { type: 'string', enum: ['auto', 'all'], description: 'auto = this session\'s scope; all = also the global store.' },
-            setBaseline: { type: 'boolean', description: 'Freeze the current task metrics as the regression baseline.' },
+            setBaseline: {
+                type: 'boolean',
+                description:
+                    'Freeze the current task metrics as the regression baseline. Human-review step: only after the user explicitly asks, and only together with baselineReason.',
+            },
+            baselineReason: {
+                type: 'string',
+                description:
+                    'Required with setBaseline=true: why the baseline is being frozen now (what the user asked, what was verified). Recorded in the log with the calling session id.',
+            },
             windowDays: { type: 'number', description: 'Trend window in days (default 30).' },
-            note: { type: 'string', description: 'Note recorded with a frozen baseline.' },
+            note: { type: 'string', description: 'Optional note stored with a frozen baseline snapshot.' },
         },
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
             const agent = exec.agent as unknown as AgentLike | undefined
+            // Freezing is this tool's only write, and it is the one action that
+            // can erase a regression signal: a model must not re-freeze the
+            // reference on its own, and a subagent must not freeze it either.
+            let baselineReason: string | undefined
+            if (args.setBaseline === true) {
+                const refusal = refuseWrite(deps, agent, '`memory_stats` with setBaseline=true (freezing the gate baseline)')
+                if (refusal !== undefined) return refusal
+                baselineReason = (args.baselineReason ?? '').trim()
+                if (baselineReason === '') {
+                    return [
+                        'refused: setBaseline is a human-review step, not a model action — freezing a baseline replaces the reference the gate compares against, so a period that regressed would start reading as PASS.',
+                        'Freeze only when the user explicitly asked for it, and state why:',
+                        '  memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })',
+                        'Without setBaseline this call reports the read-only status and the current verdict.',
+                    ].join('\n')
+                }
+            }
             const stores = targetStores(deps, agent, args.scope === 'all')
             if (stores.length === 0) return 'memory store unavailable (SQLite driver missing or memory root unwritable)'
 
@@ -86,10 +114,16 @@ export function statsTool(deps: StatsToolDeps) {
                 )
 
                 const scopeLabel = store.scope.kind === 'project' ? `project:${store.scope.repo ?? store.scope.root}` : 'global'
-                if (args.setBaseline === true) {
+                if (baselineReason !== undefined) {
                     const frozen = freezeBaseline(store.db, scopeLabel, args.note)
+                    // The freeze is an audited human decision: the log carries who
+                    // called it and the reason they gave.
+                    log(
+                        'info',
+                        `memory: baseline frozen for ${scopeLabel} by session ${sessionIdOf(agent) ?? 'unknown'} — reason: ${baselineReason}${args.note !== undefined ? ` (note: ${args.note})` : ''}`,
+                    )
                     lines.push(
-                        `  baseline frozen: ${frozen.tasks} task(s), success rate ${frozen.successRate ?? 'n/a'}, avg duration ${frozen.avgDuration ?? 'n/a'} min, avg disturb ${frozen.avgDisturb ?? 'n/a'}, avg rework ${frozen.avgRework ?? 'n/a'}`,
+                        `  baseline frozen: ${frozen.tasks} task(s), success rate ${frozen.successRate ?? 'n/a'}, avg duration ${frozen.avgDuration ?? 'n/a'} min, avg disturb ${frozen.avgDisturb ?? 'n/a'}, avg rework ${frozen.avgRework ?? 'n/a'} · reason: ${baselineReason}`,
                     )
                 }
 

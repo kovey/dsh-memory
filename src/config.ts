@@ -21,7 +21,14 @@ export interface MemoryConfig {
     }
     prompt: {
         protocol: { enabled: boolean; budgetTokens: number; order: number }
-        indexSummary: { enabled: boolean; budgetTokens: number; maxTitles: number; order: number }
+        indexSummary: {
+            enabled: boolean
+            budgetTokens: number
+            maxTitles: number
+            order: number
+            /** L5 (preferences) budget inside the resident section. */
+            profileBudgetTokens: number
+        }
     }
     recall: {
         autoInject: boolean
@@ -93,6 +100,8 @@ export interface MemoryConfig {
         journalMode: 'wal' | 'delete'
         busyTimeoutMs: number
         fallback: 'none' | 'json'
+        /** Open memory roots kept alive; the least recently used are closed. */
+        maxOpenRoots: number
     }
     /**
      * Optional semantic recall (DESIGN §14.3). Off by default: it is the only
@@ -109,6 +118,8 @@ export interface MemoryConfig {
         apiKeyEnv: string
         apiKey: string
         timeoutMs: number
+        /** Wall-clock budget for one embedding run across all batches. */
+        budgetMs: number
         /** Blend weight: 0 = lexical only, 1 = semantic only. */
         weight: number
         /** Only embed the query when lexical recall returned fewer hits than this. */
@@ -132,7 +143,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
     routing: { defaultScope: 'project', subagentWrite: false },
     prompt: {
         protocol: { enabled: true, budgetTokens: 240, order: 60 },
-        indexSummary: { enabled: true, budgetTokens: 150, maxTitles: 12, order: 61 },
+        indexSummary: { enabled: true, budgetTokens: 150, maxTitles: 12, order: 61, profileBudgetTokens: 200 },
     },
     recall: {
         autoInject: true,
@@ -163,7 +174,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
     consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true },
     git: { enabled: true, autoCommit: 'task-end', checkpointMinutes: 30, autoPush: false },
-    sqlite: { journalMode: 'wal', busyTimeoutMs: 5_000, fallback: 'none' },
+    sqlite: { journalMode: 'wal', busyTimeoutMs: 5_000, fallback: 'none', maxOpenRoots: 4 },
     semantic: {
         enabled: false,
         provider: 'remote',
@@ -173,6 +184,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         apiKeyEnv: '',
         apiKey: '',
         timeoutMs: 1_500,
+        budgetMs: 8_000,
         weight: 0.5,
         minLexicalHits: 3,
         maxRecordsPerRun: 200,
@@ -249,6 +261,12 @@ export function resolveConfig(raw: unknown): MemoryConfig {
                 budgetTokens: num(indexSummary['budgetTokens'], d.prompt.indexSummary.budgetTokens, 0, 4_000),
                 maxTitles: num(indexSummary['maxTitles'], d.prompt.indexSummary.maxTitles, 0, 200),
                 order: num(indexSummary['order'], d.prompt.indexSummary.order, -10_000, 10_000),
+                profileBudgetTokens: num(
+                    indexSummary['profileBudgetTokens'],
+                    d.prompt.indexSummary.profileBudgetTokens,
+                    0,
+                    600,
+                ),
             },
         },
         recall: {
@@ -305,6 +323,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             journalMode: oneOf(sqlite['journalMode'], ['wal', 'delete'] as const, d.sqlite.journalMode),
             busyTimeoutMs: num(sqlite['busyTimeoutMs'], d.sqlite.busyTimeoutMs, 0, 60_000),
             fallback: oneOf(sqlite['fallback'], ['none', 'json'] as const, d.sqlite.fallback),
+            maxOpenRoots: num(sqlite['maxOpenRoots'], d.sqlite.maxOpenRoots, 0, 64),
         },
         semantic: {
             enabled: bool(semantic['enabled'], d.semantic.enabled),
@@ -320,6 +339,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             maxRecordsPerRun: num(semantic['maxRecordsPerRun'], d.semantic.maxRecordsPerRun, 0, 5_000),
             minSimilarity: num(semantic['minSimilarity'], d.semantic.minSimilarity, 0, 1),
             maxAdditions: num(semantic['maxAdditions'], d.semantic.maxAdditions, 0, 50),
+            budgetMs: num(semantic['budgetMs'], d.semantic.budgetMs, 200, 120_000),
         },
     }
 }

@@ -92,8 +92,6 @@ export interface MemoryScope {
     reason: 'session-cwd' | 'process-cwd' | 'no-project-context' | 'explicit-global'
 }
 
-export const LAYER_ORDER: readonly Layer[] = ['project', 'global', 'profile', 'episodic']
-
 /** Ranking weights per layer (DESIGN §6). */
 export const LAYER_WEIGHT: Record<Layer, number> = {
     project: 1,

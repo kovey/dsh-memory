@@ -64,7 +64,6 @@ export function candidateConfidence(suggested: number, evidenceCount: number, no
 }
 
 /** Records below this are hypotheses: surfaced, never executed (DESIGN §7). */
-export const HYPOTHESIS_THRESHOLD = 0.7
 
 /** Records below this enter the store as `pending` rather than `active`. */
 export const PENDING_THRESHOLD = 0.6

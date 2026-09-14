@@ -245,7 +245,3 @@ export class SignalBuffer {
  * Classify one turn: any pain signal means the recalled memory did not prevent
  * the problem, which is what the verdict feeds back into record confidence.
  */
-export function turnVerdict(turn: TurnSignals): 'failure' | 'success' | 'neutral' {
-    if (turn.signals.length > 0) return 'failure'
-    return 'neutral'
-}

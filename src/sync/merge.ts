@@ -204,6 +204,27 @@ export function mergeFrontmatter(a: LessonFrontmatter, b: LessonFrontmatter): Le
 }
 
 /** `permanent` beats any date; otherwise the later date wins. */
+/** Merge two `evidence: kind×count, …` summaries, keeping the higher count per kind. */
+export function laterEvidence(ours: string | undefined, theirs: string | undefined): string | undefined {
+    if (ours === undefined || ours.trim() === '') return theirs
+    if (theirs === undefined || theirs.trim() === '') return ours
+    const parse = (text: string): Map<string, number> => {
+        const out = new Map<string, number>()
+        for (const part of text.split(',')) {
+            const match = /^\s*([a-z-]+)\s*[×x*:]\s*(\d+)\s*$/i.exec(part)
+            if (match === null) continue
+            const kind = (match[1] ?? '').toLowerCase()
+            const count = Number(match[2])
+            if (kind !== '' && Number.isFinite(count)) out.set(kind, Math.max(out.get(kind) ?? 0, count))
+        }
+        return out
+    }
+    const merged = parse(ours)
+    for (const [kind, count] of parse(theirs)) merged.set(kind, Math.max(merged.get(kind) ?? 0, count))
+    if (merged.size === 0) return ours
+    return [...merged.entries()].map(([kind, count]) => `${kind}×${count}`).join(', ')
+}
+
 export function laterExpiry(a: string, b: string): string {
     if (a === 'permanent' || b === 'permanent') return 'permanent'
     return a >= b ? a : b

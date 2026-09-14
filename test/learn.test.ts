@@ -17,12 +17,12 @@ import { recall } from '../lib/recall/engine.js'
 import { candidateConfidence, nextConfidence, statusFor } from '../lib/learn/confidence.js'
 import { buildPrompt, dailyDistillTokens, distillAllowed, distillTurn, parseCandidates, resolveDistillRoute } from '../lib/learn/distill.js'
 import { episodeDigest, pruneEpisodes, pruneSignals, recordEpisode, sessionsDir } from '../lib/learn/episodic.js'
-import { loadGroupSignals, pendingDistillations } from '../lib/learn/pending.js'
+import { loadGroupSignals, pendingDistillations, pendingMinAgeSeconds } from '../lib/learn/pending.js'
 import { buildLedgerRow, recordSessionMetric, sessionStats, withLearningCounters } from '../lib/learn/task-metrics.js'
 import { applyDraft, gateDraft, jaccard, looksGeneric, mergeRecord, similarity, tokens } from '../lib/learn/gate.js'
 import { TurnLedger } from '../lib/learn/ledger.js'
 import { redact } from '../lib/learn/redact.js'
-import { runDistillation } from '../lib/learn/distill-runner.js'
+import { distillInFlightTtlMs, isDistilling, runDistillation } from '../lib/learn/distill-runner.js'
 import { SignalBuffer, detectCorrection, detectResultFailure, looksLikeTestFailure, summarize } from '../lib/learn/signals.js'
 import type { Signal } from '../lib/learn/signals.js'
 import { clearRepoCache } from '../lib/paths.js'
@@ -133,6 +133,46 @@ test('redaction masks secrets and home paths, and truncates', () => {
     const long = redact('x'.repeat(500), 'full', 50)
     assert.equal(long.length, 51)
     assert.equal(redact('plain text', 'full'), 'plain text')
+})
+
+test('redaction covers cloud keys, auth headers and connection strings', () => {
+    // AWS access key id: the recognizable prefix stays readable, the id goes
+    assert.equal(redact('aws AKIAIOSFODNN7EXAMPLE done'), 'aws AKIA*** done')
+    assert.equal(redact('temporary ASIAIOSFODNN7EXAMPLE'), 'temporary ASIA***')
+    // `x-api-key:` in any case, and the `=` form some tools print
+    assert.equal(redact('X-Api-Key: 9f8e7d6c5b4a3210'), 'X-Api-Key: ***')
+    assert.equal(redact('x-api-key=9f8e7d6c5b4a3210'), 'x-api-key: ***')
+    // `Authorization: Basic <base64>`
+    assert.equal(redact('Authorization: Basic dXNlcjpwYXNzd29yZA=='), 'Authorization: Basic ***')
+    // provider tokens
+    assert.equal(redact('glpat-abcdefghijklmnopqrst'), 'glpat-***')
+    assert.equal(redact('npm_1a2b3c4d5e6f7g8h9i0j'), 'npm_***')
+    assert.equal(redact('AIzaSyA1234567890abcdefghijklmnopqrs'), 'AIza***')
+    // connection strings keep scheme/user/host and lose the password
+    assert.equal(redact('postgres://user:s3cr3t@db.internal:5432/app'), 'postgres://user:***@db.internal:5432/app')
+    assert.equal(redact('redis://:hunter2@cache:6379'), 'redis://:***@cache:6379')
+    // set-cookie: the whole cookie goes, the rest of the collapsed line survives
+    assert.equal(redact('set-cookie: session=abc123; Path=/; HttpOnly'), 'set-cookie: ***')
+    assert.equal(
+        redact('HTTP/1.1 200 OK set-cookie: sid=abc123; Path=/; HttpOnly content-type: text/html'),
+        'HTTP/1.1 200 OK set-cookie: *** content-type: text/html',
+    )
+})
+
+test('redaction leaves ordinary words, paths and header names alone', () => {
+    // `Basic` is an English word and a plausible file name
+    assert.equal(redact('Basic auth is described in src/auth/basic.ts'), 'Basic auth is described in src/auth/basic.ts')
+    assert.equal(redact('authorization: bearer-less token flow'), 'authorization: bearer-less token flow')
+    // a header *name* without a value is not a credential
+    assert.equal(redact('the set-cookie header was missing'), 'the set-cookie header was missing')
+    assert.equal(redact('x-api-key is a request header name'), 'x-api-key is a request header name')
+    // a passwordless connection string is just a URL
+    assert.equal(redact('redis://cache:6379/0 needs no password'), 'redis://cache:6379/0 needs no password')
+    // prefixes that are not followed by a token body
+    assert.equal(redact('npm_install_all runs the scripts'), 'npm_install_all runs the scripts')
+    assert.equal(redact('the glpat- prefix is reserved for GitLab'), 'the glpat- prefix is reserved for GitLab')
+    assert.equal(redact('ASIA-Pacific is a region name'), 'ASIA-Pacific is a region name')
+    assert.equal(redact('AIza is not a word'), 'AIza is not a word')
 })
 
 // ---- gate -------------------------------------------------------------------
@@ -373,6 +413,94 @@ test('a slow or broken model yields no records and no crash', async (t) => {
     )
     assert.equal(broken.status, 'error')
     assert.equal(countRecords(h.store.db).total, 1, 'only the pre-existing lesson remains')
+    // A timeout and an answered-but-failed call are attempts too: each settles
+    // its group with exactly one zero-created audit row.
+    const audit = h.store.db.prepare('SELECT session_id, created_count, timed_out FROM distill ORDER BY id').all()
+    assert.deepEqual(
+        audit.map((row) => [row['session_id'], row['created_count'], row['timed_out']]),
+        [['s', 0, 1], ['s', 0, 0]],
+    )
+})
+
+test('a gate-denied skip writes no audit row, an attempt always settles the group', async (t) => {
+    const h = await harness(t)
+    const at = new Date(Date.now() - 60_000).toISOString()
+    h.store.db
+        .prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('sess-debt', 3, 1, 'tool-failure', 'bash', 'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY', at)
+    const signals = loadGroupSignals(h.store.db, { sessionId: 'sess-debt', turn: 3, signals: 1, lastAt: at })
+    const auditRows = (): number => Number(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'] ?? -1)
+    const deps = (config: ReturnType<typeof resolveConfig>) => ({
+        ctx: fakeCtx(LESSON_JSON),
+        config,
+        registry: h.registry,
+        resolver: h.resolver,
+        state: new SessionState(),
+    })
+
+    // The daily budget refuses the spend. Nothing was attempted, so nothing may
+    // be audited: `pending.ts` reads "no audit row" as "still owed", and this
+    // group must stay recoverable by a later turn instead of being settled empty.
+    const refused = await distillTurn(deps(resolveConfig({ learn: { maxDistillTokensPerDay: 0 } })), {
+        agent: h.agent,
+        sessionId: 'sess-debt',
+        turn: 3,
+        signals,
+        recalled: [],
+    })
+    assert.equal(refused.status, 'skipped')
+    assert.equal(refused.reason, 'daily token budget exhausted')
+    assert.equal(auditRows(), 0)
+    assert.deepEqual(
+        pendingDistillations(h.store.db).map((group) => `${group.sessionId}#${group.turn}`),
+        ['sess-debt#3'],
+    )
+
+    // The same group, once it is really attempted, is settled by its audit row —
+    // exactly once, however many recovery passes look at it afterwards.
+    const outcome = await distillTurn(deps(h.resolved), { agent: h.agent, sessionId: 'sess-debt', turn: 3, signals, recalled: [] })
+    assert.equal(outcome.status, 'created')
+    assert.equal(auditRows(), 1)
+    assert.equal(pendingDistillations(h.store.db).length, 0, 'a settled group is never distilled again')
+})
+
+test('a write failure after the model call still settles the attempt', async (t) => {
+    const h = await harness(t)
+    const signals: Signal[] = [
+        { sessionId: 'sess-write-fail', kind: 'tool-failure', turn: 5, tool: 'bash', detail: 'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY', at: new Date().toISOString() },
+    ]
+    // A record write that blows up is what a full disk / sandbox denial looks
+    // like here. Before this fix the throw escaped with no audit row, so the
+    // very next recovery pass distilled (and paid for) the same signals again.
+    const failingDb = new Proxy(h.store.db, {
+        get(target, property, receiver) {
+            if (property === 'prepare') {
+                return (sql: string) => {
+                    if (sql.includes('INSERT INTO records')) throw new Error('database or disk is full')
+                    return target.prepare(sql)
+                }
+            }
+            const value = Reflect.get(target, property, receiver)
+            return typeof value === 'function' ? value.bind(target) : value
+        },
+    }) as typeof h.store.db
+    const registry = {
+        open: () => ({ ...h.store, db: failingDb }),
+        exportScope: () => undefined,
+        listOpen: () => [h.store],
+    } as unknown as StoreRegistry
+
+    const outcome = await distillTurn(
+        { ctx: fakeCtx(LESSON_JSON), config: h.resolved, registry, resolver: h.resolver, state: new SessionState() },
+        { agent: h.agent, sessionId: 'sess-write-fail', turn: 5, signals, recalled: [] },
+    )
+    assert.equal(outcome.status, 'error')
+    assert.match(outcome.reason ?? '', /disk is full/)
+    const audit = h.store.db.prepare('SELECT created_count, timed_out FROM distill WHERE session_id = ?').all('sess-write-fail')
+    assert.equal(audit.length, 1, 'the failed attempt is still audited')
+    assert.equal(audit[0]?.['created_count'], 0)
+    assert.equal(audit[0]?.['timed_out'], 0)
+    assert.equal(pendingDistillations(h.store.db).length, 0, 'the group is settled, not retried forever')
 })
 
 test('the distillation prompt is redacted and bounded', () => {
@@ -757,6 +885,132 @@ test('recovery stops at its wall-clock budget', async (t) => {
     )
     assert.equal(recovered, 0, 'an exhausted budget must not start another group')
     assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'], 0)
+})
+
+test('recovery ignores a group a live job in this process is already distilling', async (t) => {
+    const h = await harness(t)
+    const at = new Date(Date.now() - 60_000).toISOString()
+    h.store.db
+        .prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('sess-inflight', 4, 1, 'tool-failure', 'bash', 'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY', at)
+    const signals = loadGroupSignals(h.store.db, { sessionId: 'sess-inflight', turn: 4, signals: 1, lastAt: at })
+    const auditRows = (): number => Number(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'] ?? -1)
+    const config = resolveConfig({ learn: { distillRunner: 'jobs' } })
+
+    // The job owns the group and its LLM call is still running: for a 15s call
+    // the group looks unattempted to `pendingDistillations` the whole time.
+    let done: Promise<unknown> | undefined
+    const jobsStub = {
+        start(spec: { run: () => { done: Promise<unknown> } }) {
+            done = spec.run().done
+            return 'memory-distill-inflight'
+        },
+    }
+    const slowCtx = {
+        llm: (fakeCtx(LESSON_JSON, { delayMs: 400 }) as unknown as { llm: unknown }).llm,
+        reflect: { get: (name: string) => (name === 'jobs' ? jobsStub : undefined) },
+    } as unknown as Context
+    const runner = await runDistillation(
+        { ctx: slowCtx, config, registry: h.registry, resolver: h.resolver, state: new SessionState() },
+        { agent: h.agent, sessionId: 'sess-inflight', turn: 4, signals, recalled: [], ownerAgent: h.agent },
+    )
+    assert.equal(runner.mode, 'jobs')
+    assert.equal(isDistilling('sess-inflight', 4, distillInFlightTtlMs(config.learn.distillTimeoutMs)), true)
+
+    // A quiet turn in the same process must not distil — or pay for — it again.
+    assert.equal(
+        await recoverPendingDistillations(
+            {
+                ctx: fakeCtx(LESSON_JSON),
+                config,
+                registry: h.registry,
+                resolver: h.resolver,
+                state: new SessionState(),
+                signals: new SignalBuffer(),
+                ledger: new TurnLedger(),
+            },
+            h.agent,
+        ),
+        0,
+    )
+    assert.equal(auditRows(), 0, 'no second attempt while the job is live')
+
+    await done
+    assert.equal(auditRows(), 1, 'the job writes the group\'s only audit row')
+    assert.equal(isDistilling('sess-inflight', 4, 60_000), false, 'the mark is cleared when the attempt settles')
+    assert.equal(pendingDistillations(h.store.db).length, 0)
+    assert.ok(getRecord(h.store.db, 'pnpm-tty'), 'the lesson landed exactly once')
+})
+
+test('the recovery freshness guard covers a full distillation window', async (t) => {
+    const h = await harness(t, { learn: { distillTimeoutMs: 15_000 } })
+    h.store.db
+        .prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('sess-young', 2, 1, 'tool-failure', 'bash', 'exit code 2', new Date(Date.now() - 8_000).toISOString())
+
+    // Derived from `learn.distillTimeoutMs`, not the old fixed 5s window that a
+    // 15s distillation call could outlive.
+    assert.equal(pendingMinAgeSeconds(h.resolved.learn.distillTimeoutMs), 16)
+    assert.equal(pendingDistillations(h.store.db, { distillTimeoutMs: h.resolved.learn.distillTimeoutMs }).length, 0)
+    assert.equal(pendingDistillations(h.store.db, { minAgeSeconds: 5 }).length, 1, 'the old fixed guard would have taken it')
+
+    const deps = () => ({
+        ctx: fakeCtx(LESSON_JSON),
+        config: h.resolved,
+        registry: h.registry,
+        resolver: h.resolver,
+        state: new SessionState(),
+        signals: new SignalBuffer(),
+        ledger: new TurnLedger(),
+    })
+    assert.equal(await recoverPendingDistillations(deps(), h.agent), 0)
+    assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'], 0)
+
+    // Once the window has passed, the very same group is recovered.
+    h.store.db.prepare('UPDATE signals SET at = ?').run(new Date(Date.now() - 60_000).toISOString())
+    assert.equal(await recoverPendingDistillations(deps(), h.agent), 1)
+})
+
+test('a quiet turn that attempted nothing leaves recovery available for the next one', async (t) => {
+    const h = await harness(t, { learn: { maxDistillTokensPerDay: 0 } })
+    h.store.db
+        .prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('sess-lost', 9, 1, 'tool-failure', 'bash', 'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY', new Date(Date.now() - 60_000).toISOString())
+
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ctx = {
+        on: (event: string, handler: (...args: unknown[]) => unknown) => {
+            handlers.set(event, handler)
+        },
+    }
+    const state = new SessionState()
+    registerLearnHooks(ctx as never, {
+        ctx: fakeCtx(LESSON_JSON),
+        config: h.resolved,
+        registry: h.registry,
+        resolver: h.resolver,
+        state,
+        signals: new SignalBuffer(),
+        ledger: new TurnLedger(),
+    })
+    const quiet = { options: { provider: 'test-provider', model: 'test-model' }, session: { id: 'sess-quiet', header: { cwd: h.repo } } }
+    const auditRows = (): number => Number(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'] ?? -1)
+
+    // Quiet turn 1: the daily budget refuses every attempt, so nothing was
+    // recovered. Latched here, the one recovery slot this process gets would be
+    // spent on nothing and the debt would never be picked up again.
+    state.observeTurn('sess-quiet', 1)
+    await handlers.get('agent/turn-stopping')?.({ agent: quiet, turn: 1 })
+    assert.equal(auditRows(), 0)
+    assert.equal(pendingDistillations(h.store.db).length, 1, 'the debt is untouched')
+
+    // Budget frees up: the *next* quiet turn must be allowed to try again.
+    h.resolved.learn.maxDistillTokensPerDay = 200_000
+    state.observeTurn('sess-quiet', 2)
+    await handlers.get('agent/turn-stopping')?.({ agent: quiet, turn: 2 })
+    assert.equal(auditRows(), 1)
+    assert.equal(pendingDistillations(h.store.db).length, 0)
+    assert.ok(getRecord(h.store.db, 'pnpm-tty'), 'the cancelled job\'s lesson finally lands')
 })
 
 test('episodic retention prunes files and signal rows, never dropping recent debt', async (t) => {

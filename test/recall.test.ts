@@ -12,7 +12,7 @@ import { createPreStepHook } from '../lib/hooks/pre-step.js'
 import { indexSummaryText, protocolText, registerProtocolSection } from '../lib/hooks/prompt.js'
 import { clearRepoCache } from '../lib/paths.js'
 import { packTokens, recall, renderRecallPack } from '../lib/recall/engine.js'
-import { normalizeRelevance } from '../lib/recall/rank.js'
+import { normalizeRelevance, frequencyBoost, recallBoost, rankRecords } from '../lib/recall/rank.js'
 import { buildQuery, messageText, isMemoryMessage } from '../lib/recall/query.js'
 import { assertDraftScope, ScopeViolationError } from '../lib/store/guard.js'
 import { applyDraft } from '../lib/learn/gate.js'
@@ -332,4 +332,44 @@ test('applyDraft refuses to write across scopes', async (t) => {
     })
     assert.throws(() => assertDraftScope(record, global.scope), ScopeViolationError)
     assert.equal(countRecords(global.db).total, 1, 'only the pre-existing global lesson')
+})
+
+test('ranking uses the recall history, and repetition, as separate signals', () => {
+    // DESIGN §6 budgets one 0.05 coefficient across both history factors; the
+    // recall factor used to be fed `times_seen`, so the usage table's
+    // `times_recalled` — the "this memory actually paid off" signal — never
+    // influenced ranking at all.
+    const base = {
+        id: 'r',
+        title: 'pnpm install 无 TTY',
+        body: '触发场景：无 TTY 下安装中止。正确做法：CI=true 重试。',
+        layer: 'global' as const,
+        scopeKind: 'global' as const,
+        confidence: 0.9,
+        expiresAt: undefined,
+        timesSeen: 1,
+        timesRecalled: 0,
+        successAfterRecall: 0,
+        failAfterRecall: 0,
+        status: 'active' as const,
+        origin: 'user' as const,
+        tags: [],
+        evidence: [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+    }
+    assert.equal(frequencyBoost(1), 1.025)
+    assert.equal(frequencyBoost(10), 1.25)
+    assert.equal(recallBoost(0), 1, 'a never-recalled record gets no history bonus')
+    assert.equal(recallBoost(10), 1.25)
+
+    const scored = rankRecords(
+        [
+            { ...base, id: 'never-recalled', timesRecalled: 0 } as never,
+            { ...base, id: 'well-used', timesRecalled: 10 } as never,
+        ],
+        { relevance: new Map([['never-recalled', 1], ['well-used', 1]]), queryTerms: [] },
+    )
+    assert.equal(scored[0]?.record.id, 'well-used', 'the recalled-and-surviving record ranks first')
+    assert.equal(recallBoost(99), 1.25, 'the factor is capped (diminishing returns)')
 })

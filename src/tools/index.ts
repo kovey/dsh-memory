@@ -6,11 +6,18 @@
  * Writing tools arrive with the learning loop in M2.
  */
 import type { Context } from '@deepseek-ai/cordis'
+import fs from 'node:fs'
+import path from 'node:path'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { MemoryConfig } from '../config.js'
 import { log } from '../log.js'
 import { rankRecords, normalizeRelevance } from '../recall/rank.js'
-import { countRecords, extractTerms, getRecord, listRecords, rawSearch } from '../store/sqlite/records.js'
+import { countRecords, extractTerms, getRecord, listRecords, rawSearch, upsertRecord } from '../store/sqlite/records.js'
+import { importLessons } from '../store/import.js'
+import { assertInsideScope } from '../store/guard.js'
+import { parseLesson } from '../store/frontmatter.js'
+import { exportAll } from '../store/export.js'
+import { sessionIdOf } from '../scope/resolver.js'
 import type { StoreRegistry, ScopeStore } from '../store/store.js'
 import type { Layer, MemoryRecord, MemoryScope } from '../store/types.js'
 import { ScopeResolver } from '../scope/resolver.js'
@@ -18,7 +25,7 @@ import type { AgentLike } from '../scope/resolver.js'
 import { recall, renderRecallPack } from '../recall/engine.js'
 import type { SessionState } from '../recall/session-state.js'
 import { buildQuery } from '../recall/query.js'
-import { saveTool } from './save.js'
+import { saveTool, refuseWrite } from './save.js'
 import { consolidateTool, forgetTool } from './consolidate.js'
 import { syncTool } from './sync.js'
 import { statsTool } from './stats.js'
@@ -42,14 +49,42 @@ const TEXT_OUTPUT: TextOutput = { type: 'string' }
 
 const LAYER_ENUM = ['project', 'global', 'profile', 'episodic'] as const
 
-/** Register every tool; returns the list of disposers for `ctx.effect`. */
-export function registerTools(ctx: Context, deps: ToolDeps): (() => void)[] {
+/**
+ * Outcome of one registration pass. Capabilities (and therefore the prompt
+ * protocol) are derived from `registered`/`failed`, never from what the plugin
+ * *intended* to register.
+ */
+export interface ToolRegistration {
+    /** Disposers for `ctx.effect`, one per successfully registered tool. */
+    disposers: (() => void)[]
+    /** Tool names the host actually accepted, in registration order. */
+    registered: string[]
+    /** Tool names whose `ctx.tools.register` threw. */
+    failed: string[]
+}
+
+/**
+ * Register every tool and report what the host accepted: `disposers` for
+ * `ctx.effect`, plus the names that registered and the names that failed, which
+ * is what the prompt capabilities are derived from.
+ */
+export function registerTools(ctx: Context, deps: ToolDeps): ToolRegistration {
     const disposers: (() => void)[] = []
+    const registered: string[] = []
+    const failed: string[] = []
     const register = (definition: ReturnType<typeof defineTool>): void => {
         try {
             disposers.push(ctx.tools.register(definition))
+            registered.push(definition.name)
         } catch (error) {
-            log('error', `memory: registering tool ${definition.name} failed:`, error)
+            failed.push(definition.name)
+            // Not fatal — but a half-registered surface must not be advertised:
+            // `src/index.ts` derives the protocol capabilities from this result.
+            log(
+                'warn',
+                `memory: registering tool ${definition.name} failed — it is unavailable and the protocol section will not advertise it:`,
+                error,
+            )
         }
     }
 
@@ -62,7 +97,9 @@ export function registerTools(ctx: Context, deps: ToolDeps): (() => void)[] {
     register(getTool(deps))
     register(statsTool(deps))
     register(reindexTool(deps))
-    return disposers
+    register(configTool(deps))
+    register(importTool(deps))
+    return { disposers, registered, failed }
 }
 
 /** Which open stores a call should consult. */
@@ -255,6 +292,11 @@ function reindexTool(deps: ToolDeps) {
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
             const agent = exec.agent as unknown as AgentLike | undefined
+            // "Read-only with respect to memory content" still writes: the
+            // derived database is dropped/reimported, the index file exported and
+            // embeddings stored — so a subagent may not run it either.
+            const refusal = refuseWrite(deps, agent, '`memory_reindex` (rebuilding the derived index)')
+            if (refusal !== undefined) return refusal
             const targets: MemoryScope[] = []
             targets.push(deps.resolver.resolve({ agent }))
             if (args.scope === 'global' || args.scope === 'all') targets.push(deps.resolver.globalScope())
@@ -311,7 +353,106 @@ function formatHit(index: number, record: MemoryRecord, scope: MemoryScope, scor
     return `${index}. [${flags.join(' · ')}] ${record.title} (id: ${record.id})\n   ${excerpt}`
 }
 
-/** Used by tests and the hook layer: the records a scope currently holds. */
-export function recordsOf(store: ScopeStore, limit = 100): MemoryRecord[] {
-    return listRecords(store.db, { limit })
+/**
+ * `memory_config` — session-scoped quieting (DESIGN §4.2).
+ *
+ * Deliberately not persistent: it changes how *this* session behaves (turn off
+ * automatic recall while debugging), and a fresh session starts with the
+ * configured defaults again. Durable switches live in the profile patch.
+ */
+export function configTool(deps: ToolDeps) {
+    return defineTool({
+        name: 'memory_config',
+        description:
+            'Adjust memory behaviour for the current session only (not persisted). Currently: autoRecall=false stops automatic recall injection while the memory tools keep working. Call without arguments to see the effective settings.',
+        parameters: {
+            autoRecall: { type: 'boolean', description: 'false = stop injecting recalled memory into this session.' },
+        },
+        output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
+        async execute(args, exec) {
+            const agent = exec.agent as unknown as AgentLike | undefined
+            const sessionId = sessionIdOf(agent)
+            if (sessionId === undefined) return 'no session context — memory_config needs an agent session'
+            if (args.autoRecall !== undefined) {
+                deps.state.setOverride(sessionId, { autoRecall: args.autoRecall })
+                log('info', `memory: session ${sessionId.slice(0, 12)}… autoRecall=${args.autoRecall}`)
+            }
+            const override = deps.state.override(sessionId)
+            return [
+                `session overrides: autoRecall=${String(override.autoRecall ?? deps.config.recall.autoInject)}`,
+                `configured defaults: autoInject=${String(deps.config.recall.autoInject)}, budgetTokens=${deps.config.recall.budgetTokens}, maxItems=${deps.config.recall.maxItems}, minScore=${deps.config.recall.minScore}`,
+                'note: overrides last for this session only; durable settings belong in the profile patch.',
+            ].join('\n')
+        },
+    })
+}
+
+/**
+ * `memory_import` — pull one lesson file into the store (DESIGN §4).
+ *
+ * The store already adopts files inside its own root on every export; this is
+ * for a lesson that lives *elsewhere* (another project, a scratch file) and is
+ * worth keeping here.
+ */
+export function importTool(deps: ToolDeps) {
+    return defineTool({
+        name: 'memory_import',
+        description:
+            'Import one lesson markdown file (with the memory frontmatter) into this project or the global store. Use when a lesson was written outside the memory root, e.g. copied from another project. Returns the record id and how it was absorbed.',
+        parameters: {
+            path: { type: 'string', description: 'Absolute path of the lesson file to import.' },
+            layer: { type: 'string', enum: ['project', 'global'], description: 'Target store. Default: project.' },
+        },
+        output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
+        async execute(args, exec) {
+            const agent = exec.agent as unknown as AgentLike | undefined
+            const refusal = refuseWrite(deps, agent, '`memory_import`')
+            if (refusal !== undefined) return refusal
+            if (typeof args.path !== 'string' || args.path.trim() === '') return 'rejected: path is required'
+            const file = path.resolve(args.path)
+            if (!fs.existsSync(file) || !fs.statSync(file).isFile()) return `rejected: ${file} is not a readable file`
+            let text: string
+            try {
+                text = fs.readFileSync(file, 'utf8')
+            } catch (error) {
+                return `rejected: cannot read ${file} (${error instanceof Error ? error.message : String(error)})`
+            }
+            const parsed = parseLesson(text)
+            if (parsed === undefined) {
+                return 'rejected: not a lesson document — it needs the memory frontmatter (title, confidence, expires…).'
+            }
+            const scope = deps.resolver.resolve({ agent, ...(args.layer === 'global' ? { explicit: 'global' as const } : {}) })
+            const store = deps.registry.open(scope)
+            if (store === undefined) return 'memory store unavailable (SQLite driver missing or memory root unwritable)'
+            const id = path.basename(file, '.md')
+            if (id.trim() === '') return 'rejected: the file name must yield a record id'
+            // Copying the file into the root and letting the importer adopt it
+            // reuses every rule the store already has — dash-equivalent id
+            // merging, evidence gap-filling, "no new information means no merge" —
+            // instead of a raw upsert that would replace detail rows with counts.
+            const lessons = path.join(store.scope.root, 'lessons')
+            const target = path.join(lessons, `${id}.md`)
+            try {
+                assertInsideScope(store.scope, target)
+                fs.mkdirSync(lessons, { recursive: true })
+                if (fs.existsSync(target) && path.resolve(target) !== file) {
+                    return `rejected: ${target} already exists in this store — import would overwrite it`
+                }
+                if (path.resolve(target) !== file) fs.copyFileSync(file, target)
+            } catch (error) {
+                return `rejected: cannot place the lesson in ${lessons} (${error instanceof Error ? error.message : String(error)})`
+            }
+            const before = countRecords(store.db).total
+            const report = importLessons(store.db, store.scope)
+            exportAll(store.db, store.scope)
+            const after = countRecords(store.db).total
+            return [
+                `${after > before ? 'imported' : 'merged into an existing record'} ${id} → ${scope.kind} store`,
+                `title: ${parsed.frontmatter.title}`,
+                `confidence: ${parsed.frontmatter.confidence}, expires: ${parsed.frontmatter.expires}`,
+                `importer: scanned ${report.scanned}, imported ${report.imported}, merged ${report.merged}, skipped ${report.skipped}`,
+                `root: ${scope.root}`,
+            ].join('\n')
+        },
+    })
 }

@@ -104,7 +104,8 @@
           model: ''              # e.g. text-embedding-3-small / bge-m3
           apiKeyEnv: ''          # read from this env var (preferred over apiKey)
           apiKey: ''
-          timeoutMs: 1500
+          timeoutMs: 1500      # 单批超时
+          budgetMs: 8000       # 一次嵌入回填的总预算（跨批次，避免多批叠成十几秒）
           weight: 0.5            # 0 = lexical only, 1 = semantic only
           minLexicalHits: 3      # only embed the query when lexical recall is thinner
           maxRecordsPerRun: 200  # incremental backfill per recall pass

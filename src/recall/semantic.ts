@@ -39,15 +39,26 @@ export interface RemoteProviderOptions {
     model: string
     apiKey?: string | undefined
     timeoutMs: number
+    /**
+     * Wall-clock budget for one `embed()` run, across all batches. Without it a
+     * multi-batch backfill could hold the step for batches × timeoutMs.
+     */
+    budgetMs?: number
     /** Batches larger than this are split. */
     batchSize?: number
     /** Injected for tests. */
     fetchImpl?: typeof fetch
 }
 
+/** Helper: an awaited call can invalidate TS' narrowing of `signal.aborted`. */
+function isAborted(signal: AbortSignal | undefined): boolean {
+    return signal?.aborted === true
+}
+
 /** Minimal OpenAI-compatible `/embeddings` client. */
 export function createRemoteProvider(options: RemoteProviderOptions): EmbeddingProvider {
     const fetchImpl = options.fetchImpl ?? globalThis.fetch
+    const budgetMs = options.budgetMs ?? Math.max(options.timeoutMs, 8_000)
     const batchSize = Math.max(1, options.batchSize ?? 32)
     let lastError: string | undefined
     let calls = 0
@@ -61,16 +72,36 @@ export function createRemoteProvider(options: RemoteProviderOptions): EmbeddingP
                 lastError = 'provider not configured (baseUrl/model missing)'
                 return undefined
             }
+            if (isAborted(signal)) {
+                lastError = 'aborted before the request was sent'
+                return undefined
+            }
             const out: number[][] = []
+            // One timeout per batch is not a bound on the call: a backfill of
+            // several batches could hold the step for batchCount × timeoutMs
+            // (cold model loads make each one slow). The deadline covers the run.
+            const deadline = Date.now() + budgetMs
             try {
                 for (let i = 0; i < texts.length; i += batchSize) {
+                    if (Date.now() >= deadline) {
+                        lastError = `embedding budget of ${budgetMs}ms exhausted after ${out.length}/${texts.length} text(s)`
+                        break
+                    }
+                    if (isAborted(signal)) {
+                        lastError = 'aborted by the caller'
+                        break
+                    }
                     const batch = texts.slice(i, i + batchSize)
                     const controller = new AbortController()
-                    const timer = setTimeout(() => controller.abort(), options.timeoutMs)
+                    const timer = setTimeout(
+                        () => controller.abort(),
+                        Math.max(50, Math.min(options.timeoutMs, deadline - Date.now())),
+                    )
                     const onAbort = (): void => controller.abort()
                     signal?.addEventListener('abort', onAbort, { once: true })
                     try {
                         calls += 1
+                        const remaining = Math.max(50, deadline - Date.now())
                         const response = await fetchImpl(`${options.baseUrl.replace(/\/$/, '')}/embeddings`, {
                             method: 'POST',
                             headers: {
@@ -84,25 +115,30 @@ export function createRemoteProvider(options: RemoteProviderOptions): EmbeddingP
                         })
                         if (!response.ok) {
                             lastError = `HTTP ${response.status}`
-                            return undefined
+                            break
                         }
                         const payload = (await response.json()) as { data?: { embedding?: unknown }[] }
                         const rows = payload.data ?? []
                         for (const row of rows) {
                             if (!Array.isArray(row.embedding)) {
                                 lastError = 'malformed embedding response'
-                                return undefined
+                                break
                             }
                             out.push(row.embedding.map((value) => Number(value)))
                         }
+                        if (lastError !== undefined) break
                     } finally {
                         clearTimeout(timer)
                         signal?.removeEventListener('abort', onAbort)
                     }
                 }
+                if (out.length === 0) return undefined
                 if (out.length !== texts.length) {
-                    lastError = `expected ${texts.length} vectors, got ${out.length}`
-                    return undefined
+                    // Persist what did arrive: the caller stores vectors one by one
+                    // and a retry then only pays for the missing ones. Discarding a
+                    // partial batch threw away work that had already been billed.
+                    lastError = `partial: ${out.length}/${texts.length} vectors`
+                    return out
                 }
                 lastError = undefined
                 return out
@@ -129,6 +165,7 @@ export function createEmbeddingProvider(config: MemoryConfig): EmbeddingProvider
         model: semantic.model,
         apiKey: apiKey !== undefined && apiKey !== '' ? apiKey : semantic.apiKey,
         timeoutMs: semantic.timeoutMs,
+        budgetMs: semantic.budgetMs,
     })
 }
 
@@ -153,15 +190,30 @@ export interface StoredVector {
     vector: Float32Array
 }
 
-export function loadVectors(db: DatabaseSync, model: string): Map<string, Float32Array> {
-    const rows = db.prepare('SELECT record_id, vector FROM embeddings WHERE model = ?').all(model)
+/**
+ * Load vectors for `model`, skipping any whose stored dimension does not match
+ * the query vector's.
+ *
+ * The dimension is stored but was never read: if the endpoint behind the same
+ * model name started returning different vectors, `cosine` would quietly compare
+ * prefixes and rank by garbage instead of failing. Mismatched rows are also
+ * re-embedded (see `pendingRecords`).
+ */
+export function loadVectors(db: DatabaseSync, model: string, dimension?: number): Map<string, Float32Array> {
+    const rows = db.prepare('SELECT record_id, vector, dim FROM embeddings WHERE model = ?').all(model)
     const out = new Map<string, Float32Array>()
     for (const row of rows) {
         const id = row['record_id']
         const blob = row['vector']
         if (typeof id !== 'string') continue
+        const dim = typeof row['dim'] === 'number' ? row['dim'] : undefined
+        if (dimension !== undefined && dim !== undefined && dim !== dimension) continue
         // node:sqlite hands BLOBs back as Uint8Array; anything else is not a vector.
-        if (blob instanceof Uint8Array) out.set(id, fromBlob(blob))
+        if (blob instanceof Uint8Array) {
+            const vector = fromBlob(blob)
+            if (dimension !== undefined && vector.length !== dimension) continue
+            out.set(id, vector)
+        }
     }
     return out
 }
@@ -267,7 +319,10 @@ export async function ensureEmbeddings(
 }
 
 export function cosine(a: Float32Array, b: Float32Array): number {
-    const length = Math.min(a.length, b.length)
+    // Different lengths mean different embedding spaces: comparing prefixes would
+    // produce a confident-looking number with no meaning.
+    if (a.length !== b.length) return 0
+    const length = a.length
     if (length === 0) return 0
     let dot = 0
     let normA = 0
@@ -371,8 +426,9 @@ export async function semanticRecall(
     }
 
     const cache = deps.cache ?? new QueryVectorCache()
-    // A cheap deterministic key: the model plus the term set the caller searched.
-    const key = `${model}|${extractTerms(query, 24).join(' ')}`
+    // Key on the *embedded text*, not the first 24 terms: two different queries
+    // sharing a prefix used to reuse each other's vector.
+    const key = `${model}|${query}`
     let queryVector = cache.get(key)
     if (queryVector === undefined) {
         const vectors = await deps.provider.embed([query], options.signal)

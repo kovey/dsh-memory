@@ -39,7 +39,8 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 | DB 重建 `memory_reindex(rebuild=true)`：文本视图 → 库（含 episodes + metrics），克隆后指纹一致 | ✅ |
 | 评估门禁：baseline.md 解析（基线任务集）、指标快照冻结、四项指标回归判定 | ✅ |
 | 记忆健康度：召回命中率、召回后成败、pending 积压、蒸馏成本/超时、矛盾与提案 | ✅ |
-| 趋势窗口对比（近 N 天 vs 前 N 天）+ `memory_stats({ setBaseline: true })` | ✅ |
+| 门禁三态（pass / regression / **unknown**——无数据不再算通过） | ✅ |
+| 趋势窗口对比（近 N 天 vs 前 N 天）+ `memory_stats({ setBaseline: true, baselineReason: "<谁要求、验证了什么>" })` | ✅ |
 | 可选语义召回：OpenAI 兼容 /embeddings + 按内容哈希增量缓存 + 与词法打分混合（**默认关**） | ✅ |
 | 蒸馏运行器可选 `jobs`：交给 `ctx.jobs`，轮次立即结束，作业可见/可取消 | ✅ |
 | 实机验证：真实 dsh 宿主中加载、引导导入 18 条、turn 1 自动召回 4 条（533 tok） | ✅ |
@@ -89,6 +90,8 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 | `memory_sync` | 与远端同步：本地提交 → fetch/rebase → 冲突按规则合并 → 从文本视图重建库（push 仅在显式 `push=true` 时发生） |
 | `memory_consolidate` | 记忆质量巩固：过期归档 / 衰减 / 矛盾检测与消解 / 晋升提案（默认 dry-run） |
 | `memory_forget` | 退役一条记忆（归档保留文件，不物理删除） |
+| `memory_config` | 会话级降噪（`autoRecall: false`），不落盘 |
+| `memory_import` | 把外部 lesson 文件导入项目/全局库 |
 | `memory_reindex` | 从文本视图重建派生索引；`rebuild=true` 时做完整重建（删除磁盘上已不存在的记录、重导 episodes 与指标） |
 
 ## 蒸馏用哪个模型？——默认跟随会话
@@ -207,7 +210,7 @@ embedding 语义召回：
 
 一次性 surface（`dsh --profile headless "任务"`、e2e）里 agent 在轮次结束即销毁、**作业会被取消**——
 所以插件带**补蒸馏**：`signals` 里没有对应 `distill` 审计行的组，会在下一个会话的首轮结束时
-用 inline 补跑（每作用域每进程一次，年龄 >5s 且轮次已结束才捡）。实测：
+用 inline 补跑（每作用域每作用域每进程一次，年龄 > 一次蒸馏超时 且轮次已结束才捡）。实测：
 
 ```
 会话1: turn 18 distillation handed to job memory-distill-1 → job cancelled (owner disposed)
@@ -239,7 +242,7 @@ embedding 语义召回：
 
 ```
 memory_stats({ windowDays: 30 })                  # 现状 + 健康度 + 门禁判定 + 趋势
-memory_stats({ setBaseline: true, note: "..." })  # 在一段表现良好的时期后冻结基线
+memory_stats({ setBaseline: true, baselineReason: "用户要求；v0.4 发布后 7 天无回归" })  # 冻结基线（需理由 + 顶层会话，子代理被拒）
 ```
 
 门禁对比四项指标（成功率↑、耗时↓、打扰↓、返工↓），带容差（成功率 ±0.05、耗时 ±15%、打扰/返工 ±0.5），

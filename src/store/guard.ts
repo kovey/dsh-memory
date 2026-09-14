@@ -1,0 +1,68 @@
+/**
+ * Scope guards — the enforcement point for invariants 2 and 3 (DESIGN §2, §3).
+ *
+ * Project memory is written **only** under `<repo>/.dsh/memory`; a project-scope
+ * write whose path resolves anywhere else is refused outright rather than
+ * silently redirected to the global root. The same rule protects the reverse
+ * direction, so the two databases can never contaminate each other.
+ */
+import path from 'node:path'
+import type { MemoryRecord, MemoryScope } from './types.js'
+import { isInside, projectMemoryRoot } from '../paths.js'
+
+export class ScopeViolationError extends Error {
+    override readonly name = 'ScopeViolationError'
+}
+
+/** Assert that `target` lives inside the scope's memory root. */
+export function assertInsideScope(scope: MemoryScope, target: string): void {
+    if (!isInside(scope.root, target)) {
+        throw new ScopeViolationError(
+            `refusing to write outside the ${scope.kind} memory root: ${target} is not inside ${scope.root}`,
+        )
+    }
+}
+
+/**
+ * Assert that a record's own scope matches the target scope. A project record
+ * may never be persisted into the global database (or vice versa), regardless
+ * of what the caller asked for.
+ *
+ * `globalRoot` is the canonical global memory root (as resolved by the caller),
+ * so an override such as `config.memoryHome` stays consistent.
+ */
+export function assertRecordScope(record: MemoryRecord, scope: MemoryScope, globalRoot: string): void {
+    if (record.scopeKind !== scope.kind) {
+        throw new ScopeViolationError(
+            `record ${record.id} is ${record.scopeKind}-scoped but the target root is ${scope.kind}`,
+        )
+    }
+    if (record.scopeKind === 'project') {
+        if (scope.repo === undefined || record.repo === undefined) {
+            throw new ScopeViolationError(`project record ${record.id} requires a repository root on both sides`)
+        }
+        if (path.resolve(record.repo) !== path.resolve(scope.repo)) {
+            throw new ScopeViolationError(
+                `record ${record.id} belongs to ${record.repo} but the target project is ${scope.repo}`,
+            )
+        }
+        const expected = projectMemoryRoot(scope.repo)
+        if (path.resolve(scope.root) !== path.resolve(expected)) {
+            throw new ScopeViolationError(`project scope root must be ${expected}, got ${scope.root}`)
+        }
+    } else {
+        if (path.resolve(scope.root) !== path.resolve(globalRoot)) {
+            throw new ScopeViolationError(`global scope root must be ${globalRoot}, got ${scope.root}`)
+        }
+    }
+}
+
+/** Path of one lesson inside a scope root. */
+export function lessonPath(scopeRoot: string, id: string): string {
+    return path.join(scopeRoot, 'lessons', `${id}.md`)
+}
+
+/** Path of one archived lesson inside a scope root. */
+export function archivePath(scopeRoot: string, id: string): string {
+    return path.join(scopeRoot, 'archive', 'lessons', `${id}.md`)
+}

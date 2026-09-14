@@ -11,3 +11,12 @@ node_modules/
 # They are ignored here for reference; the plugin's own .gitignore template
 # (see src/store/gitignore.ts) writes the real one into memory roots.
 .memory-runtime/
+.tmp-tests/
+
+# Project memory root of this repository (docs/DESIGN.md §5.1): the text view is
+# tracked, the derived/private artifacts are not.
+.dsh/memory/memory.db
+.dsh/memory/memory.db-shm
+.dsh/memory/memory.db-wal
+.dsh/memory/sessions/
+.dsh/memory/.queue/

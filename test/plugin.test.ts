@@ -75,22 +75,20 @@ test('apply() registers the memory tools, hooks and prompt section, and unwinds 
             'memory_save',
             'memory_search',
             'memory_stats',
+            'memory_sync',
         ],
     )
 
     assert.deepEqual(sections, ['memory:protocol'])
-    assert.deepEqual(
-        [...listeners].sort(),
-        [
-            'agent/created',
-            'agent/pre-step',
-            'agent/request-error',
-            'agent/turn-stopping',
-            'session/created',
-            'session/disposed',
-            'tools/result',
-        ],
-    )
+    assert.deepEqual([...new Set(listeners)].sort(), [
+        'agent/created',
+        'agent/pre-step',
+        'agent/request-error',
+        'agent/turn-stopping',
+        'session/created',
+        'session/disposed',
+        'tools/result',
+    ])
 
     for (const dispose of effects) dispose()
     assert.equal(tools.size, 0)
@@ -112,5 +110,5 @@ test('apply() stays silent when disabled', async () => {
 test('a broken config cannot break session startup', () => {
     const { ctx, tools } = fakeContext()
     assert.doesNotThrow(() => apply(ctx as never, { recall: 'not-an-object', learn: 42 }))
-    assert.equal(tools.size, 8)
+    assert.equal(tools.size, 9)
 })

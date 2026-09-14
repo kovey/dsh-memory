@@ -10,6 +10,8 @@ import { ScopeResolver } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
 import type { StoreRegistry } from '../store/store.js'
 import type { MemoryScope } from '../store/types.js'
+import { AutoCommitter } from '../sync/autocommit.js'
+import { ensureRepo } from '../sync/git.js'
 import { consolidate } from '../learn/consolidate.js'
 import { consolidationDue } from '../learn/decay.js'
 import { TurnLedger } from '../learn/ledger.js'
@@ -28,6 +30,8 @@ export interface HookDeps extends PromptDeps {
     signals: SignalBuffer
     /** Per-turn work counters, used for recall attribution. */
     ledger: TurnLedger
+    /** Local-only commits of the memory text view. */
+    committer: AutoCommitter
 }
 
 export interface HookHandle {
@@ -50,6 +54,7 @@ export function createHookDeps(
         state: new SessionState(),
         signals: new SignalBuffer(),
         ledger: new TurnLedger(),
+        committer: new AutoCommitter(config),
     }
 }
 
@@ -76,10 +81,32 @@ export function registerHooks(ctx: Context, deps: HookDeps): HookHandle {
     // ③ learning loop: signals, turn-end distillation, recall attribution.
     disposers.push(...registerLearnHooks(ctx, { ...deps, ctx }))
 
+    // ③.4 git: make the root versionable, then commit local changes at a
+    // task-end cadence. Pushing never happens here (DESIGN D6).
+    if (deps.config.git.enabled) {
+        ctx.on('agent/turn-stopping', (payload: { agent?: { session?: { header?: { cwd?: string } } } }) => {
+            try {
+                const scope = deps.resolver.resolve({ cwd: payload?.agent?.session?.header?.cwd })
+                deps.committer.maybeCommit(scope, `turn end (${scope.kind})`)
+            } catch (error) {
+                log('debug', 'memory: auto-commit skipped:', error)
+            }
+        })
+    }
+
     // ③.5 lazy consolidation: at most one pass per scope per interval, never
     // blocking session start (DESIGN §7 "周期" row).
     const inFlight = new Set<string>()
     ctx.on('session/created', (session: { header?: { cwd?: string } }) => {
+        try {
+            if (deps.config.git.enabled) {
+                const scope = deps.resolver.resolve({ cwd: session?.header?.cwd })
+                const timer = setTimeout(() => ensureRepo(scope.root), 1_000)
+                timer.unref?.()
+            }
+        } catch (error) {
+            log('debug', 'memory: git init scheduling failed:', error)
+        }
         try {
             if (!deps.config.consolidate.enabled) return
             const scope = deps.resolver.resolve({ cwd: session?.header?.cwd })
@@ -96,12 +123,16 @@ export function registerHooks(ctx: Context, deps: HookDeps): HookHandle {
     })
 
     // ④ per-session state cleanup.
-    ctx.on('session/disposed', (session: { id?: string }) => {
+    ctx.on('session/disposed', (session: { id?: string; header?: { cwd?: string } }) => {
         try {
             if (typeof session?.id !== 'string') return
             deps.state.forget(session.id)
             deps.signals.forget(session.id)
             deps.ledger.forget(session.id)
+            if (deps.config.git.enabled) {
+                const scope = deps.resolver.resolve({ cwd: session?.header?.cwd })
+                deps.committer.commitNow(scope, 'session end')
+            }
         } catch (error) {
             log('debug', 'memory: session cleanup failed:', error)
         }

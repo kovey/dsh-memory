@@ -7,9 +7,9 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
 - 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
 - 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
-- 当前进度：**M3**（存储 + 自动召回 + 学习闭环 + 质量工序）；M4–M5 见设计文档 §11
+- 当前进度：**M4**（存储 + 自动召回 + 学习闭环 + 质量工序 + git 化同步）；M5 见设计文档 §11
 
-## 状态（M3）
+## 状态（M4）
 
 | 能力 | 状态 |
 |---|---|
@@ -33,6 +33,10 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 | 晋升提案：`times_seen ≥3` 且 conf ≥0.9 → `proposals` 表，**人审后**才写技能 | ✅ |
 | 工具 `memory_consolidate` / `memory_forget`；会话创建时惰性触发巩固（每 7 天或每 5 个任务） | ✅ |
 | 技能改造：`auto-retrospective` / `memory-merge` 改走插件工具，保留文件降级路径 | ✅ |
+| git 化：`git init`（全局记忆库已初始化）+ 忽略规则（db/sessions/queue 不入库） | ✅ |
+| 自动提交：`task-end`（默认，30 分钟检查点节流）/ `immediate` / `off`；**提交只含记忆目录**，绝不 push | ✅ |
+| `memory_sync`：commit → fetch → rebase → 冲突按规则合并（lessons 合并 / MEMORY.md 重生成）→ 重建 | ✅ |
+| DB 重建 `memory_reindex(rebuild=true)`：文本视图 → 库（含 episodes + metrics），克隆后指纹一致 | ✅ |
 | 质量工序：矛盾/衰减/归档/晋升（M3） | ⏳ |
 | git 化同步与 `--rebuild`（M4） | ⏳ |
 | baseline 回归门禁（M5） | ⏳ |
@@ -76,9 +80,10 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 | `memory_stats` | 记忆库健康度：条目数、pending、过期、召回次数、任务指标 |
 | `memory_save` | 写入一条长期经验：默认写项目级；同一门控负责去重/合并/拒收 |
 | `memory_recall` | 一次取回任务召回包（项目 + 命中关键词的全局教训，已排序并按预算裁剪） |
+| `memory_sync` | 与远端同步：本地提交 → fetch/rebase → 冲突按规则合并 → 从文本视图重建库（push 仅在显式 `push=true` 时发生） |
 | `memory_consolidate` | 记忆质量巩固：过期归档 / 衰减 / 矛盾检测与消解 / 晋升提案（默认 dry-run） |
 | `memory_forget` | 退役一条记忆（归档保留文件，不物理删除） |
-| `memory_reindex` | 从文本视图重建派生索引（手工改过 lessons、或 `git pull` 之后） |
+| `memory_reindex` | 从文本视图重建派生索引；`rebuild=true` 时做完整重建（删除磁盘上已不存在的记录、重导 episodes 与指标） |
 
 ## 开发
 

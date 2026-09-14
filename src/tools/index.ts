@@ -23,6 +23,9 @@ import type { SessionState } from '../recall/session-state.js'
 import { buildQuery } from '../recall/query.js'
 import { saveTool } from './save.js'
 import { consolidateTool, forgetTool } from './consolidate.js'
+import { syncTool } from './sync.js'
+import { rebuildScope } from '../store/rebuild.js'
+import type { AutoCommitter } from '../sync/autocommit.js'
 import { conflictCount, openProposalsCount } from '../learn/stats.js'
 
 export interface ToolDeps {
@@ -30,6 +33,7 @@ export interface ToolDeps {
     registry: StoreRegistry
     resolver: ScopeResolver
     state: SessionState
+    committer: AutoCommitter
 }
 
 type TextOutput = { type: 'string' }
@@ -51,6 +55,7 @@ export function registerTools(ctx: Context, deps: ToolDeps): (() => void)[] {
 
     register(saveTool(deps))
     register(consolidateTool(deps))
+    register(syncTool(deps))
     register(forgetTool(deps))
     register(recallTool(deps))
     register(searchTool(deps))
@@ -278,9 +283,21 @@ function reindexTool(deps: ToolDeps) {
             if (args.scope === 'global' || args.scope === 'all') targets.push(deps.resolver.globalScope())
             const lines: string[] = []
             for (const scope of targets) {
+                if (args.rebuild === true) {
+                    const store = deps.registry.open(scope)
+                    if (store === undefined) {
+                        lines.push(`${scope.kind} (${scope.root}): store unavailable`)
+                        continue
+                    }
+                    const result = rebuildScope(store.db, store.scope, store.fts5)
+                    lines.push(
+                        `${scope.kind} (${scope.root}): rebuilt — imported ${result.imported}, removed ${result.removed}, metrics ${result.metrics}, episodes ${result.episodes}${result.errors.length > 0 ? ` (errors: ${result.errors.join('; ')})` : ''}`,
+                    )
+                    continue
+                }
                 const imported = deps.registry.reimport(scope)
                 deps.registry.exportIndexOnly(scope)
-                lines.push(`${scope.kind} (${scope.root}): imported ${imported} lesson file(s)${args.rebuild === true ? ' [rebuild]' : ''}`)
+                lines.push(`${scope.kind} (${scope.root}): imported ${imported} lesson file(s)`)
             }
             if (lines.length === 0) lines.push('no scope resolved')
             return lines.join('\n')

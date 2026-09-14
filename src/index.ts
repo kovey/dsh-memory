@@ -49,6 +49,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
             registry,
             resolver,
             state: deps.state,
+            committer: deps.committer,
         })
         const hooks = registerHooks(ctx, deps)
 

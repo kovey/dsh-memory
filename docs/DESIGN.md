@@ -366,8 +366,8 @@ src/
 | **M1 召回闭环** | 可开关常驻协议段 + 三级召回 + usage 记账 + `memory_recall` | 首步自动召回 <800 tok；同条不重复注入；关开关后无 section | ✅ 已完成 |
 | **M2 学习闭环** | 信号采集 + L1 落盘 + 有界自动蒸馏 + 门控 + `memory_save` + 技能改造 | 一次真实任务：signals 落项目目录、lessons 自动 +N、重复被合并、指标入账 | ✅ 已完成（技能改造留待 M3） |
 | **M3 质量工序** | 矛盾消解 / 衰减 / 归档 / 晋升提案 + `memory_consolidate` + `memory_forget` | 合并后条目下降、无矛盾残留、索引同步、备份可回滚 | ✅ 已完成 |
-| **M4 git 化同步** | autoCommit(task-end) + `memory_sync` + 冲突合并 + `--rebuild` | 克隆目录重建后检索结果一致 | 进行中 |
-| **M5 评估门禁** | baseline 7 任务回归 + `memory_stats` 趋势 + 可选语义检索 | 四项指标不退化 | 待办 |
+| **M4 git 化同步** | autoCommit(task-end) + `memory_sync` + 冲突合并 + `--rebuild` | 克隆目录重建后检索结果一致 | ✅ 已完成 |
+| **M5 评估门禁** | baseline 7 任务回归 + `memory_stats` 趋势 + 可选语义检索 | 四项指标不退化 | 进行中 |
 
 ---
 

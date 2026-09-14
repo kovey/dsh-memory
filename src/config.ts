@@ -37,6 +37,10 @@ export interface MemoryConfig {
         maxDistillPerSession: number
         maxDistillTokensPerDay: number
         distillTimeoutMs: number
+        /** Output budget for one distillation call (reasoning tokens count). */
+        distillMaxTokens: number
+        /** Adapter-owned reasoning effort id; empty = adapter default. */
+        distillReasoningEffort: string
         minSignals: number
         /**
          * `inline` keeps distillation inside turn-stopping (bounded await);
@@ -45,6 +49,14 @@ export interface MemoryConfig {
          * because neither runner survives process exit.
          */
         distillRunner: 'inline' | 'jobs'
+        /**
+         * Non-zero exits are *not* tool errors in this harness (only spawn
+         * failures and aborts are), yet a failed command is the most common
+         * real pain signal. `strong` reacts to exit >= 2 and to error markers
+         * (`grep`-style exit 1 stays quiet), `all` reacts to any non-zero exit,
+         * `off` ignores exit codes entirely.
+         */
+        exitCodeSignals: 'strong' | 'all' | 'off'
     }
     episodic: {
         enabled: boolean
@@ -114,9 +126,16 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         distillModel: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
         maxDistillPerSession: 3,
         maxDistillTokensPerDay: 200_000,
-        distillTimeoutMs: 3_000,
+        // Measured live: a flash-model JSON distillation turn takes >3s, so the
+        // old 3s bound aborted every real call. The bound still exists — it just
+        // reflects reality; `distillRunner: 'jobs'` is the escape hatch for
+        // people who do not want the turn to wait at all.
+        distillTimeoutMs: 15_000,
+        distillMaxTokens: 2_000,
+        distillReasoningEffort: '',
         minSignals: 1,
         distillRunner: 'inline',
+        exitCodeSignals: 'strong',
     },
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
     consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true },
@@ -224,8 +243,15 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             maxDistillPerSession: num(learn['maxDistillPerSession'], d.learn.maxDistillPerSession, 0, 100),
             maxDistillTokensPerDay: num(learn['maxDistillTokensPerDay'], d.learn.maxDistillTokensPerDay, 0, 100_000_000),
             distillTimeoutMs: num(learn['distillTimeoutMs'], d.learn.distillTimeoutMs, 500, 10_000),
+            distillMaxTokens: num(learn['distillMaxTokens'], d.learn.distillMaxTokens, 64, 32_000),
+            distillReasoningEffort: str(learn['distillReasoningEffort'], d.learn.distillReasoningEffort),
             minSignals: num(learn['minSignals'], d.learn.minSignals, 0, 50),
             distillRunner: oneOf(learn['distillRunner'], ['inline', 'jobs'] as const, d.learn.distillRunner),
+            exitCodeSignals: oneOf(
+                learn['exitCodeSignals'],
+                ['strong', 'all', 'off'] as const,
+                d.learn.exitCodeSignals,
+            ),
         },
         episodic: {
             enabled: bool(episodic['enabled'], d.episodic.enabled),

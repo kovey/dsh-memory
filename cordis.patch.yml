@@ -47,12 +47,22 @@
             model: deepseek-v4-flash
           maxDistillPerSession: 3
           maxDistillTokensPerDay: 200000
-          distillTimeoutMs: 3000
+          # 实测：一次 flash 模型的 JSON 蒸馏 >3s，3s 会让真实调用每次都被自己中断。
+          # 不想让轮次等待就用 distillRunner: jobs。
+          distillTimeoutMs: 15000
+          # 单次蒸馏的输出预算（推理 token 也算在内：推理模型可能把预算全用在思考上）
+          distillMaxTokens: 2000
+          # 适配器推理强度 id（留空 = 用适配器默认值）
+          distillReasoningEffort: ''
           minSignals: 1
           # inline: bounded await inside turn-stopping (default).
           # jobs:   hand the work to ctx.jobs — the turn closes immediately and
           #         the distillation shows up in the job list.
           distillRunner: inline
+          # 非零退出在本 harness 里不是 tool error（只有 spawn 失败/中断才是），
+          # 但"命令失败"是最常见的真实疼痛信号：strong 只对 exit>=2 与错误标记反应
+          # （grep 式的 exit 1 保持安静），all 对任何非零退出反应，off 完全不看退出码。
+          exitCodeSignals: strong
 
         # Episodic (L1) capture: structured signals only, redacted by default.
         episodic:

@@ -18,7 +18,7 @@ import { runDistillation } from '../learn/distill-runner.js'
 import type { DistillOutcome } from '../learn/distill.js'
 import { recordEpisode } from '../learn/episodic.js'
 import { TurnLedger } from '../learn/ledger.js'
-import { looksLikeTestFailure, summarize } from '../learn/signals.js'
+import { detectResultFailure } from '../learn/signals.js'
 import type { Signal, SignalBuffer, SignalKind } from '../learn/signals.js'
 
 export interface LearnDeps {
@@ -48,27 +48,45 @@ export function registerLearnHooks(ctx: Context, deps: LearnDeps): (() => void)[
     if (deps.config.learn.collectSignals) {
         const onToolResult = (exec: ToolExecLike, result: ToolResultLike): undefined => {
             try {
-                if (result?.isError !== true) {
-                    const sessionId = exec?.agent?.session?.id
-                    if (typeof sessionId === 'string') {
-                        deps.ledger.noteToolCall(sessionId, deps.state.lastTurn(sessionId), false)
-                    }
-                    return undefined
-                }
                 const sessionId = exec?.agent?.session?.id
                 if (typeof sessionId !== 'string') return undefined
                 const turn = deps.state.lastTurn(sessionId)
-                deps.ledger.noteToolCall(sessionId, turn, true)
-                const detail = summarize(contentText(result?.content))
-                const kind: SignalKind = looksLikeTestFailure(detail) ? 'test-failure' : 'tool-failure'
+                // A non-zero exit is not a tool error in this harness, so the
+                // failure has to be read out of the content (see signals.ts).
+                const failure = detectResultFailure(contentText(result?.content), {
+                    isError: result?.isError === true,
+                    exitCodeMode: deps.config.learn.exitCodeSignals,
+                })
+                deps.ledger.noteToolCall(sessionId, turn, failure !== undefined)
+                if (failure === undefined) return undefined
+
+                const tool = typeof exec.name === 'string' ? exec.name : undefined
                 deps.signals.add({
                     sessionId,
-                    kind,
+                    kind: failure.kind as SignalKind,
                     turn,
-                    ...(typeof exec.name === 'string' ? { tool: exec.name } : {}),
-                    ...(detail !== '' ? { detail } : {}),
+                    ...(tool !== undefined ? { tool } : {}),
+                    detail: failure.detail,
                     at: new Date().toISOString(),
                 })
+                // The same tool failing twice in one turn is a rework loop, which
+                // is stronger evidence than either failure alone.
+                if (tool !== undefined) {
+                    const repeats = deps.signals
+                        .peek(sessionId, turn)
+                        .filter((signal) => signal.tool === tool && signal.kind !== 'rework').length
+                    if (repeats >= 2) {
+                        deps.signals.add({
+                            sessionId,
+                            kind: 'rework',
+                            turn,
+                            tool,
+                            detail: `${tool} failed ${repeats}× in one turn`,
+                            at: new Date().toISOString(),
+                        })
+                        log('info', `memory: rework signal recorded (${tool} ×${repeats}) turn ${turn}`)
+                    }
+                }
             } catch (error) {
                 log('debug', 'memory: tool result observation failed:', error)
             }
@@ -100,11 +118,23 @@ export function registerLearnHooks(ctx: Context, deps: LearnDeps): (() => void)[
     }
     ctx.on('agent/request-error', onRequestError)
 
-    const onTurnStopping = async (payload: { agent?: AgentLike; turn?: number }): Promise<void> => {
+    const onTurnStopping = async (payload: { agent?: AgentLike; turn?: number; signal?: AbortSignal }): Promise<void> => {
+        const started = Date.now()
+        const signal = payload?.signal
+        // Diagnostic: a turn-scoped abort during this await explains an LLM call
+        // that reports "aborted by caller" while our own controller is live.
+        const onAbort = (): void => {
+            log('warn', `memory: turn ${payload.turn ?? '?'} signal aborted after ${Date.now() - started}ms (distillation may be cancelled with it)`)
+        }
+        signal?.addEventListener('abort', onAbort, { once: true })
         try {
+            if (signal?.aborted === true) log('warn', `memory: turn-stopping entered with an already-aborted signal (turn ${payload.turn ?? '?'})`)
             await handleTurnEnd(deps, payload)
+            log('debug', `memory: turn ${payload.turn ?? '?'} learning finished in ${Date.now() - started}ms`)
         } catch (error) {
             log('error', 'memory: turn-end learning failed:', error)
+        } finally {
+            signal?.removeEventListener('abort', onAbort)
         }
     }
     ctx.on('agent/turn-stopping', onTurnStopping)

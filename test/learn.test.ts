@@ -19,7 +19,7 @@ import { applyDraft, gateDraft, jaccard, looksGeneric, similarity, tokens } from
 import { TurnLedger } from '../lib/learn/ledger.js'
 import { redact } from '../lib/learn/redact.js'
 import { runDistillation } from '../lib/learn/distill-runner.js'
-import { SignalBuffer, detectCorrection, looksLikeTestFailure, summarize } from '../lib/learn/signals.js'
+import { SignalBuffer, detectCorrection, detectResultFailure, looksLikeTestFailure, summarize } from '../lib/learn/signals.js'
 import type { Signal } from '../lib/learn/signals.js'
 import { clearRepoCache } from '../lib/paths.js'
 import { SessionState } from '../lib/recall/session-state.js'
@@ -49,7 +49,7 @@ function fakeCtx(text: string, options: { delayMs?: number; throws?: boolean } =
         yield { type: 'block-start', index: 0, blockType: 'text' }
         yield { type: 'text-delta', index: 0, text }
         yield { type: 'block-end', index: 0, block: { type: 'text', text } }
-        yield { type: 'finish', reason: 'stop' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
     }
     return { llm: { stream } } as unknown as Context
 }
@@ -497,4 +497,104 @@ test('the jobs runner hands work to ctx.jobs and the inline runner stays bounded
         { agent: h.agent, sessionId: 'sess-learn', turn: 3, signals, recalled: [] },
     )
     assert.equal(fallback.mode, 'inline')
+})
+
+// ---- failure detection (found by live testing) ------------------------------
+
+test('a command that exits non-zero is a pain signal even though the tool call succeeded', () => {
+    // Regression guard from the live run: dsh-tool-bash marks only spawn
+    // failures and aborts as isError, so `[exit code: N]` must be read from the
+    // content or the most common failure mode is invisible.
+    assert.deepEqual(detectResultFailure('boom\n[exit code: 3]', { isError: false }), {
+        kind: 'tool-failure',
+        detail: 'exit code 3: boom [exit code: 3]',
+    })
+    assert.equal(detectResultFailure('ok\n[exit code: 0]', { isError: false }), undefined)
+    assert.equal(detectResultFailure('no match', { isError: false }), undefined)
+
+    // exit 1 is usually benign in agent work (grep with no match, `diff --quiet`)
+    assert.equal(detectResultFailure('nothing found\n[exit code: 1]', { isError: false }), undefined)
+    assert.ok(detectResultFailure('nothing found\n[exit code: 1]', { isError: false, exitCodeMode: 'all' }))
+    assert.equal(detectResultFailure('boom\n[exit code: 9]', { isError: false, exitCodeMode: 'off' }), undefined)
+
+    // error output inside a successful call still counts
+    const marker = detectResultFailure('cat: /nope: No such file or directory', { isError: false })
+    assert.equal(marker?.kind, 'tool-failure')
+    assert.match(marker?.detail ?? '', /error output/)
+
+    // a real tool error keeps its own path, and failing checks are classified
+    assert.equal(detectResultFailure('spawn ENOENT', { isError: true })?.kind, 'tool-failure')
+    assert.equal(detectResultFailure('AssertionError: expected 1', { isError: true })?.kind, 'test-failure')
+    assert.equal(detectResultFailure('all green', { isError: true })?.kind, 'tool-failure')
+})
+
+test('a repeated failure in one turn also records a rework signal', async (t) => {
+    const h = await harness(t)
+    const handlers = new Map<string, (...args: unknown[]) => unknown>()
+    const ctx = {
+        on: (event: string, handler: (...args: unknown[]) => unknown) => {
+            handlers.set(event, handler)
+        },
+    }
+    const state = new SessionState()
+    const signals = new SignalBuffer()
+    const ledger = new TurnLedger()
+    registerLearnHooks(ctx as never, {
+        ctx: fakeCtx('[]'),
+        config: h.resolved,
+        registry: h.registry,
+        resolver: h.resolver,
+        state,
+        signals,
+        ledger,
+    })
+    state.observeTurn('sess-learn', 1)
+    const onResult = handlers.get('tools/result')
+    onResult?.({ name: 'bash', agent: h.agent }, { isError: false, content: [{ type: 'text', text: '[exit code: 2]' }] })
+    assert.equal(signals.count('sess-learn'), 1)
+    onResult?.({ name: 'bash', agent: h.agent }, { isError: false, content: [{ type: 'text', text: '[exit code: 2]' }] })
+    const kinds = signals.peek('sess-learn', 1).map((signal) => signal.kind)
+    assert.deepEqual(kinds.filter((kind) => kind === 'tool-failure').length, 2)
+    assert.equal(kinds.filter((kind) => kind === 'rework').length, 1, 'the second failure of one tool is a rework loop')
+
+    // a healthy turn records no signal but still counts the tool call
+    onResult?.({ name: 'read', agent: h.agent }, { isError: false, content: [{ type: 'text', text: 'contents' }] })
+    assert.equal(signals.peek('sess-learn', 1).filter((signal) => signal.tool === 'read').length, 0)
+    assert.equal(ledger.peek('sess-learn', 1).toolCalls, 3)
+    assert.equal(ledger.peek('sess-learn', 1).toolErrors, 2)
+})
+
+test('distillation degrades to "llm service unavailable" instead of failing the turn', async (t) => {
+    const h = await harness(t)
+    const signals: Signal[] = [{ sessionId: 's', kind: 'tool-failure', turn: 1, at: new Date().toISOString() }]
+    // A context that exposes neither reflect('llm') nor a direct property —
+    // exactly what a composition without an LLM looks like to the plugin.
+    const bareCtx = {} as unknown as Context
+    const allowed = distillAllowed(
+        { ctx: bareCtx, config: h.resolved, registry: h.registry, resolver: h.resolver, state: new SessionState() },
+        { agent: h.agent, sessionId: 's', turn: 1, signals, recalled: [] },
+    )
+    assert.equal(allowed.allowed, false)
+    assert.equal(allowed.reason, 'llm service unavailable')
+
+    const outcome = await distillTurn(
+        { ctx: bareCtx, config: h.resolved, registry: h.registry, resolver: h.resolver, state: new SessionState() },
+        { agent: h.agent, sessionId: 's', turn: 1, signals, recalled: [] },
+    )
+    assert.equal(outcome.status, 'skipped')
+    assert.equal(outcome.reason, 'llm service unavailable')
+
+    // a throwing property read (cordis' "without inject" error) is contained too
+    const hostile = Object.defineProperty({}, 'llm', {
+        get() {
+            throw new Error('cannot get property "llm" without inject')
+        },
+    }) as unknown as Context
+    assert.equal(
+        distillAllowed(
+            { ctx: hostile, config: h.resolved, registry: h.registry, resolver: h.resolver, state: new SessionState() },
+            { agent: h.agent, sessionId: 's', turn: 1, signals, recalled: [] },
+        ).reason,
+        'llm service unavailable',
+    )
 })

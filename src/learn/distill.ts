@@ -8,7 +8,7 @@
  * a log line — the signals stay in L1 for the skill-based fallback path.
  */
 import type { Context } from '@deepseek-ai/cordis'
-import { BlockAssembler, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { BlockAssembler, ReasoningEffortId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { DatabaseSync } from 'node:sqlite'
 import type { MemoryConfig } from '../config.js'
@@ -22,6 +22,7 @@ import type { Evidence, MemoryScope } from '../store/types.js'
 import { applyDraft } from './gate.js'
 import type { CandidateDraft } from './gate.js'
 import { candidateConfidence } from './confidence.js'
+import { optionalLlm } from './llm-access.js'
 import { redact } from './redact.js'
 import type { Signal } from './signals.js'
 
@@ -63,7 +64,6 @@ const SYSTEM_PROMPT = [
     '4. 最多 3 条，宁缺毋滥。',
 ].join('\n')
 
-const MAX_OUTPUT_TOKENS = 700
 const MAX_SIGNALS_IN_PROMPT = 8
 
 /** Today's distillation spend, in estimated tokens. */
@@ -88,6 +88,7 @@ export function distillAllowed(deps: DistillDeps, request: DistillRequest): { al
     if (budget.runs >= learn.maxDistillPerSession) return { allowed: false, reason: 'session distillation budget exhausted' }
     const store = deps.registry.open(deps.resolver.resolve({ agent: request.agent }))
     if (store === undefined) return { allowed: false, reason: 'memory store unavailable' }
+    if (optionalLlm(deps.ctx) === undefined) return { allowed: false, reason: 'llm service unavailable' }
     if (dailyDistillTokens(store.db) >= learn.maxDistillTokensPerDay) {
         return { allowed: false, reason: 'daily token budget exhausted' }
     }
@@ -104,15 +105,22 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
     }
     const store = deps.registry.open(deps.resolver.resolve({ agent: request.agent }))
     if (store === undefined) return { ...skip, reason: 'memory store unavailable' }
+    const llm = optionalLlm(deps.ctx)
+    if (llm === undefined) {
+        log('debug', 'memory: distillation skipped — no LLM service in this composition')
+        return { ...skip, reason: 'llm service unavailable' }
+    }
 
     const prompt = buildPrompt(request)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), deps.config.learn.distillTimeoutMs)
     let text = ''
     let timedOut = false
+    let finishNote: string | undefined
+    const callStartedAt = Date.now()
     try {
         const assembler = new BlockAssembler()
-        const stream = deps.ctx.llm.stream({
+        const stream = llm.stream({
             provider: deps.config.learn.distillModel.provider,
             model: deps.config.learn.distillModel.model,
             messages: [
@@ -122,12 +130,38 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
                 }),
             ],
             system: SYSTEM_PROMPT,
-            maxTokens: MAX_OUTPUT_TOKENS,
+            maxTokens: deps.config.learn.distillMaxTokens,
+            ...(deps.config.learn.distillReasoningEffort !== ''
+                ? { reasoningEffort: ReasoningEffortId(deps.config.learn.distillReasoningEffort) }
+                : {}),
             // The route field is branded by the harness; the value is the raw id.
             sessionId: request.sessionId as unknown as NonNullable<GenerateOptions['sessionId']>,
             signal: controller.signal,
         })
         for await (const chunk of stream) assembler.push(chunk)
+        // The runtime normalizes an adapter failure into a terminal `finish`
+        // chunk instead of throwing, so an empty answer must be diagnosed from
+        // the finish reason or it looks like "the model said nothing".
+        const finish: unknown = assembler.finish
+        // Our own deadline aborts the call; the runtime reports that as a
+        // terminal `aborted` finish rather than a throw, so the timeout has to
+        // be recognized here too.
+        if (controller.signal.aborted) timedOut = true
+        const finishKind =
+            finish !== null && typeof finish === 'object' && 'kind' in finish
+                ? String((finish as { kind?: unknown }).kind)
+                : String(finish)
+        if (finishKind !== 'stop') {
+            const failure =
+                finish !== null && typeof finish === 'object' && 'failure' in finish
+                    ? (finish as { failure?: { code?: string; message?: string } }).failure
+                    : undefined
+            finishNote =
+                finishKind === 'max-tokens'
+                    ? `model hit maxTokens ${deps.config.learn.distillMaxTokens} (reasoning tokens count) — raise learn.distillMaxTokens`
+                    : `${finishKind}${failure !== undefined ? `: ${failure.code ?? ''} ${failure.message ?? ''}`.trimEnd() : ''}`
+            log('warn', `memory: distillation model call ended with ${finishNote}`)
+        }
         text = assembler
             .blocks()
             .filter((block) => block.type === 'text')
@@ -146,12 +180,16 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
 
     if (text.trim() === '') {
         audit(store.db, request, deps.config, tokensIn, tokensOut, 0, timedOut)
+        const reason = timedOut
+            ? `distillation timed out after ${Date.now() - callStartedAt}ms (limit ${deps.config.learn.distillTimeoutMs}ms)`
+            : (finishNote ?? 'model returned no text')
+        log('warn', `memory: distillation produced nothing (${reason})`)
         return {
             ...skip,
             status: timedOut ? 'timeout' : 'error',
             tokensIn,
             tokensOut,
-            reason: timedOut ? 'distillation timed out' : 'model returned no text',
+            reason,
         }
     }
 

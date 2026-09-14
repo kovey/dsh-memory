@@ -59,6 +59,75 @@ export function detectCorrection(text: string): string | undefined {
     return found
 }
 
+/**
+ * Error markers that show up in *successful* tool calls whose content reports a
+ * failure (a command that ran and exited non-zero is not a tool error in this
+ * harness — only spawn failures and aborts are).
+ */
+const ERROR_MARKERS = [
+    'command not found',
+    'no such file or directory',
+    'permission denied',
+    'operation not permitted',
+    'traceback (most recent call last)',
+    'assertionerror',
+    'syntaxerror',
+    'fatal:',
+    'err_pnpm',
+    'errno',
+    'eacces',
+    'eperm',
+    'enoent',
+    'connection refused',
+    'timed out',
+    'timedout',
+]
+
+/** `[exit code: 3]` as rendered by the bash tool. */
+const EXIT_CODE = /\[exit code:\s*(\d+)\]/i
+
+export interface ResultFailure {
+    kind: 'tool-failure' | 'test-failure'
+    detail: string
+}
+
+export interface FailureDetectionOptions {
+    /** The tool result was already flagged as an error by the registry. */
+    isError: boolean
+    /** `learn.exitCodeSignals`. */
+    exitCodeMode?: 'strong' | 'all' | 'off'
+}
+
+/**
+ * Decide whether a tool result shows a real failure, including the common case
+ * the harness does not flag: a command that ran fine but exited non-zero.
+ *
+ * Conservative by default — `strong` ignores exit code 1 so that `grep` with no
+ * match or a deliberate "expect this to fail" check does not spend a
+ * distillation call on every turn.
+ */
+export function detectResultFailure(content: string, options: FailureDetectionOptions): ResultFailure | undefined {
+    const text = content.replace(/\s+/g, ' ').trim()
+    if (options.isError) {
+        return { kind: looksLikeTestFailure(text) ? 'test-failure' : 'tool-failure', detail: summarize(text, 200) }
+    }
+    const exit = EXIT_CODE.exec(text)
+    const exitCode = exit !== null ? Number(exit[1]) : undefined
+    const mode = options.exitCodeMode ?? 'strong'
+    const exitsBadly =
+        exitCode !== undefined && exitCode !== 0 && mode !== 'off' && (mode === 'all' || exitCode >= 2)
+    const marker = ERROR_MARKERS.find((candidate) => text.toLowerCase().includes(candidate))
+    if (!exitsBadly && marker === undefined) return undefined
+    const reason =
+        exitCode !== undefined && exitsBadly
+            ? `exit code ${exitCode}`
+            : `error output (${marker ?? 'unknown'})`
+    return {
+        kind: looksLikeTestFailure(text) ? 'test-failure' : 'tool-failure',
+        detail: summarize(`${reason}: ${text}`, 200),
+    }
+}
+
 /** Markers that identify a failed automated check rather than a user complaint. */
 const TEST_FAILURE_MARKERS = ['test failed', 'failing test', 'assertionerror', 'error ts', 'tsc error', 'fail ', '✖', 'tests failed']
 

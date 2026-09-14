@@ -114,6 +114,24 @@ embedding 语义召回：
 向量按内容哈希缓存，未变动的教训永不重复嵌入；作用域内无记录时直接跳过。
 用 `memory_reindex({ embeddings: true })` 做一次全量回填，`memory_stats` 会显示索引与最近错误。
 
+## 配置调参的可靠方式
+
+写进 profile 的 `cordis.patch.yml`（按 id 覆盖，不重复 insert）：
+
+```yaml
+- config:
+    - id: memory
+      config:
+        learn:
+          distillTimeoutMs: 15000   # 实测一次 flash 蒸馏约 4.2s，别设太小
+          distillRunner: jobs       # 不想让轮次等待就交给 ctx.jobs
+        recall:
+          budgetTokens: 800
+```
+
+> 实测注意：`dsh --patch <file>` 的 overlay **没有**作用到本插件的 config（六次真机运行的 ready 行始终是
+> 默认值）。调参请用上面的 profile patch。
+
 ## 评估与门禁
 
 ```

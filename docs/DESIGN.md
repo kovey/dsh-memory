@@ -114,7 +114,7 @@ L2/L3 ── 过期 or 低命中 ──► archive/（归档，不物理删除�
 |---|---|
 | 隐式行为不可见 | 每个自动动作有日志 + 开关 + 预算；`memory_stats` 暴露 pending 积压、蒸馏失败率、超时率、注入条数与 token |
 | LLM 成本失控 | 仅疼痛 turn 触发 + `maxDistillPerSession=3` + `maxDistillTokensPerDay=200k` + 超时放弃 + 固定 `deepseek-v4-flash` |
-| 阻塞关轮 | `turn-stopping` 内有界 await（默认 3s，上限 10s）；超时即落 pending 交兜底 |
+| 阻塞关轮 | `turn-stopping` 内有界 await（默认 15s）；超时即落 pending 交兜底 |
 | 上下文膨胀 | 阈值门 + 预算（默认 600 tok）+ 会话内幂等（同条只注入一次） |
 | 审计不变量被破坏 | 注入只走 logged channel |
 | 静默降级 | 降级必写日志 + stats 可见 + `.queue/` 可重放 |
@@ -285,7 +285,7 @@ conf_next = clamp( conf_base
 - `≥0.9` 已被证实 ≥1 次；`0.7–0.9` 观察到未复现；`<0.7` 假说，**只提示不执行**。
 - **召回后任务失败 → 下调**：这是"变强"的负反馈；缺了它记忆只会越来越自信、越来越错。
 
-**自动蒸馏护栏**：仅疼痛 turn 触发；`minSignals=1`；`maxDistillPerSession=3`；`maxDistillTokensPerDay=200000`；`distillTimeoutMs=3000`；固定便宜模型；输入为结构化信号摘要（≤1.5k tok，先 `redact()`）；输出严格 JSON（0–6 条教训 + evidence 引用 + 建议 confidence）；产物一律进 **pending 区**（`conf ≤ 0.6`）由门控裁决；全程写 `distill` 审计表。
+**自动蒸馏护栏**：仅疼痛 turn 触发；`minSignals=1`；`maxDistillPerSession=3`；`maxDistillTokensPerDay=200000`；`distillTimeoutMs=15000`；固定便宜模型；输入为结构化信号摘要（≤1.5k tok，先 `redact()`）；输出严格 JSON（0–6 条教训 + evidence 引用 + 建议 confidence）；产物一律进 **pending 区**（`conf ≤ 0.6`）由门控裁决；全程写 `distill` 审计表。
 
 ---
 
@@ -493,6 +493,36 @@ memory: consolidation (first-run) on global — archived 0, decayed 0, conflicts
 **实机跑出的一个真 bug**：macOS 上 `/tmp` 是 `/private/tmp` 的符号链接，`git rev-parse --show-toplevel`
 返回物理路径而提交路径用逻辑路径计算，导致自动提交被 git 拒绝（"outside repository"）。
 已修复（两侧先 realpath，且解析出仓库外时拒绝而非静默暂存），并补了 symlink 回归测试。
+
+### 14.7 第三轮实机验证：nvim-tui 官方 e2e 模式（学习闭环）
+
+用 nvim-tui runner 自带的 headless e2e 模式（`DSH_NVIM_TUI_HEADLESS=1` + `DSH_NVIM_TUI_PROMPT`
++ `DSH_NVIM_TUI_DUMP`，隔离记忆根 `DSH_MEMORY_HOME`）连跑 6 次，任务固定为
+"真实执行一条会失败的命令，然后解释失败原因"。这一轮又抓出 **3 个真 bug**，全部只在真实宿主暴露：
+
+| # | 症状 | 根因 | 修复 |
+|---|---|---|---|
+| 1 | 失败命令**完全不产生信号** | `dsh-tool-bash` 只把 spawn 失败/中断标为 `isError`；**非零退出码不算 tool error**，而"命令失败"恰恰是最常见的疼痛信号 | 新增内容级失败判定：`[exit code: N]`（strong 模式下 N≥2）+ 错误标记（No such file or directory / command not found / ERR_ / Traceback…），并补齐了类型里声明却从未发出的 `rework` 信号（同轮同一工具失败 ≥2 次） |
+| 2 | 蒸馏报 `cannot get property "llm" without inject` | `ctx.llm` 未声明在 `inject` 里，cordis 拒绝属性访问；**单测的假 ctx 直接暴露 `.llm`，所以从未暴露** | 按"缺装配也要工作"的原则改为**可选服务访问**（`ctx.reflect.get('llm')`，失败回退直接读并捕获异常）；无 LLM 的组合里蒸馏降级为 `llm service unavailable`，信号留在 L1 |
+| 3 | 蒸馏每次都被**自己中断**（`aborted by caller`，3.0s） | 默认 `distillTimeoutMs: 3000` **短于真实模型延迟**——实测一次 flash 的 JSON 蒸馏需 4.2s，于是生产环境里蒸馏永远失败 | 默认提到 15s（边界仍在，只是符合现实）；同时把"runtime 把取消归一化成终态 `finish`"这条契约读出来：`aborted` + 自己的 controller 已中止 → 归类为 `timeout` 而不是 `error`，并把 finish 原因（含 max-tokens 提示）写进日志 |
+
+第 6 次运行终于完整跑通飞轮：
+
+```
+memory: injected 1 record(s) (~169 tok) turn 6 step 1 → stdioinherit--bash-timeout
+memory: distilled 1 new + 0 merged record(s) from turn 6
+memory: turn 6 learning — 1 signal(s), distill=created (+1/~0/-0, 515 tok)
+memory: turn 6 learning finished in 4197ms
+memory: committed 21 file(s) in /tmp/dsh-live-nvim (turn end (global))
+```
+
+产物逐项核对：情节 JSONL（`tool-failure | bash | error output (no such file or directory): [stderr] cat: …`）、
+`distill` 审计行（in 300 / out 215 / created 1 / timed_out 0）、以及一条由真实 flash 模型产出并通过门控的教训
+（`cat-no-such-file-or-directory`，conf 0.74，带触发场景 + 具体写法 + tags）。**写入只落隔离根，真实记忆零污染。**
+
+**另一条环境结论**：`dsh --patch <file>` 覆盖对本插件的 config 未生效——六次运行的 ready 行始终是
+`recall=on/600tok`（其中一次 overlay 里写了 `budgetTokens: 123`）。也就是说调参应写进 profile 的
+`cordis.patch.yml`（`- config: - id: memory`），别依赖 `--patch`。
 
 ### 14.4 使用的宿主扩展点（已核对类型）
 

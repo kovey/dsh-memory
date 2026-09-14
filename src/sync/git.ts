@@ -58,11 +58,32 @@ export function isRepo(dir: string): boolean {
     return run(dir, ['rev-parse', '--is-inside-work-tree']).stdout.trim() === 'true'
 }
 
-/** Repository root owning `dir`, if any. */
+/**
+ * Repository root owning `dir`, if any.
+ *
+ * The path is resolved through symlinks: git reports the physical path (on
+ * macOS `/tmp/x` comes back as `/private/tmp/x`), and any later comparison with
+ * the caller's logical path would otherwise look like "outside repository".
+ */
 export function repoRootOf(dir: string): string | undefined {
     const result = run(dir, ['rev-parse', '--show-toplevel'])
     const top = result.stdout.trim()
-    return result.ok && top !== '' ? top : undefined
+    if (!result.ok || top === '') return undefined
+    return realPathOf(top)
+}
+
+/** `realpath` that never throws; falls back to the input. */
+function realPathOf(target: string, cache = new Map<string, string>()): string {
+    const cached = cache.get(target)
+    if (cached !== undefined) return cached
+    let resolved = target
+    try {
+        resolved = fs.realpathSync(target)
+    } catch {
+        resolved = target
+    }
+    cache.set(target, resolved)
+    return resolved
 }
 
 /** Write the memory `.gitignore` entries (idempotent, append-only). */
@@ -106,12 +127,23 @@ export function isBusy(root: string): boolean {
     )
 }
 
-/** Paths the memory root contributes to its repository, relative to the repo root. */
+/**
+ * Paths the memory root contributes to its repository, relative to the repo
+ * root. Both sides are resolved first so a symlinked memory root (macOS `/tmp`,
+ * a symlinked `$HOME`, a linked workspace) still stages the right paths.
+ */
 function relativePaths(root: string): { repo: string; paths: string[] } | undefined {
     const repo = repoRootOf(root)
     if (repo === undefined) return undefined
-    const relative = path.relative(repo, root)
-    return { repo, paths: relative === '' ? ['.'] : [relative] }
+    const physicalRoot = realPathOf(root)
+    const relative = path.relative(repo, physicalRoot)
+    if (relative === '' ) return { repo, paths: ['.'] }
+    if (relative.startsWith('..')) {
+        // The root resolves outside the repository git reported: refuse rather
+        // than stage a path git will reject.
+        return { repo, paths: [] }
+    }
+    return { repo, paths: [relative] }
 }
 
 export interface CommitOptions {
@@ -129,6 +161,9 @@ export function commitMemory(root: string, options: CommitOptions): GitResult & 
         return { ok: false, stdout: '', stderr: 'repository is mid-merge/rebase', code: 1, committed: false, files: 0 }
     }
     const paths = [...target.paths, ...(options.extraPaths ?? [])]
+    if (paths.length === 0) {
+        return { ok: false, stdout: '', stderr: 'memory root resolves outside its repository', code: 1, committed: false, files: 0 }
+    }
     const add = run(target.repo, ['add', '-A', '--', ...paths])
     if (!add.ok) return { ...add, committed: false, files: 0 }
 

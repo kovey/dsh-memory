@@ -345,3 +345,22 @@ test('exported lesson files round-trip through git conflict-free shapes', async 
     assert.ok(parsed)
     assert.equal(renderLesson(parsed.frontmatter, parsed.body), text)
 })
+
+test('a symlinked memory root still commits (macOS /tmp vs /private/tmp)', async (t) => {
+    const repo = initRepo('m4-symlink')
+    const link = path.join(tempDir('m4-symlink-link'), 'memlink')
+    fs.symlinkSync(path.join(repo, '.dsh', 'memory'), link, 'dir')
+    // create the real directory before the link target is used
+    fs.mkdirSync(path.join(repo, '.dsh', 'memory', 'lessons'), { recursive: true })
+
+    const h = await openScope(t, repo)
+    upsertRecord(h.store.db, materialize({ title: 'symlinked lesson', body: '触发场景：x。正确做法：y。', layer: 'project', scopeKind: 'project', repo }))
+    exportAll(h.store.db, h.scope)
+
+    ensureRepo(link)
+    const result = commitMemory(link, { message: 'via symlink' })
+    assert.equal(result.ok, true, result.stderr)
+    assert.equal(result.committed, true)
+    const committed = git(repo, 'show', '--name-only', '--pretty=format:')
+    assert.match(committed, /lessons\/symlinked-lesson\.md/)
+})

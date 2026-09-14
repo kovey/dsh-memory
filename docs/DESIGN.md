@@ -472,6 +472,28 @@ memory: injected 4 record(s) (~533 tok) turn 1 step 1 → dsh-session--append, n
 即：真实宿主中插件装配成功、能力探测通过、真实语料引导导入成功、**首轮自动召回在真实会话里生效**
 （4 条 / 533 tok，预算 800）。会话随后因环境缺少 LLM 凭据而未进入模型调用。
 
+**第二轮（含真实模型工具调用）**：用隔离 profile（`memlive`，`DSH_MEMORY_HOME=/tmp/dsh-live-mem`
+指向从真实语料复制的临时记忆根，避免污染生产记忆），给模型一个三步任务：
+
+```
+dsh --profile memlive "（1）memory_search 'pnpm install 无 TTY'（2）memory_save 一条教训（3）memory_stats 汇报"
+```
+
+模型确实依次调用了三个工具并汇报：检索命中 2 条（首位 `pnpm-install--tty--json`，score 0.81）、
+保存成功（conf 0.90 / status active，因 cwd 不在任何仓库而按设计落**全局**作用域）、
+统计显示 19 条记录 / 0 conflicts / **1 条 open proposal** / semantic off。
+插件日志同时证明：
+
+```
+memory: injected 1 record(s) (~149 tok) turn 1 step 1 → pnpm-install--tty--json
+memory: consolidation (first-run) on global — archived 0, decayed 0, conflicts 0, proposals 1
+```
+
+即自动召回、惰性巩固（并给出晋升提案）、工具读/写/统计三条链路在真实宿主中全部生效。
+**实机跑出的一个真 bug**：macOS 上 `/tmp` 是 `/private/tmp` 的符号链接，`git rev-parse --show-toplevel`
+返回物理路径而提交路径用逻辑路径计算，导致自动提交被 git 拒绝（"outside repository"）。
+已修复（两侧先 realpath，且解析出仓库外时拒绝而非静默暂存），并补了 symlink 回归测试。
+
 ### 14.4 使用的宿主扩展点（已核对类型）
 
 `ctx.tools.register(defineTool())`、`ctx.systemPrompt.section()/.context()/.variable()`、

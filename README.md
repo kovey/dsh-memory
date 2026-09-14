@@ -128,6 +128,32 @@ memory_stats({ setBaseline: true, note: "..." })  # 在一段表现良好的时�
 > 说明：基线任务集是**其他仓库的真实任务**，插件无法自动重放，因此它会列出任务清单供人工回归；
 > 它能自动判定的是任务日志实际承载的指标。
 
+## 跑真机测试（推荐方式）
+
+一次性任务 + 隔离记忆根，既验证完整链路，又不碰你的真实记忆：
+
+```bash
+# 1) 隔离 profile（base + headless + 本插件）
+mkdir -p ~/.dsh/profiles/memlive
+cat > ~/.dsh/profiles/memlive/package.json <<'JSON'
+{ "name": "dsh-profile-memlive", "private": true, "dependencies": {},
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless", "dsh-memory"], "patchReload": "startup" } } }
+JSON
+printf '[]\n' > ~/.dsh/profiles/memlive/cordis.patch.yml
+
+# 2) 隔离记忆根（用真实语料播种，便于验证召回）
+mkdir -p /tmp/dsh-live-mem && cp -R ~/.dsh/memory/lessons /tmp/dsh-live-mem/lessons
+
+# 3) 真实模型跑一次性任务
+DSH_MEMORY_HOME=/tmp/dsh-live-mem dsh --profile memlive \
+  "调用 memory_search 搜索 'pnpm install 无 TTY'，然后调用 memory_stats 并汇报记录数"
+
+# 4) 看证据
+tail -20 ~/.dsh/memory-plugin.log
+```
+
+`DSH_MEMORY_HOME` 会把全局记忆根重定向到临时目录（项目级作用域由会话 cwd 决定，不受影响）。
+
 ## 开发
 
 ```bash

@@ -51,6 +51,13 @@ export interface RunnerDeps {
 export interface RunnerRequest extends DistillRequest {
     /** Live agent that owns the work, when the caller has one. */
     ownerAgent?: unknown
+    /**
+     * Force a runner for this call. Recovery passes `inline`: a recovered group
+     * was *lost by a cancelled job*, so handing it to another job on the same
+     * one-shot surface would lose it again (and silently — the job dies before
+     * it can write an audit row).
+     */
+    mode?: 'inline' | 'jobs'
 }
 
 export interface RunnerResult {
@@ -80,7 +87,7 @@ export function optionalJobs(ctx: Context): JobsLike | undefined {
  * the inline path.
  */
 export async function runDistillation(deps: RunnerDeps, request: RunnerRequest): Promise<RunnerResult> {
-    const mode = deps.config.learn.distillRunner
+    const mode = request.mode ?? deps.config.learn.distillRunner
     if (mode === 'jobs') {
         const jobs = optionalJobs(deps.ctx)
         if (jobs !== undefined) {

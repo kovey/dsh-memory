@@ -65,6 +65,8 @@
           # 但"命令失败"是最常见的真实疼痛信号：strong 只对 exit>=2 与错误标记反应
           # （grep 式的 exit 1 保持安静），all 对任何非零退出反应，off 完全不看退出码。
           exitCodeSignals: strong
+          # 会话启动时补蒸馏几组"采到但没蒸馏"的信号（jobs 被随 agent 取消、进程中途退出都靠它兜底）
+          maxRecoverPerSession: 2
 
         # Episodic (L1) capture: structured signals only, redacted by default.
         episodic:

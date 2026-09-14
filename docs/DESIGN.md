@@ -460,6 +460,46 @@ audit: turn 7 | model=deepseek-official/deepseek-v4-flash | in 299 / out 232 | c
   随 owner agent 销毁自动取消；未装配 jobs 或提交失败时自动回落到 inline。
 - 两者都不跨进程存活——所以信号在蒸馏**之前**已写入 L1，技能仍可事后蒸馏。
 
+### 14.10 第五轮实机验证：`distillRunner: jobs` + 补蒸馏（无损化）
+
+把 nvim-tui 切到 `jobs` 后真机实测，抓到**两个只有真实宿主才暴露的问题**：
+
+1. **一次性会话里作业会被随 agent 取消**：
+   ```
+   turn 18 distillation handed to job memory-distill-1 (1 signal(s))
+   [debug] distillation job cancelled (owner disposed)     ← 轮次结束即销毁 agent
+   ```
+   轮次确实 4ms 就结束了（jobs 的价值成立），但**一次 LLM 调用都没发生**，教训丢失
+   （信号还在 L1）。长驻会话（nvim-tui/web 交互使用）不受影响，一次性 surface（headless、
+   `dsh ... "task"`、e2e）必然触发。
+2. **恢复定时器撞上宿主 teardown**：第一版把恢复放在 `session/created` + 3s 定时器，
+   结果日志报 `pending-distillation recovery failed: database is not open`——
+   一次性会话的 3 秒定时器落在 shutdown 之后。
+
+**修复（无损化设计）**：
+
+- 新增 `learn/pending.ts`：**"采到但没蒸馏"是一个查询**——`signals` 左连接 `distill` 审计表，
+  没有审计行的就是待办。重试天然幂等：任何一次尝试（哪怕超时）都会写审计行，所以一组信号
+  最多被捡起一次。
+- 恢复挂在 **`turn-stopping`**（每个作用域每进程一次），而不是会话启动定时器：库是开的、
+  agent 活着、await 与 inline 蒸馏同样有界——这正是 inline 蒸馏能work的同一个确定性时机。
+- 恢复**强制 inline**（`RunnerRequest.mode`）：一组信号正是被"取消的作业"弄丢的，
+  再交给作业只会再丢一次（第一版就是这么静默失效的）。
+- 保护条件：轮次必须已结束（`turn < state.lastTurn`）+ 信号年龄 >5s（避免抢在途轮次）。
+
+**实测（两次会话）**：
+
+```
+会话1: turn 18 distillation handed to job memory-distill-1 → job cancelled (owner disposed)
+会话2: memory: distilled 1 new + 0 merged record(s) from turn 18 via deepseek-official/deepseek-v4-flash
+       memory: recovered 1 undistilled signal(s) from session session-ee1f… turn 18 → created
+产出:  distill 审计 turn 18 | in 300 / out 216 | created 1
+      教训 cat-exit-code-1「cat 读到不存在的路径会以 exit code 1 失败，需先确认文件存在再读取」conf 0.63
+```
+
+即：**作业被取消只花掉"一轮延迟"，不再丢教训**；同时覆盖崩溃/重启中途丢失的场景。
+插件出厂默认仍是 `inline`（任何 surface 都成立）；长驻交互面用 `jobs` 换取轮次立即结束。
+
 ### 14.9 第四轮实机验证：本地 bge-m3 语义召回（含对照实验）
 
 本机装上 Ollama + bge-m3（1.2GB，1024 维，热调用 0.08s、冷启动 2.78s），在 nvim-tui 上启用后

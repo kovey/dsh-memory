@@ -16,7 +16,7 @@ import { consolidate } from '../learn/consolidate.js'
 import { consolidationDue } from '../learn/decay.js'
 import { TurnLedger } from '../learn/ledger.js'
 import { SignalBuffer } from '../learn/signals.js'
-import { registerLearnHooks } from './learn.js'
+import { recoverPendingDistillations, registerLearnHooks } from './learn.js'
 import { createPreStepHook } from './pre-step.js'
 import { registerAgentIndexSection, registerProtocolSection } from './prompt.js'
 import type { PromptDeps } from './prompt.js'
@@ -72,6 +72,9 @@ export function registerHooks(ctx: Context, deps: HookDeps): HookHandle {
             const agent = payload?.agent
             if (agent === undefined) return
             registerAgentIndexSection(agent, deps)
+            // Recovery deliberately does NOT run here: a timer races host
+            // teardown on one-shot surfaces ("database is not open"). It runs at
+            // the end of the first turn instead — see handleTurnEnd.
         } catch (error) {
             log('warn', 'memory: agent/created index registration failed:', error)
         }

@@ -18,6 +18,7 @@ import { runDistillation } from '../learn/distill-runner.js'
 import type { DistillOutcome } from '../learn/distill.js'
 import { recordEpisode } from '../learn/episodic.js'
 import { TurnLedger } from '../learn/ledger.js'
+import { loadGroupSignals, pendingDistillations } from '../learn/pending.js'
 import { detectResultFailure } from '../learn/signals.js'
 import type { Signal, SignalBuffer, SignalKind } from '../learn/signals.js'
 
@@ -39,6 +40,61 @@ interface ToolExecLike {
 interface ToolResultLike {
     isError?: boolean
     content?: unknown
+}
+
+/**
+ * Pick up pain signals that were collected but never distilled — a job killed
+ * with its agent on a one-shot surface, or a process that died mid-call.
+ *
+ * Runs off the session-start path, uses the *new* session's route/model, and is
+ * naturally idempotent: any attempt writes a `distill` audit row, so a group is
+ * retried until its first attempt and never again.
+ */
+export async function recoverPendingDistillations(deps: LearnDeps, agent: AgentLike | undefined): Promise<number> {
+    const limit = deps.config.learn.maxRecoverPerSession
+    if (limit <= 0 || !deps.config.learn.autoDistill) return 0
+    if (!deps.resolver.mayWrite(agent)) return 0
+    const store = deps.registry.open(deps.resolver.resolve({ agent }))
+    if (store === undefined) return 0
+    const sessionId = sessionIdOf(agent)
+    // Deliberately *not* "exclude the current session": the nvim-tui runner
+    // resumes the previous session, so the group that needs recovery often
+    // belongs to this very session id. Guard by "the turn has ended" instead —
+    // a group is recoverable when its turn is behind the turn this process has
+    // observed, and it is old enough not to be mid-flight.
+    const currentTurn = sessionId !== undefined ? deps.state.lastTurn(sessionId) : 0
+    const groups = pendingDistillations(store.db, { limit: limit + 2, minAgeSeconds: 5 }).filter(
+        (group) => !(sessionId !== undefined && currentTurn > 0 && group.sessionId === sessionId && group.turn >= currentTurn),
+    )
+    if (groups.length === 0) {
+        log('debug', 'memory: no undistilled signals to recover')
+        return 0
+    }
+    let recovered = 0
+    for (const group of groups) {
+        const signals = loadGroupSignals(store.db, group)
+        if (signals.length === 0) continue
+        const runner = await runDistillation(
+            { ctx: deps.ctx, config: deps.config, registry: deps.registry, resolver: deps.resolver, state: deps.state },
+            {
+                agent,
+                sessionId: group.sessionId,
+                turn: group.turn,
+                signals,
+                recalled: [],
+                ...(agent !== undefined ? { ownerAgent: agent } : {}),
+                mode: 'inline',
+            },
+        )
+        if (runner.outcome !== undefined && runner.outcome.status !== 'skipped') {
+            recovered += 1
+            log(
+                'info',
+                `memory: recovered ${signals.length} undistilled signal(s) from session ${group.sessionId.slice(0, 18)}… turn ${group.turn} → ${runner.outcome.status}`,
+            )
+        }
+    }
+    return recovered
 }
 
 /** Register tool-result, request-error and turn-stopping listeners. */
@@ -142,6 +198,9 @@ export function registerLearnHooks(ctx: Context, deps: LearnDeps): (() => void)[
     return disposers
 }
 
+/** One recovery pass per scope per process (see pending.ts). */
+const recoveredScopes = new Set<string>()
+
 async function handleTurnEnd(deps: LearnDeps, payload: { agent?: AgentLike; turn?: number }): Promise<void> {
     const sessionId = sessionIdOf(payload?.agent)
     const turn = payload?.turn
@@ -151,6 +210,18 @@ async function handleTurnEnd(deps: LearnDeps, payload: { agent?: AgentLike; turn
     const collected = deps.signals.take(sessionId, turn)
     const store = deps.registry.open(deps.resolver.resolve({ agent: payload.agent }))
     if (store === undefined) return
+
+    // Recovery rides turn-stopping: the store is open, the agent is alive, and
+    // the await is bounded exactly like an inline distillation. A session-start
+    // timer cannot do this — it races host teardown on one-shot surfaces.
+    if (deps.config.learn.autoDistill && !recoveredScopes.has(store.scope.root)) {
+        recoveredScopes.add(store.scope.root)
+        try {
+            await recoverPendingDistillations(deps, payload.agent)
+        } catch (error) {
+            log('warn', 'memory: pending-distillation recovery failed:', error)
+        }
+    }
 
     if (!deps.config.learn.collectSignals) {
         // learning disabled: only keep the session counters tidy

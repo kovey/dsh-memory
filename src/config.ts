@@ -62,6 +62,12 @@ export interface MemoryConfig {
          * `off` ignores exit codes entirely.
          */
         exitCodeSignals: 'strong' | 'all' | 'off'
+        /**
+         * Undistilled signal groups picked up when a session starts. This is what
+         * makes `distillRunner: 'jobs'` safe on one-shot surfaces (the job is
+         * cancelled with its agent) and survives crashes mid-distillation.
+         */
+        maxRecoverPerSession: number
     }
     episodic: {
         enabled: boolean
@@ -149,6 +155,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         minSignals: 1,
         distillRunner: 'inline',
         exitCodeSignals: 'strong',
+        maxRecoverPerSession: 2,
     },
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
     consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true },
@@ -267,6 +274,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
                 ['strong', 'all', 'off'] as const,
                 d.learn.exitCodeSignals,
             ),
+            maxRecoverPerSession: num(learn['maxRecoverPerSession'], d.learn.maxRecoverPerSession, 0, 20),
         },
         episodic: {
             enabled: bool(episodic['enabled'], d.episodic.enabled),

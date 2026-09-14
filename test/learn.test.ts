@@ -11,10 +11,11 @@ import path from 'node:path'
 import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveConfig } from '../lib/config.js'
-import { registerLearnHooks } from '../lib/hooks/learn.js'
+import { recoverPendingDistillations, registerLearnHooks } from '../lib/hooks/learn.js'
 import { candidateConfidence, nextConfidence, statusFor } from '../lib/learn/confidence.js'
 import { buildPrompt, dailyDistillTokens, distillAllowed, distillTurn, parseCandidates, resolveDistillRoute } from '../lib/learn/distill.js'
 import { episodeDigest, pruneEpisodes, recordEpisode, sessionsDir } from '../lib/learn/episodic.js'
+import { loadGroupSignals, pendingDistillations } from '../lib/learn/pending.js'
 import { applyDraft, gateDraft, jaccard, looksGeneric, similarity, tokens } from '../lib/learn/gate.js'
 import { TurnLedger } from '../lib/learn/ledger.js'
 import { redact } from '../lib/learn/redact.js'
@@ -632,4 +633,97 @@ test('the distillation route is inherited from the session unless configured', a
     assert.notEqual(outcome.status, 'skipped')
     const audit = h.store.db.prepare('SELECT model FROM distill ORDER BY id DESC LIMIT 1').get()
     assert.equal(audit?.['model'], 'test-provider/test-model')
+})
+
+// ---- undistilled-signal recovery -------------------------------------------
+
+test('signals without an audit row are pending; any attempt settles the group', async (t) => {
+    const h = await harness(t)
+    const at = new Date(Date.now() - 60_000).toISOString()
+    const insert = h.store.db.prepare(
+        'INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    )
+    insert.run('sess-a', 1, 1, 'tool-failure', 'bash', 'exit code 2', at)
+    insert.run('sess-a', 1, 1, 'rework', 'bash', 'bash failed 2×', at)
+    insert.run('sess-b', 5, 1, 'user-correction', null, '用户纠正', at)
+
+    const pending = pendingDistillations(h.store.db)
+    assert.deepEqual(pending.map((group) => `${group.sessionId}#${group.turn}(${group.signals})`), ['sess-a#1(2)', 'sess-b#5(1)'])
+    // in-flight protection: a group younger than the guard window is left alone
+    assert.equal(pendingDistillations(h.store.db, { minAgeSeconds: 120 }).length, 0)
+    assert.equal(pendingDistillations(h.store.db, { minAgeSeconds: 5 }).length, 2)
+
+    // a completed attempt (even a timed-out one) settles the group
+    h.store.db
+        .prepare('INSERT INTO distill (session_id, turn, model, prompt_hash, tokens_in, tokens_out, created_count, timed_out, at) VALUES (?,?,?,?,?,?,?,?,?)')
+        .run('sess-a', 1, 'p/m', 'h', 10, 0, 0, 1, at)
+    assert.equal(pendingDistillations(h.store.db).filter((group) => group.sessionId === 'sess-a').length, 0)
+
+    // old episodes are history, not work
+    h.store.db.prepare('UPDATE signals SET at = ? WHERE session_id = ?').run('2020-01-01T00:00:00.000Z', 'sess-b')
+    assert.equal(pendingDistillations(h.store.db, { maxAgeDays: 14 }).length, 0)
+
+    const loaded = loadGroupSignals(h.store.db, { sessionId: 'sess-b', turn: 5, signals: 1, lastAt: at })
+    assert.equal(loaded[0]?.kind, 'user-correction')
+})
+
+test('recovery distils signals a cancelled job left behind', async (t) => {
+    const h = await harness(t)
+    // Exactly the live one-shot shape: signals exist, no distill row (the job
+    // was cancelled when its agent was disposed at turn end).
+    h.store.db
+        .prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run(
+            'sess-lost',
+            1,
+            1,
+            'tool-failure',
+            'bash',
+            'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY',
+            new Date(Date.now() - 60_000).toISOString(),
+        )
+    assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'], 0)
+
+    const recovered = await recoverPendingDistillations(
+        { ctx: fakeCtx(LESSON_JSON), config: h.resolved, registry: h.registry, resolver: h.resolver, state: new SessionState(), signals: new SignalBuffer(), ledger: new TurnLedger() },
+        h.agent,
+    )
+    assert.equal(recovered, 1)
+    assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'], 1, 'the attempt is now audited')
+    assert.ok(getRecord(h.store.db, 'pnpm-tty'), 'the lesson the cancelled job never wrote')
+    // idempotent: nothing is left pending, so a second pass does nothing
+    assert.equal(
+        await recoverPendingDistillations(
+            { ctx: fakeCtx(LESSON_JSON), config: h.resolved, registry: h.registry, resolver: h.resolver, state: new SessionState(), signals: new SignalBuffer(), ledger: new TurnLedger() },
+            h.agent,
+        ),
+        0,
+    )
+})
+
+test('recovery always runs inline, even when the configured runner is jobs', async (t) => {
+    const h = await harness(t, { learn: { distillRunner: 'jobs' } })
+    h.store.db
+        .prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('sess-lost', 7, 1, 'tool-failure', 'bash', 'exit code 2', new Date(Date.now() - 60_000).toISOString())
+
+    const started: string[] = []
+    const jobsStub = {
+        start(spec: { kind: string }) {
+            started.push(spec.kind)
+            return 'job-1'
+        },
+    }
+    const ctxWithJobs = {
+        llm: (fakeCtx(LESSON_JSON) as unknown as { llm: unknown }).llm,
+        reflect: { get: (name: string) => (name === 'jobs' ? jobsStub : undefined) },
+    } as unknown as Context
+
+    const recovered = await recoverPendingDistillations(
+        { ctx: ctxWithJobs, config: h.resolved, registry: h.registry, resolver: h.resolver, state: new SessionState(), signals: new SignalBuffer(), ledger: new TurnLedger() },
+        h.agent,
+    )
+    assert.equal(recovered, 1, 'recovery must complete, not hand the group to another job')
+    assert.deepEqual(started, [], 'no job may be started for recovery')
+    assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'], 1)
 })

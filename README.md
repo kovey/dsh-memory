@@ -198,6 +198,25 @@ embedding 语义召回：
 向量按内容哈希缓存，未变动的教训永不重复嵌入；作用域内无记录时直接跳过。
 用 `memory_reindex({ embeddings: true })` 做一次全量回填，`memory_stats` 会显示索引与最近错误。
 
+## 蒸馏放哪跑：inline / jobs
+
+| 模式 | 行为 | 适用 |
+|---|---|---|
+| `inline`（出厂默认） | 在 `agent/turn-stopping` 里有界 await（默认 15s），轮次结束会等它 | 任何 surface 都成立 |
+| `jobs` | 交给 `ctx.jobs`，**轮次 4ms 就结束**，作业在作业列表可见 | 长驻交互会话（nvim-tui / web） |
+
+一次性 surface（`dsh --profile headless "任务"`、e2e）里 agent 在轮次结束即销毁、**作业会被取消**——
+所以插件带**补蒸馏**：`signals` 里没有对应 `distill` 审计行的组，会在下一个会话的首轮结束时
+用 inline 补跑（每作用域每进程一次，年龄 >5s 且轮次已结束才捡）。实测：
+
+```
+会话1: turn 18 distillation handed to job memory-distill-1 → job cancelled (owner disposed)
+会话2: recovered 1 undistilled signal(s) from session … turn 18 → created
+       （turn 18 | in 300 / out 216 | created 1）
+```
+
+即**作业被取消只损失一轮延迟，不丢教训**；崩溃/重启中途丢失同理。
+
 ## 配置调参的可靠方式
 
 写进 profile 的 `cordis.patch.yml`（按 id 覆盖，不重复 insert）：

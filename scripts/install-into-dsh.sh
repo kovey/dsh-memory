@@ -11,17 +11,24 @@
 # loader rejects duplicate entry ids, so the bundle's own patch owns `id: memory`.
 #
 # usage: install-into-dsh.sh [--dry-run] [--profiles nvim-tui,web,headless]
+#
+# POLICY — `tui` is the human's production profile and must never receive this
+# working tree. It consumes a *released* build (see docs/RELEASE.md); the local
+# link is for the test surfaces only. Passing tui therefore requires the
+# explicit --allow-tui flag, which exists to make the mistake deliberate.
 set -euo pipefail
 
 DSH_HOME_DIR="${DSH_HOME:-$HOME/.dsh}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROFILES="nvim-tui,web,headless"
 DRY_RUN=0
+ALLOW_TUI=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY_RUN=1; shift ;;
     --profiles) PROFILES="${2:-}"; shift 2 ;;
+    --allow-tui) ALLOW_TUI=1; shift ;;
     -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -31,6 +38,16 @@ say() { printf '%s\n' "$*"; }
 run() {
   if [ "$DRY_RUN" = "1" ]; then say "  [dry-run] $*"; else "$@"; fi
 }
+
+if [ "$ALLOW_TUI" != "1" ]; then
+  case ",$PROFILES," in
+    *,tui,*)
+      say "refusing: 'tui' is the production profile and takes a released build, not this working tree."
+      say "          (local testing uses nvim-tui / web / headless — see docs/RELEASE.md)"
+      exit 3
+      ;;
+  esac
+fi
 
 say "dsh home : $DSH_HOME_DIR"
 say "plugin   : $REPO_DIR"

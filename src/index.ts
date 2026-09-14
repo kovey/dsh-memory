@@ -30,8 +30,8 @@ import { registerTools } from './tools/index.js'
 export const name = 'dsh-memory'
 export const inject = ['tools', 'systemPrompt']
 
-/** Writing tools land in M2; the protocol section only advertises what exists. */
-const CAPABILITIES = { save: false }
+/** The protocol section only advertises tools that are actually registered. */
+const CAPABILITIES = { save: true }
 
 export function apply(ctx: Context, config: unknown = {}): void {
     try {
@@ -76,7 +76,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
             }
             log(
                 'info',
-                `memory: ready (node:sqlite ${report.probe.sqliteVersion ?? '?'}, fts5=${report.probe.fts5 ? 'yes' : 'no'}, recall=${resolved.recall.autoInject ? `on/${resolved.recall.budgetTokens}tok` : 'off'}, protocol=${resolved.prompt.protocol.enabled ? 'on' : 'off'})`,
+                `memory: ready (node:sqlite ${report.probe.sqliteVersion ?? '?'}, fts5=${report.probe.fts5 ? 'yes' : 'no'}, recall=${resolved.recall.autoInject ? `on/${resolved.recall.budgetTokens}tok` : 'off'}, protocol=${resolved.prompt.protocol.enabled ? 'on' : 'off'}, learn=${resolved.learn.autoDistill ? `on/${resolved.learn.distillModel.model}` : 'off'})`,
             )
         })
     } catch (error) {

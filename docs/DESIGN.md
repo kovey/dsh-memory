@@ -362,9 +362,9 @@ src/
 
 | 阶段 | 交付 | 验收标准 | 状态 |
 |---|---|---|---|
-| **M0 骨架 + 导入** | git init、TS 构建、SQLite schema/迁移、引导导入、只读工具（search/get/stats）、三端挂载 | 三端各起会话都能检索项目/全局条目；DB 可由文本视图重建一致；**零行为改变** | 实施中 |
-| **M1 召回闭环** | 可开关常驻协议段 + 三级召回 + usage 记账 + `memory_recall` | 首步自动召回 <800 tok；同条不重复注入；关开关后无 section | 待办 |
-| **M2 学习闭环** | 信号采集 + L1 落盘 + 有界自动蒸馏 + 门控 + `memory_save` + 技能改造 | 一次真实任务：signals 落项目目录、lessons 自动 +N、重复被合并、指标入账 | 待办 |
+| **M0 骨架 + 导入** | git init、TS 构建、SQLite schema/迁移、引导导入、只读工具（search/get/stats）、三端挂载 | 三端各起会话都能检索项目/全局条目；DB 可由文本视图重建一致；**零行为改变** | ✅ 已完成 |
+| **M1 召回闭环** | 可开关常驻协议段 + 三级召回 + usage 记账 + `memory_recall` | 首步自动召回 <800 tok；同条不重复注入；关开关后无 section | ✅ 已完成 |
+| **M2 学习闭环** | 信号采集 + L1 落盘 + 有界自动蒸馏 + 门控 + `memory_save` + 技能改造 | 一次真实任务：signals 落项目目录、lessons 自动 +N、重复被合并、指标入账 | ✅ 已完成（技能改造留待 M3） |
 | **M3 质量工序** | 矛盾消解 / 衰减 / 归档 / 晋升提案 + `memory_consolidate` + `memory_forget` | 合并后条目下降、无矛盾残留、索引同步、备份可回滚 | 待办 |
 | **M4 git 化同步** | autoCommit(task-end) + `memory_sync` + 冲突合并 + `--rebuild` | 克隆目录重建后检索结果一致 | 待办 |
 | **M5 评估门禁** | baseline 7 任务回归 + `memory_stats` 趋势 + 可选语义检索 | 四项指标不退化 | 待办 |

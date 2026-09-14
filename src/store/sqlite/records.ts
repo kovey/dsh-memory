@@ -188,7 +188,11 @@ export function upsertRecord(db: DatabaseSync, record: MemoryRecord): void {
         record.source !== undefined ? JSON.stringify(record.source) : null,
         cjkBigrams(`${record.title} ${record.body} ${record.tags.join(' ')}`),
     )
+    // Evidence is authoritative on the record: replace the stored rows instead
+    // of appending, otherwise a merge would duplicate every earlier signal.
+    // An empty list is left alone so a text-view re-import cannot erase history.
     if (record.evidence.length > 0) {
+        db.prepare('DELETE FROM evidence WHERE record_id = ?').run(record.id)
         const insert = db.prepare('INSERT INTO evidence (record_id, kind, detail, turn, at) VALUES (?, ?, ?, ?, ?)')
         for (const item of record.evidence) {
             insert.run(record.id, item.kind, item.detail ?? null, item.turn ?? null, item.at)

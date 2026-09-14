@@ -7,9 +7,9 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
 - 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
 - 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
-- 当前进度：**M1**（存储层 + 引导导入 + 只读工具 + 自动召回）；M2–M5 见设计文档 §11
+- 当前进度：**M2**（存储层 + 自动召回 + 持续学习闭环）；M3–M5 见设计文档 §11
 
-## 状态（M1）
+## 状态（M2）
 
 | 能力 | 状态 |
 |---|---|
@@ -21,7 +21,12 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 | `agent/pre-step` 自动召回（阈值 0.35 / 预算 600 tok / 会话内幂等） | ✅ |
 | 召回记账 `usage`（注入次数、召回后成败归因） | ✅ |
 | 工具 `memory_search` / `memory_get` / `memory_recall` / `memory_stats` / `memory_reindex` | ✅ |
-| 信号采集、自动蒸馏、门控落库（M2） | ⏳ |
+| 信号采集：工具失败 / 请求失败 / 用户纠正 / 返工（`tools/result`、`agent/request-error`、pre-step） | ✅ |
+| L1 情节落盘：`<repo>/.dsh/memory/sessions/*.jsonl` + `signals` 表（脱敏、90 天保留） | ✅ |
+| 有界自动蒸馏：仅疼痛 turn、固定 flash、3s 超时、每会话/每日预算、`distill` 审计 | ✅ |
+| 写入门控：去重合并（相似度 ≥0.7）、泛泛条目拒收、无证据置信度封顶 0.55 | ✅ |
+| 召回成败归因：安静且有实际工具调用的 turn 记 success，疼痛 turn 记 failure | ✅ |
+| 工具 `memory_save`（默认项目级；全局仅跨项目工具链事实） | ✅ |
 | 质量工序：矛盾/衰减/归档/晋升（M3） | ⏳ |
 | git 化同步与 `--rebuild`（M4） | ⏳ |
 | baseline 回归门禁（M5） | ⏳ |
@@ -63,6 +68,7 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 | `memory_search` | 检索项目 → 全局记忆，返回标题/元数据/摘要（不返回全文） |
 | `memory_get` | 按 id 读取一条记忆的完整正文 |
 | `memory_stats` | 记忆库健康度：条目数、pending、过期、召回次数、任务指标 |
+| `memory_save` | 写入一条长期经验：默认写项目级；同一门控负责去重/合并/拒收 |
 | `memory_recall` | 一次取回任务召回包（项目 + 命中关键词的全局教训，已排序并按预算裁剪） |
 | `memory_reindex` | 从文本视图重建派生索引（手工改过 lessons、或 `git pull` 之后） |
 

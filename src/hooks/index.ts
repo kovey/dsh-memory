@@ -9,6 +9,9 @@ import { SessionState } from '../recall/session-state.js'
 import { ScopeResolver } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
 import type { StoreRegistry } from '../store/store.js'
+import { TurnLedger } from '../learn/ledger.js'
+import { SignalBuffer } from '../learn/signals.js'
+import { registerLearnHooks } from './learn.js'
 import { createPreStepHook } from './pre-step.js'
 import { registerAgentIndexSection, registerProtocolSection } from './prompt.js'
 import type { PromptDeps } from './prompt.js'
@@ -18,6 +21,10 @@ export interface HookDeps extends PromptDeps {
     registry: StoreRegistry
     resolver: ScopeResolver
     state: SessionState
+    /** Bounded pain-signal buffer (L0). */
+    signals: SignalBuffer
+    /** Per-turn work counters, used for recall attribution. */
+    ledger: TurnLedger
 }
 
 export interface HookHandle {
@@ -32,7 +39,15 @@ export function createHookDeps(
     resolver: ScopeResolver,
     capabilities: { save: boolean },
 ): HookDeps {
-    return { config, registry, resolver, capabilities, state: new SessionState() }
+    return {
+        config,
+        registry,
+        resolver,
+        capabilities,
+        state: new SessionState(),
+        signals: new SignalBuffer(),
+        ledger: new TurnLedger(),
+    }
 }
 
 /** Register every hook and prompt contribution. */
@@ -53,12 +68,18 @@ export function registerHooks(ctx: Context, deps: HookDeps): HookHandle {
     })
 
     // ② automatic recall at the first step of every turn.
-    ctx.on('agent/pre-step', createPreStepHook(deps))
+    ctx.on('agent/pre-step', createPreStepHook(deps as HookDeps))
 
-    // ③ per-session state cleanup.
+    // ③ learning loop: signals, turn-end distillation, recall attribution.
+    disposers.push(...registerLearnHooks(ctx, { ...deps, ctx }))
+
+    // ④ per-session state cleanup.
     ctx.on('session/disposed', (session: { id?: string }) => {
         try {
-            if (typeof session?.id === 'string') deps.state.forget(session.id)
+            if (typeof session?.id !== 'string') return
+            deps.state.forget(session.id)
+            deps.signals.forget(session.id)
+            deps.ledger.forget(session.id)
         } catch (error) {
             log('debug', 'memory: session cleanup failed:', error)
         }

@@ -25,12 +25,18 @@ import { buildQuery, isMemoryMessage, MEMORY_PLUGIN_ID } from '../recall/query.j
 import type { MessageLike } from '../recall/query.js'
 import type { SessionState } from '../recall/session-state.js'
 import type { StoreRegistry } from '../store/store.js'
+import type { TurnLedger } from '../learn/ledger.js'
+import { detectCorrection } from '../learn/signals.js'
+import type { SignalBuffer } from '../learn/signals.js'
 
 export interface RecallHookDeps {
     config: MemoryConfig
     registry: StoreRegistry
     resolver: ScopeResolver
     state: SessionState
+    /** Present when signal collection is wired (M2). */
+    signals?: SignalBuffer
+    ledger?: TurnLedger
 }
 
 interface PreStepPayload {
@@ -71,6 +77,7 @@ function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decision: P
     if (query.terms.length === 0) return decision
 
     const sessionId = sessionIdOf(payload.agent)
+    noteUserCorrection(deps, payload, sessionId, query.text)
     const outcome = recall(deps, {
         agent: payload.agent,
         terms: query.terms,
@@ -95,7 +102,10 @@ function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decision: P
     recordUsage(deps, outcome.hits, { sessionId, turn: payload.turn, step: payload.step })
     if (sessionId !== undefined) {
         deps.state.markInjected(sessionId, outcome.hits.map((hit) => hit.record.id))
-        if (payload.turn !== undefined) deps.state.observeTurn(sessionId, payload.turn)
+        if (payload.turn !== undefined) {
+            deps.state.observeTurn(sessionId, payload.turn)
+            deps.ledger?.noteRecalled(sessionId, payload.turn, outcome.hits.length)
+        }
     }
 
     log(
@@ -107,6 +117,32 @@ function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decision: P
         messages: [message as UserMessage, ...admitted],
         ...(decision.startsRequestSeries === true ? { startsRequestSeries: true as const } : {}),
     }
+}
+
+/**
+ * A user message that reads as a correction is the strongest cheap signal that
+ * something went wrong. Recording it here costs nothing and is what lets the
+ * turn-end handler decide to distil.
+ */
+function noteUserCorrection(
+    deps: RecallHookDeps,
+    payload: PreStepPayload,
+    sessionId: string | undefined,
+    text: string,
+): void {
+    if (sessionId === undefined || payload.turn === undefined || deps.signals === undefined) return
+    const marker = detectCorrection(text)
+    if (marker === undefined) return
+    deps.ledger?.noteCorrection(sessionId, payload.turn)
+    deps.signals.add({
+        sessionId,
+        kind: 'user-correction',
+        turn: payload.turn,
+        ...(payload.step !== undefined ? { step: payload.step } : {}),
+        detail: `用户纠正信号「${marker}」：${text.slice(0, 160)}`,
+        at: new Date().toISOString(),
+    })
+    log('info', `memory: user-correction signal recorded (marker "${marker}") turn ${payload.turn}`)
 }
 
 function recordUsage(

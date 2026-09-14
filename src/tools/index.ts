@@ -20,6 +20,7 @@ import type { AgentLike } from '../scope/resolver.js'
 import { recall, renderRecallPack } from '../recall/engine.js'
 import type { SessionState } from '../recall/session-state.js'
 import { buildQuery } from '../recall/query.js'
+import { saveTool } from './save.js'
 
 export interface ToolDeps {
     config: MemoryConfig
@@ -45,6 +46,7 @@ export function registerTools(ctx: Context, deps: ToolDeps): (() => void)[] {
         }
     }
 
+    register(saveTool(deps))
     register(recallTool(deps))
     register(searchTool(deps))
     register(getTool(deps))

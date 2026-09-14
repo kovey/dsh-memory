@@ -312,7 +312,7 @@ export function rawSearch(
             try {
                 const rows = db
                     .prepare(
-                        `SELECT r.id AS id, bm25(records_fts, 6.0, 2.0, 3.0, 1.5) AS raw
+                        `SELECT r.id AS id, bm25(records_fts, 6.0, 2.0, 3.0, 0.5) AS raw
                          FROM records_fts JOIN records r ON r.rowid = records_fts.rowid
                          WHERE records_fts MATCH ?${tail}
                          ORDER BY raw ASC LIMIT ${limit}`,

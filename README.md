@@ -7,9 +7,9 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
 - 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
 - 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
-- 当前进度：**M0**（存储层 + 引导导入 + 只读工具）；M1–M5 见设计文档 §11
+- 当前进度：**M1**（存储层 + 引导导入 + 只读工具 + 自动召回）；M2–M5 见设计文档 §11
 
-## 状态（M0）
+## 状态（M1）
 
 | 能力 | 状态 |
 |---|---|
@@ -17,8 +17,10 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 | 文本视图 → DB 引导导入（`lessons/*.md`、`metrics.jsonl`） | ✅ |
 | DB → 文本视图导出（`lessons/*.md`、`MEMORY.md`）与往返一致性 | ✅ |
 | 作用域解析（会话 cwd → 仓库根）与项目/全局守卫 | ✅ |
-| 只读工具 `memory_search` / `memory_get` / `memory_stats` / `memory_reindex` | ✅ |
-| 自动召回、常驻协议段（M1） | ⏳ |
+| 常驻协议段（可开关）+ 项目索引摘要（per-agent scoped section） | ✅ |
+| `agent/pre-step` 自动召回（阈值 0.35 / 预算 600 tok / 会话内幂等） | ✅ |
+| 召回记账 `usage`（注入次数、召回后成败归因） | ✅ |
+| 工具 `memory_search` / `memory_get` / `memory_recall` / `memory_stats` / `memory_reindex` | ✅ |
 | 信号采集、自动蒸馏、门控落库（M2） | ⏳ |
 | 质量工序：矛盾/衰减/归档/晋升（M3） | ⏳ |
 | git 化同步与 `--rebuild`（M4） | ⏳ |
@@ -45,7 +47,10 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 - config:
     - id: memory
       config:
+        prompt:
+          protocol: { enabled: false }   # 关掉常驻协议段：零 token
         recall:
+          autoInject: false              # 关掉自动召回：完全被动
           budgetTokens: 800
         learn:
           autoDistill: false
@@ -58,6 +63,7 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 | `memory_search` | 检索项目 → 全局记忆，返回标题/元数据/摘要（不返回全文） |
 | `memory_get` | 按 id 读取一条记忆的完整正文 |
 | `memory_stats` | 记忆库健康度：条目数、pending、过期、召回次数、任务指标 |
+| `memory_recall` | 一次取回任务召回包（项目 + 命中关键词的全局教训，已排序并按预算裁剪） |
 | `memory_reindex` | 从文本视图重建派生索引（手工改过 lessons、或 `git pull` 之后） |
 
 ## 开发

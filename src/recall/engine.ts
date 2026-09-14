@@ -1,0 +1,136 @@
+/**
+ * Recall engine (DESIGN §6): turn a query into the highest-value memory pack
+ * that fits a token budget.
+ *
+ * Pure with respect to the session — it reads stores and returns a selection;
+ * the caller decides how (and whether) to inject it.
+ */
+import type { MemoryConfig } from '../config.js'
+import { fitBudget, estimateTokens, normalizeRelevance, rankRecords } from './rank.js'
+import type { ScoredRecord } from './rank.js'
+import { getRecord, rawSearch } from '../store/sqlite/records.js'
+import type { StoreRegistry, ScopeStore } from '../store/store.js'
+import type { Layer, MemoryRecord, MemoryScope } from '../store/types.js'
+import type { AgentLike } from '../scope/resolver.js'
+import { ScopeResolver } from '../scope/resolver.js'
+
+export interface RecallDeps {
+    config: MemoryConfig
+    registry: StoreRegistry
+    resolver: ScopeResolver
+}
+
+export interface RecallRequest {
+    agent?: AgentLike | undefined
+    terms: readonly string[]
+    /** Records already surfaced in this session (idempotence, DESIGN §6). */
+    exclude?: (recordId: string) => boolean
+    budgetTokens?: number
+    maxItems?: number
+    minScore?: number
+    layers?: readonly Layer[]
+    /** Also search the global root when the session scope is a project. */
+    includeGlobal?: boolean
+}
+
+export interface RecallHit {
+    record: MemoryRecord
+    scope: MemoryScope
+    score: number
+}
+
+export interface RecallOutcome {
+    hits: RecallHit[]
+    /** Matching records that did not fit the budget / score floor. */
+    dropped: number
+    tokensUsed: number
+    /** Records that matched the query before filtering. */
+    considered: number
+    scopes: MemoryScope[]
+}
+
+const HEADER = '相关记忆（dsh-memory 自动召回；confidence < 0.7 仅为提示，需自行验证）：'
+
+/** Retrieve and rank memory for one query. */
+export function recall(deps: RecallDeps, request: RecallRequest): RecallOutcome {
+    const empty: RecallOutcome = { hits: [], dropped: 0, tokensUsed: 0, considered: 0, scopes: [] }
+    if (request.terms.length === 0) return empty
+
+    const stores = recallStores(deps, request)
+    if (stores.length === 0) return empty
+
+    const merged: { item: ScoredRecord; scope: MemoryScope }[] = []
+    let considered = 0
+    for (const store of stores) {
+        const hits = rawSearch(store.db, request.terms, store.fts5, {
+            ...(request.layers !== undefined ? { layers: request.layers } : {}),
+            status: ['active', 'pending'],
+        })
+        const relevance = normalizeRelevance(new Map(hits.map((hit) => [hit.id, hit.raw])))
+        const records = hits
+            .map((hit) => getRecord(store.db, hit.id))
+            .filter((record): record is MemoryRecord => record !== undefined)
+        considered += records.length
+        for (const item of rankRecords(records, { relevance, queryTerms: request.terms })) {
+            merged.push({ item, scope: store.scope })
+        }
+    }
+
+    merged.sort((a, b) => b.item.score - a.item.score)
+    const ranked = merged.map(({ item }) => item)
+    const scopeOf = new Map(ranked.map((item, index) => [item.record.id, merged[index]?.scope]))
+    const budgetTokens = Math.max(0, (request.budgetTokens ?? deps.config.recall.budgetTokens) - estimateTokens(HEADER))
+    const fitted = fitBudget(ranked, (item) => renderHit({ record: item.record, scope: scopeOf.get(item.record.id) ?? stores[0]!.scope, score: item.score }), {
+        budgetTokens,
+        maxItems: request.maxItems ?? deps.config.recall.maxItems,
+        minScore: request.minScore ?? deps.config.recall.minScore,
+    })
+
+    let dropped = fitted.dropped
+    const hits: RecallHit[] = []
+    for (const item of fitted.selected) {
+        if (request.exclude?.(item.record.id) === true) {
+            dropped += 1
+            continue
+        }
+        const scope = scopeOf.get(item.record.id) ?? stores[0]!.scope
+        hits.push({ record: item.record, scope, score: item.score })
+    }
+    return { hits, dropped, tokensUsed: fitted.tokensUsed + estimateTokens(HEADER), considered, scopes: stores.map((s) => s.scope) }
+}
+
+/** Which roots a recall pass consults: project first, then global (DESIGN §3). */
+function recallStores(deps: RecallDeps, request: RecallRequest): ScopeStore[] {
+    const stores: ScopeStore[] = []
+    const primary = deps.registry.open(deps.resolver.resolve({ agent: request.agent }))
+    if (primary !== undefined) stores.push(primary)
+    const includeGlobal = request.includeGlobal ?? primary?.scope.kind === 'project'
+    if (includeGlobal) {
+        const global = deps.registry.open(deps.resolver.globalScope())
+        if (global !== undefined && !stores.some((store) => store.scope.root === global.scope.root)) stores.push(global)
+    }
+    return stores
+}
+
+/** Render one hit as a compact, model-readable line pair. */
+export function renderHit(hit: RecallHit, maxBodyChars = 220): string {
+    const record = hit.record
+    const scope = hit.scope.kind === 'project' ? '项目' : '全局'
+    const flags = [`${scope}`, `conf ${record.confidence.toFixed(2)}`, `seen ${record.timesSeen}`]
+    const body = record.body.replace(/\s+/g, ' ').trim().slice(0, maxBodyChars)
+    return `${record.title} [${flags.join(' · ')} · id ${record.id}]\n   ${body}`
+}
+
+/** Render the whole pack injected into a step. */
+export function renderRecallPack(hits: readonly RecallHit[], dropped = 0): string {
+    const lines = [HEADER]
+    hits.forEach((hit, index) => lines.push(`${index + 1}. ${renderHit(hit)}`))
+    if (dropped > 0) lines.push(`（另有 ${dropped} 条相关记忆未展开，可用 memory_search 检索）`)
+    lines.push('以上为历史经验，可能与当前情况不符；以实际验证为准，冲突时以当前事实为准。')
+    return lines.join('\n')
+}
+
+/** Estimated cost of one rendered pack (used by tests and budgets). */
+export function packTokens(hits: readonly RecallHit[], dropped = 0): number {
+    return estimateTokens(renderRecallPack(hits, dropped))
+}

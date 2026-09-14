@@ -40,6 +40,21 @@ test('falls back to the global scope when no repository owns the directory', () 
     assert.equal(scope.root, home.root)
 })
 
+test('a session outside every repository never inherits the host repo', () => {
+    clearRepoCache()
+    const home = memoryFixture('scope-host-repo', {})
+    useGlobalMemoryHome(home.root)
+    // process.cwd() *is* inside the plugin repository here: a session whose own
+    // cwd is outside every repository must still resolve to the global scope,
+    // otherwise memory would leak across projects.
+    const scope = new ScopeResolver(resolveConfig({})).resolve({
+        agent: { session: { header: { cwd: os.tmpdir() } } },
+    })
+    assert.equal(scope.kind, 'global')
+    assert.equal(scope.reason, 'no-project-context')
+    assert.equal(scope.root, home.root)
+})
+
 test('a scratch directory inside a repository belongs to that repository', () => {
     clearRepoCache()
     const home = memoryFixture('scope-inside-repo', {})

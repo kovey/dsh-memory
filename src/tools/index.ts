@@ -12,15 +12,20 @@ import { log } from '../log.js'
 import { rankRecords, normalizeRelevance } from '../recall/rank.js'
 import { countRecords, extractTerms, getRecord, listRecords, rawSearch } from '../store/sqlite/records.js'
 import { summarizeMetrics } from '../store/metrics.js'
+import { recallStats } from '../recall/usage.js'
 import type { StoreRegistry, ScopeStore } from '../store/store.js'
 import type { Layer, MemoryRecord, MemoryScope } from '../store/types.js'
 import { ScopeResolver } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
+import { recall, renderRecallPack } from '../recall/engine.js'
+import type { SessionState } from '../recall/session-state.js'
+import { buildQuery } from '../recall/query.js'
 
 export interface ToolDeps {
     config: MemoryConfig
     registry: StoreRegistry
     resolver: ScopeResolver
+    state: SessionState
 }
 
 type TextOutput = { type: 'string' }
@@ -40,6 +45,7 @@ export function registerTools(ctx: Context, deps: ToolDeps): (() => void)[] {
         }
     }
 
+    register(recallTool(deps))
     register(searchTool(deps))
     register(getTool(deps))
     register(statsTool(deps))
@@ -57,6 +63,43 @@ function targetStores(deps: ToolDeps, agent: AgentLike | undefined, scope: 'auto
         if (global !== undefined && !stores.some((store) => store.scope.root === global.scope.root)) stores.push(global)
     }
     return stores
+}
+
+function recallTool(deps: ToolDeps) {
+    return defineTool({
+        name: 'memory_recall',
+        description:
+            'Fetch the memory pack for a task in one call: project memory plus keyword-matched global lessons, already ranked and trimmed to a token budget. Use it when you want the full recall set explicitly (the same pack is injected automatically at the start of each turn).',
+        parameters: {
+            task: {
+                type: 'string',
+                required: true,
+                description: 'Task description, question or keywords to recall memory for.',
+            },
+            budgetTokens: { type: 'number', description: 'Token budget for the pack (default from config).' },
+            maxItems: { type: 'number', description: 'Maximum records to include (default from config).' },
+            includeGlobal: { type: 'boolean', description: 'Also search global memory (default: yes for project sessions).' },
+        },
+        output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
+        async execute(args, exec) {
+            const agent = exec.agent as unknown as AgentLike | undefined
+            const query = buildQuery([{ content: [{ type: 'text', text: args.task }] }])
+            if (query.terms.length === 0) return 'task text contained no searchable terms'
+            const sessionId = exec.agent === undefined ? undefined : (exec.agent as unknown as AgentLike).session?.id
+            const outcome = recall(deps, {
+                agent,
+                terms: query.terms,
+                ...(args.budgetTokens !== undefined ? { budgetTokens: args.budgetTokens } : {}),
+                ...(args.maxItems !== undefined ? { maxItems: args.maxItems } : {}),
+                ...(args.includeGlobal !== undefined ? { includeGlobal: args.includeGlobal } : {}),
+                exclude: (id) => typeof sessionId === 'string' && deps.state.hasInjected(sessionId, id),
+            })
+            if (outcome.hits.length === 0) {
+                return `no memory matched "${args.task}" (considered ${outcome.considered} record(s) in ${outcome.scopes.map((scope) => scope.kind).join(' + ') || 'no scope'})`
+            }
+            return renderRecallPack(outcome.hits, outcome.dropped)
+        },
+    })
 }
 
 function searchTool(deps: ToolDeps) {
@@ -186,12 +229,10 @@ function statsTool(deps: ToolDeps) {
                 lines.push(
                     `  records: ${counts.total} (active ${counts.active} / pending ${counts.pending} / archived ${counts.archived}) · expired ${counts.expired} · superseded ${counts.superseded}`,
                 )
-                const usage = store.db
-                    .prepare('SELECT COUNT(*) AS n, SUM(CASE WHEN outcome = \'success\' THEN 1 ELSE 0 END) AS ok FROM usage')
-                    .get()
-                const recallCount = typeof usage?.['n'] === 'number' ? usage['n'] : 0
-                const recallOk = typeof usage?.['ok'] === 'number' ? usage['ok'] : 0
-                lines.push(`  recalls: ${recallCount} · successful after recall: ${recallOk}`)
+                const usage = recallStats(store.db)
+                lines.push(
+                    `  recalls: ${usage.injections} · attributed ${usage.attributed} (success ${usage.success} / failure ${usage.failure})`,
+                )
                 lines.push(
                     `  tasks: ${metrics.tasks} (success ${metrics.success} / partial ${metrics.partial} / failed ${metrics.failed}) · lessons logged: ${metrics.lessons}`,
                 )

@@ -12,12 +12,22 @@ import { tempDir } from './helpers.ts'
 
 interface FakeContext {
     tools: { register: (definition: { name: string }) => () => void }
+    systemPrompt: { section: (section: { name: string }) => () => void }
     effect: (execute: () => () => void) => void
+    on: (event: string, listener: unknown) => () => void
 }
 
-function fakeContext(): { ctx: unknown; tools: Map<string, unknown>; effects: (() => void)[] } {
+function fakeContext(): {
+    ctx: unknown
+    tools: Map<string, unknown>
+    effects: (() => void)[]
+    sections: string[]
+    listeners: string[]
+} {
     const tools = new Map<string, unknown>()
     const effects: (() => void)[] = []
+    const sections: string[] = []
+    const listeners: string[] = []
     const ctx: FakeContext = {
         tools: {
             register(definition) {
@@ -25,20 +35,30 @@ function fakeContext(): { ctx: unknown; tools: Map<string, unknown>; effects: ((
                 return () => tools.delete(definition.name)
             },
         },
+        systemPrompt: {
+            section(section) {
+                sections.push(section.name)
+                return () => undefined
+            },
+        },
         effect(execute) {
             effects.push(execute())
         },
+        on(event) {
+            listeners.push(event)
+            return () => undefined
+        },
     }
-    return { ctx, tools, effects }
+    return { ctx, tools, effects, sections, listeners }
 }
 
 test('the plugin declares its name and required services', () => {
     assert.equal(name, 'dsh-memory')
-    assert.deepEqual(inject, ['tools'])
+    assert.deepEqual(inject, ['tools', 'systemPrompt'])
 })
 
-test('apply() registers the read-only memory tools and unwinds on dispose', async () => {
-    const { ctx, tools, effects } = fakeContext()
+test('apply() registers the memory tools, hooks and prompt section, and unwinds on dispose', async () => {
+    const { ctx, tools, effects, sections, listeners } = fakeContext()
     const logFile = path.join(tempDir('plugin-log'), 'memory-plugin.log')
 
     apply(ctx as never, { logFile })
@@ -46,8 +66,11 @@ test('apply() registers the read-only memory tools and unwinds on dispose', asyn
 
     assert.deepEqual(
         [...tools.keys()].sort(),
-        ['memory_get', 'memory_reindex', 'memory_search', 'memory_stats'],
+        ['memory_get', 'memory_recall', 'memory_reindex', 'memory_search', 'memory_stats'],
     )
+
+    assert.deepEqual(sections, ['memory:protocol'])
+    assert.deepEqual([...listeners].sort(), ['agent/created', 'agent/pre-step', 'session/disposed'])
 
     for (const dispose of effects) dispose()
     assert.equal(tools.size, 0)
@@ -69,5 +92,5 @@ test('apply() stays silent when disabled', async () => {
 test('a broken config cannot break session startup', () => {
     const { ctx, tools } = fakeContext()
     assert.doesNotThrow(() => apply(ctx as never, { recall: 'not-an-object', learn: 42 }))
-    assert.equal(tools.size, 4)
+    assert.equal(tools.size, 5)
 })

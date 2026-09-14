@@ -24,7 +24,9 @@
         prompt:
           protocol:
             enabled: true
-            budgetTokens: 120
+            # ≈180 tokens with the writing tools advertised (M2); the section is
+            # clamped per line, so this is a ceiling rather than a cost.
+            budgetTokens: 240
           indexSummary:
             enabled: true
             budgetTokens: 150

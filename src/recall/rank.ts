@@ -17,6 +17,8 @@ export interface ScoreComponents {
     layerWeight: number
     recallBoost: number
     usageBoost: number
+    /** Lexical match against the title/tags (see {@link lexicalBoost}). */
+    lexical: number
 }
 
 export interface ScoredRecord {
@@ -28,6 +30,8 @@ export interface ScoredRecord {
 export interface RankOptions {
     /** FTS5 bm25 values keyed by record id (raw, negative-is-better). */
     relevance?: Map<string, number>
+    /** Query terms, used for the title/tag lexical boost. */
+    queryTerms?: readonly string[]
     /** Weight per layer; defaults to LAYER_WEIGHT (DESIGN §6). */
     layerWeights?: Partial<Record<Layer, number>>
     now?: Date
@@ -35,7 +39,13 @@ export interface RankOptions {
     freshnessHalfLifeDays?: number
 }
 
-/** Normalize raw bm25 values (negative, lower is better) into 0..1. */
+/**
+ * Normalize raw bm25 values into 0..1.
+ *
+ * SQLite's `bm25()` is negative and *more negative means a better match*, so
+ * relevance grows with the magnitude: the best hit scores 1 and the worst 0.
+ * A single hit (or a LIKE fallback where every raw value is 0) scores 1.
+ */
 export function normalizeRelevance(raw: Map<string, number>): Map<string, number> {
     if (raw.size === 0) return new Map()
     let min = Number.POSITIVE_INFINITY
@@ -49,7 +59,7 @@ export function normalizeRelevance(raw: Map<string, number>): Map<string, number
     const out = new Map<string, number>()
     for (const [id, value] of raw) {
         const magnitude = Math.abs(value)
-        out.set(id, span <= Number.EPSILON ? 1 : 1 - (magnitude - min) / span)
+        out.set(id, span <= Number.EPSILON ? 1 : (magnitude - min) / span)
     }
     return out
 }
@@ -75,6 +85,27 @@ export function recallBoost(timesSeen: number): number {
     return 1 + 0.05 * Math.min(Math.max(timesSeen, 1), 10)
 }
 
+/**
+ * Lexical boost for query terms appearing verbatim in the title or tags.
+ *
+ * FTS5 bm25 alone is a poor precision signal here: a long CJK body can outrank
+ * a title match because its bigrams match several OR-ed clauses. A title or tag
+ * hit is the strongest available evidence that the record is *about* the task,
+ * so it is scored explicitly instead of hoping the column weights get it right.
+ */
+export function lexicalBoost(record: MemoryRecord, terms: readonly string[] | undefined): number {
+    if (terms === undefined || terms.length === 0) return 1
+    const title = record.title.toLowerCase()
+    const tags = record.tags.join(' ').toLowerCase()
+    let hits = 0
+    for (const term of terms) {
+        if (term.length < 2) continue
+        if (title.includes(term) || tags.includes(term)) hits += 1
+    }
+    if (hits === 0) return 1
+    return 1 + 0.35 * Math.min(hits, 3)
+}
+
 /** Score one record. `relevance` of 1 means "no query signal" (index listing). */
 export function scoreRecord(record: MemoryRecord, options: RankOptions = {}): ScoredRecord {
     const now = options.now ?? new Date()
@@ -84,7 +115,8 @@ export function scoreRecord(record: MemoryRecord, options: RankOptions = {}): Sc
     const layerWeight = options.layerWeights?.[record.layer] ?? LAYER_WEIGHT[record.layer] ?? 1
     const frequency = recallBoost(record.timesSeen)
     const usage = usageBoost(record.successAfterRecall, record.failAfterRecall)
-    const score = relevance * confidence * fresh * layerWeight * frequency * usage
+    const lexical = lexicalBoost(record, options.queryTerms)
+    const score = relevance * confidence * fresh * layerWeight * frequency * usage * lexical
     return {
         record,
         score,
@@ -95,6 +127,7 @@ export function scoreRecord(record: MemoryRecord, options: RankOptions = {}): Sc
             layerWeight,
             recallBoost: frequency,
             usageBoost: usage,
+            lexical,
         },
     }
 }

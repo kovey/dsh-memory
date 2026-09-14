@@ -69,7 +69,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
     logFile: '~/.dsh/memory-plugin.log',
     routing: { defaultScope: 'project', subagentWrite: false },
     prompt: {
-        protocol: { enabled: true, budgetTokens: 120, order: 60 },
+        protocol: { enabled: true, budgetTokens: 240, order: 60 },
         indexSummary: { enabled: true, budgetTokens: 150, maxTitles: 12, order: 61 },
     },
     recall: {

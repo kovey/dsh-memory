@@ -3,18 +3,23 @@
  *
  * Strictly separated project/global memory (one SQLite database per root, one
  * text view per root), host-driven recall before work and continuous learning
- * after it. See `docs/DESIGN.md` for the full design; M0 ships the store, the
- * bootstrap import and the read-only tool surface.
+ * after it. See `docs/DESIGN.md` for the full design.
  *
  * Extension points used here (verified against the installed packages):
- *  - ctx.tools.register(defineTool(...))   @deepseek-ai/dsh-tools
- *  - ctx.effect(() => cleanup)             cordis v4 fiber teardown
- *  - session.header.cwd                    @deepseek-ai/dsh-session (scope key)
+ *  - ctx.tools.register(defineTool(...))        @deepseek-ai/dsh-tools
+ *  - ctx.systemPrompt.section({...})            @deepseek-ai/dsh-system-prompt
+ *  - ctx.on('agent/pre-step', (payload, next))  @deepseek-ai/dsh-agent (waterfall)
+ *  - ctx.on('agent/created' | 'session/disposed')
+ *  - agent.ctx                                  agent-scoped registrations
+ *  - session.header.cwd                         @deepseek-ai/dsh-session (scope key)
+ *  - createUserMessage({source:{kind:'plugin'}}) @deepseek-ai/dsh-llm
+ *  - ctx.effect(() => cleanup)                  cordis v4 fiber teardown
  *
  * @module dsh-memory
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveConfig } from './config.js'
+import { createHookDeps, registerHooks } from './hooks/index.js'
 import { log, setLogFile } from './log.js'
 import { expandHome } from './paths.js'
 import { ScopeResolver } from './scope/resolver.js'
@@ -23,7 +28,10 @@ import { StoreRegistry } from './store/store.js'
 import { registerTools } from './tools/index.js'
 
 export const name = 'dsh-memory'
-export const inject = ['tools']
+export const inject = ['tools', 'systemPrompt']
+
+/** Writing tools land in M2; the protocol section only advertises what exists. */
+const CAPABILITIES = { save: false }
 
 export function apply(ctx: Context, config: unknown = {}): void {
     try {
@@ -34,16 +42,25 @@ export function apply(ctx: Context, config: unknown = {}): void {
 
         const registry = new StoreRegistry(resolved)
         const resolver = new ScopeResolver(resolved)
-        const disposers = registerTools(ctx, { config: resolved, registry, resolver })
+        const deps = createHookDeps(resolved, registry, resolver, CAPABILITIES)
+
+        const toolDisposers = registerTools(ctx, {
+            config: resolved,
+            registry,
+            resolver,
+            state: deps.state,
+        })
+        const hooks = registerHooks(ctx, deps)
 
         ctx.effect(() => () => {
-            for (const dispose of disposers) {
+            for (const dispose of toolDisposers) {
                 try {
                     dispose()
                 } catch (error) {
                     log('warn', 'memory: tool disposer failed:', error)
                 }
             }
+            hooks.dispose()
             registry.closeAll()
         })
 
@@ -59,7 +76,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
             }
             log(
                 'info',
-                `memory: ready (node:sqlite ${report.probe.sqliteVersion ?? '?'}, fts5=${report.probe.fts5 ? 'yes' : 'no'})`,
+                `memory: ready (node:sqlite ${report.probe.sqliteVersion ?? '?'}, fts5=${report.probe.fts5 ? 'yes' : 'no'}, recall=${resolved.recall.autoInject ? `on/${resolved.recall.budgetTokens}tok` : 'off'}, protocol=${resolved.prompt.protocol.enabled ? 'on' : 'off'})`,
             )
         })
     } catch (error) {

@@ -220,7 +220,7 @@ conflicts(id INTEGER PRIMARY KEY, winner_id TEXT, loser_id TEXT, reason TEXT, at
 
 | 级别 | 扩展点 | 内容 | 预算 | 频率 |
 |---|---|---|---|---|
-| ① 常驻 | `ctx.systemPrompt.section()` | 记忆协议（何时查/何时存）+ L2 索引摘要（条数 + 最近 N 条标题）+ L5 偏好 | 120 + 150 tok | 每次装配 |
+| ① 常驻 | `ctx.systemPrompt.section()` | 记忆协议（何时查/何时存）+ L2 索引摘要（条数 + 最近 N 条标题）+ L5 偏好 | ≤240 + 150 tok（逐行裁剪） | 每次装配 |
 | ② 自动召回 | `agent/pre-step`（首个 step） | 按本轮用户消息构造 query，取 top-K 教训正文，作为 plugin-source UserMessage 注入 | 600 tok | 每轮 1 次 |
 | ③ 按需 | `memory_search` / `memory_get` / `memory_recall` | 模型主动深挖 | 模型自付 | 模型决定 |
 

@@ -46,21 +46,27 @@ export class ScopeResolver {
     }
 
     /**
-     * Resolve the scope owning this call. Falls back to the global scope only
-     * when no repository context exists — project scopes never degrade into the
-     * global root.
+     * Resolve the scope owning this call.
+     *
+     * The session's own working directory is authoritative: when it exists and
+     * is not inside a repository the result is the *global* scope. Falling back
+     * to the host process's cwd in that situation would attribute an unrelated
+     * session to whichever repository the host happened to be launched from —
+     * exactly the cross-project contamination invariant 3 forbids. The process
+     * cwd is consulted only when the session carries no cwd at all.
      */
     resolve(input: ResolveInput = {}): MemoryScope {
         if (input.explicit === 'global') return this.globalScope('explicit-global')
         const sessionCwd = sessionCwdOf(input.agent)
-        const cwd = input.cwd ?? sessionCwd
-        const repo = resolveRepoRoot(cwd) ?? (input.cwd === undefined ? resolveRepoRoot(process.cwd()) : undefined)
+        const probe = input.cwd ?? sessionCwd
+        const fromSession = probe !== undefined && probe !== ''
+        const repo = resolveRepoRoot(fromSession ? probe : process.cwd())
         if (repo !== undefined) {
             return {
                 kind: 'project',
                 repo,
                 root: projectMemoryRoot(repo),
-                reason: cwd !== undefined && cwd !== '' ? 'session-cwd' : 'process-cwd',
+                reason: fromSession ? 'session-cwd' : 'process-cwd',
             }
         }
         return this.globalScope('no-project-context')

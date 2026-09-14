@@ -1,0 +1,7 @@
+# dsh-memory: derived and private artifacts (the text view is tracked)
+memory.db
+memory.db-shm
+memory.db-wal
+sessions/
+.queue/
+*.bak.*

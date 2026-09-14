@@ -13,6 +13,7 @@ import { rankRecords, normalizeRelevance } from '../recall/rank.js'
 import { countRecords, extractTerms, getRecord, listRecords, rawSearch } from '../store/sqlite/records.js'
 import { summarizeMetrics } from '../store/metrics.js'
 import { recallStats } from '../recall/usage.js'
+import { episodeDigest } from '../learn/episodic.js'
 import type { StoreRegistry, ScopeStore } from '../store/store.js'
 import type { Layer, MemoryRecord, MemoryScope } from '../store/types.js'
 import { ScopeResolver } from '../scope/resolver.js'
@@ -21,6 +22,8 @@ import { recall, renderRecallPack } from '../recall/engine.js'
 import type { SessionState } from '../recall/session-state.js'
 import { buildQuery } from '../recall/query.js'
 import { saveTool } from './save.js'
+import { consolidateTool, forgetTool } from './consolidate.js'
+import { conflictCount, openProposalsCount } from '../learn/stats.js'
 
 export interface ToolDeps {
     config: MemoryConfig
@@ -47,6 +50,8 @@ export function registerTools(ctx: Context, deps: ToolDeps): (() => void)[] {
     }
 
     register(saveTool(deps))
+    register(consolidateTool(deps))
+    register(forgetTool(deps))
     register(recallTool(deps))
     register(searchTool(deps))
     register(getTool(deps))
@@ -230,6 +235,11 @@ function statsTool(deps: ToolDeps) {
                 )
                 lines.push(
                     `  records: ${counts.total} (active ${counts.active} / pending ${counts.pending} / archived ${counts.archived}) · expired ${counts.expired} · superseded ${counts.superseded}`,
+                )
+                lines.push(`  conflicts: ${conflictCount(store.db)} recorded · open promotion proposals: ${openProposalsCount(store.db)}`)
+                const episodes = episodeDigest(store.db)
+                lines.push(
+                    `  episodes (90d): ${episodes.signals} signal(s) — ${Object.entries(episodes.byKind).map(([kind, n]) => `${kind}=${n}`).join(' ') || 'none'}`,
                 )
                 const usage = recallStats(store.db)
                 lines.push(

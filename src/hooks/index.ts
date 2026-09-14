@@ -9,6 +9,9 @@ import { SessionState } from '../recall/session-state.js'
 import { ScopeResolver } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
 import type { StoreRegistry } from '../store/store.js'
+import type { MemoryScope } from '../store/types.js'
+import { consolidate } from '../learn/consolidate.js'
+import { consolidationDue } from '../learn/decay.js'
 import { TurnLedger } from '../learn/ledger.js'
 import { SignalBuffer } from '../learn/signals.js'
 import { registerLearnHooks } from './learn.js'
@@ -73,6 +76,25 @@ export function registerHooks(ctx: Context, deps: HookDeps): HookHandle {
     // ③ learning loop: signals, turn-end distillation, recall attribution.
     disposers.push(...registerLearnHooks(ctx, { ...deps, ctx }))
 
+    // ③.5 lazy consolidation: at most one pass per scope per interval, never
+    // blocking session start (DESIGN §7 "周期" row).
+    const inFlight = new Set<string>()
+    ctx.on('session/created', (session: { header?: { cwd?: string } }) => {
+        try {
+            if (!deps.config.consolidate.enabled) return
+            const scope = deps.resolver.resolve({ cwd: session?.header?.cwd })
+            if (inFlight.has(scope.root)) return
+            const timer = setTimeout(() => {
+                inFlight.delete(scope.root)
+                runLazyConsolidation(deps, scope)
+            }, 2_000)
+            timer.unref?.()
+            inFlight.add(scope.root)
+        } catch (error) {
+            log('debug', 'memory: lazy consolidation scheduling failed:', error)
+        }
+    })
+
     // ④ per-session state cleanup.
     ctx.on('session/disposed', (session: { id?: string }) => {
         try {
@@ -96,5 +118,30 @@ export function registerHooks(ctx: Context, deps: HookDeps): HookHandle {
                 }
             }
         },
+    }
+}
+
+/**
+ * One consolidation pass, scheduled off the session-start path. Deterministic
+ * work only: expiry, staleness, decay and *detection* of contradictions.
+ * Superseding a lesson needs an explicit `memory_consolidate` call, and a
+ * promotion always waits for a human.
+ */
+function runLazyConsolidation(deps: HookDeps, scope: MemoryScope): void {
+    try {
+        const store = deps.registry.open(scope)
+        if (store === undefined) return
+        const due = consolidationDue(store.db, {
+            everyDays: deps.config.consolidate.everyDays,
+            everyNTasks: deps.config.consolidate.everyNTasks,
+        })
+        if (!due.due) return
+        const report = consolidate(store.db, store.scope, store.fts5, { dryRun: false, resolveConflicts: false })
+        log(
+            'info',
+            `memory: consolidation (${due.reason}) on ${report.scope} — archived ${report.archived}, decayed ${report.decayed}, conflicts ${report.conflictsFound}, proposals ${report.proposals.length}`,
+        )
+    } catch (error) {
+        log('warn', 'memory: lazy consolidation failed:', error)
     }
 }

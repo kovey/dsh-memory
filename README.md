@@ -7,9 +7,9 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
 - 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
 - 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
-- 当前进度：**M2**（存储层 + 自动召回 + 持续学习闭环）；M3–M5 见设计文档 §11
+- 当前进度：**M3**（存储 + 自动召回 + 学习闭环 + 质量工序）；M4–M5 见设计文档 §11
 
-## 状态（M2）
+## 状态（M3）
 
 | 能力 | 状态 |
 |---|---|
@@ -27,6 +27,12 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 | 写入门控：去重合并（相似度 ≥0.7）、泛泛条目拒收、无证据置信度封顶 0.55 | ✅ |
 | 召回成败归因：安静且有实际工具调用的 turn 记 success，疼痛 turn 记 failure | ✅ |
 | 工具 `memory_save`（默认项目级；全局仅跨项目工具链事实） | ✅ |
+| 衰减与归档：TTL 过期、长期 pending 低价值、置信度半衰期（180 天，单次最多 ×0.5，≥7 天一次） | ✅ |
+| 归档不删除：条目文件移入 `archive/lessons/`，可回查；导出同时维护两份视图 | ✅ |
+| 矛盾检测：同主题 + 相反指令 + 共享对象 → `conflicts` 表；**消解需显式 `resolveConflicts`** | ✅ |
+| 晋升提案：`times_seen ≥3` 且 conf ≥0.9 → `proposals` 表，**人审后**才写技能 | ✅ |
+| 工具 `memory_consolidate` / `memory_forget`；会话创建时惰性触发巩固（每 7 天或每 5 个任务） | ✅ |
+| 技能改造：`auto-retrospective` / `memory-merge` 改走插件工具，保留文件降级路径 | ✅ |
 | 质量工序：矛盾/衰减/归档/晋升（M3） | ⏳ |
 | git 化同步与 `--rebuild`（M4） | ⏳ |
 | baseline 回归门禁（M5） | ⏳ |
@@ -70,6 +76,8 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 | `memory_stats` | 记忆库健康度：条目数、pending、过期、召回次数、任务指标 |
 | `memory_save` | 写入一条长期经验：默认写项目级；同一门控负责去重/合并/拒收 |
 | `memory_recall` | 一次取回任务召回包（项目 + 命中关键词的全局教训，已排序并按预算裁剪） |
+| `memory_consolidate` | 记忆质量巩固：过期归档 / 衰减 / 矛盾检测与消解 / 晋升提案（默认 dry-run） |
+| `memory_forget` | 退役一条记忆（归档保留文件，不物理删除） |
 | `memory_reindex` | 从文本视图重建派生索引（手工改过 lessons、或 `git pull` 之后） |
 
 ## 开发

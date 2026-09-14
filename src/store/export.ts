@@ -22,40 +22,74 @@ export interface ExportResult {
     errors: string[]
 }
 
-/** Write every record of a root back to `lessons/<id>.md`, pruning stale files. */
+/**
+ * Write every record of a root to its text-view path: active/pending records to
+ * `lessons/<id>.md`, archived records to `archive/lessons/<id>.md`.
+ *
+ * Archiving must never delete a lesson file — that would turn "archive instead
+ * of delete" into a silent loss — so an archived record is *moved* and files
+ * with no surviving record in that state are pruned.
+ */
 export function exportLessons(db: DatabaseSync, scope: MemoryScope): ExportResult {
     const result: ExportResult = { root: scope.root, written: 0, removed: 0, errors: [] }
-    const dir = path.join(scope.root, 'lessons')
-    if (!ensureDir(dir)) {
-        result.errors.push(`cannot create ${dir}`)
+    const activeDir = path.join(scope.root, 'lessons')
+    const archiveDir = path.join(scope.root, 'archive', 'lessons')
+    if (!ensureDir(activeDir)) {
+        result.errors.push(`cannot create ${activeDir}`)
         return result
     }
-    const records = listRecords(db).filter((record) => record.status !== 'archived')
-    const expected = new Set(records.map((record) => `${record.id}.md`))
 
+    const records = listRecords(db)
+    const expectedActive = new Set<string>()
+    const expectedArchived = new Set<string>()
     for (const record of records) {
-        const file = path.join(dir, `${record.id}.md`)
+        const name = `${record.id}.md`
+        const archived = record.status === 'archived'
+        const file = path.join(archived ? archiveDir : activeDir, name)
         try {
             assertInsideScope(scope, file)
+            if (archived && !ensureDir(archiveDir)) {
+                result.errors.push(`cannot create ${archiveDir}`)
+                continue
+            }
             writeAtomic(file, renderRecord(record))
             result.written += 1
+            ;(archived ? expectedArchived : expectedActive).add(name)
+            // a record that changed state must not leave its old copy behind
+            const stale = path.join(archived ? activeDir : archiveDir, name)
+            if (fs.existsSync(stale)) {
+                assertInsideScope(scope, stale)
+                fs.rmSync(stale)
+                result.removed += 1
+            }
         } catch (error) {
             result.errors.push(`${record.id}: ${error instanceof Error ? error.message : String(error)}`)
         }
     }
 
+    result.removed += pruneDir(scope, activeDir, expectedActive, result)
+    result.removed += pruneDir(scope, archiveDir, expectedArchived, result)
+    return result
+}
+
+/** Remove `*.md` files in `dir` that no record claims. */
+function pruneDir(scope: MemoryScope, dir: string, expected: Set<string>, result: ExportResult): number {
+    let removed = 0
+    // A scope that never archived anything has no archive directory: that is a
+    // normal state, not an export error.
+    if (!fs.existsSync(dir)) return 0
     try {
         for (const name of fs.readdirSync(dir)) {
             if (!name.endsWith('.md') || expected.has(name)) continue
             const file = path.join(dir, name)
             assertInsideScope(scope, file)
             fs.rmSync(file)
-            result.removed += 1
+            removed += 1
         }
     } catch (error) {
-        result.errors.push(`prune: ${error instanceof Error ? error.message : String(error)}`)
+        result.errors.push(`prune ${dir}: ${error instanceof Error ? error.message : String(error)}`)
     }
-    return result
+    return removed
 }
 
 /** One lesson document, frontmatter compatible with `memory-lesson.sh`. */

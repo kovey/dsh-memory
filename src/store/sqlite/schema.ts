@@ -7,7 +7,7 @@
  * degrades to a plain-table index when the SQLite build lacks it.
  */
 
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export const CORE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -112,6 +112,17 @@ CREATE TABLE IF NOT EXISTS conflicts (
   reason TEXT,
   at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS proposals (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  record_id TEXT,
+  title TEXT,
+  rationale TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS proposals_status_idx ON proposals(status, at DESC);
 
 CREATE TABLE IF NOT EXISTS consolidate_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

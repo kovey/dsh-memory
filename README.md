@@ -7,9 +7,9 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
 - 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
 - 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
-- 当前进度：**M4**（存储 + 自动召回 + 学习闭环 + 质量工序 + git 化同步）；M5 见设计文档 §11
+- 当前进度：**M5 完成**（M0–M5 全部落地，见设计文档 §11）
 
-## 状态（M4）
+## 状态（M5：全部里程碑完成）
 
 | 能力 | 状态 |
 |---|---|
@@ -37,6 +37,9 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 | 自动提交：`task-end`（默认，30 分钟检查点节流）/ `immediate` / `off`；**提交只含记忆目录**，绝不 push | ✅ |
 | `memory_sync`：commit → fetch → rebase → 冲突按规则合并（lessons 合并 / MEMORY.md 重生成）→ 重建 | ✅ |
 | DB 重建 `memory_reindex(rebuild=true)`：文本视图 → 库（含 episodes + metrics），克隆后指纹一致 | ✅ |
+| 评估门禁：baseline.md 解析（基线任务集）、指标快照冻结、四项指标回归判定 | ✅ |
+| 记忆健康度：召回命中率、召回后成败、pending 积压、蒸馏成本/超时、矛盾与提案 | ✅ |
+| 趋势窗口对比（近 N 天 vs 前 N 天）+ `memory_stats({ setBaseline: true })` | ✅ |
 | 质量工序：矛盾/衰减/归档/晋升（M3） | ⏳ |
 | git 化同步与 `--rebuild`（M4） | ⏳ |
 | baseline 回归门禁（M5） | ⏳ |
@@ -84,6 +87,20 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 | `memory_consolidate` | 记忆质量巩固：过期归档 / 衰减 / 矛盾检测与消解 / 晋升提案（默认 dry-run） |
 | `memory_forget` | 退役一条记忆（归档保留文件，不物理删除） |
 | `memory_reindex` | 从文本视图重建派生索引；`rebuild=true` 时做完整重建（删除磁盘上已不存在的记录、重导 episodes 与指标） |
+
+## 评估与门禁
+
+```
+memory_stats({ windowDays: 30 })                  # 现状 + 健康度 + 门禁判定 + 趋势
+memory_stats({ setBaseline: true, note: "..." })  # 在一段表现良好的时期后冻结基线
+```
+
+门禁对比四项指标（成功率↑、耗时↓、打扰↓、返工↓），带容差（成功率 ±0.05、耗时 ±15%、打扰/返工 ±0.5），
+退化时报告 `REGRESSION` 并列出退化项。`baseline.md` 是**人所有、插件只读**的文档，
+快照存在数据库的 `baseline_snapshots` 表里。
+
+> 说明：基线任务集是**其他仓库的真实任务**，插件无法自动重放，因此它会列出任务清单供人工回归；
+> 它能自动判定的是任务日志实际承载的指标。
 
 ## 开发
 

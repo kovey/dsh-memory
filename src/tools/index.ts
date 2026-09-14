@@ -11,9 +11,6 @@ import type { MemoryConfig } from '../config.js'
 import { log } from '../log.js'
 import { rankRecords, normalizeRelevance } from '../recall/rank.js'
 import { countRecords, extractTerms, getRecord, listRecords, rawSearch } from '../store/sqlite/records.js'
-import { summarizeMetrics } from '../store/metrics.js'
-import { recallStats } from '../recall/usage.js'
-import { episodeDigest } from '../learn/episodic.js'
 import type { StoreRegistry, ScopeStore } from '../store/store.js'
 import type { Layer, MemoryRecord, MemoryScope } from '../store/types.js'
 import { ScopeResolver } from '../scope/resolver.js'
@@ -24,9 +21,9 @@ import { buildQuery } from '../recall/query.js'
 import { saveTool } from './save.js'
 import { consolidateTool, forgetTool } from './consolidate.js'
 import { syncTool } from './sync.js'
+import { statsTool } from './stats.js'
 import { rebuildScope } from '../store/rebuild.js'
 import type { AutoCommitter } from '../sync/autocommit.js'
-import { conflictCount, openProposalsCount } from '../learn/stats.js'
 
 export interface ToolDeps {
     config: MemoryConfig
@@ -211,50 +208,6 @@ function getTool(deps: ToolDeps) {
                     .join('\n')
             }
             return `memory record "${args.id}" not found in ${stores.map((s) => `${s.scope.kind}(${s.scope.root})`).join(', ') || 'any open store'}`
-        },
-    })
-}
-
-function statsTool(deps: ToolDeps) {
-    return defineTool({
-        name: 'memory_stats',
-        description:
-            'Report memory-store health: record counts per root, pending backlog, expiry, recall usage, task metrics and store capabilities.',
-        parameters: {},
-        output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
-        async execute(_args, exec) {
-            const agent = exec.agent as unknown as AgentLike | undefined
-            const stores = targetStores(deps, agent, 'all')
-            const lines: string[] = ['memory store status:']
-            const capabilities = deps.registry.capabilities
-            lines.push(
-                `driver: ${capabilities.available ? `node:sqlite ${capabilities.sqliteVersion ?? ''}` : `unavailable (${capabilities.reason ?? 'unknown'})`} · fts5: ${capabilities.fts5 ? 'yes' : 'no'}`,
-            )
-            if (stores.length === 0) lines.push('no open memory root')
-            for (const store of stores) {
-                const counts = countRecords(store.db)
-                const metrics = summarizeMetrics(store.db)
-                lines.push('')
-                lines.push(
-                    `[${store.scope.kind}] ${store.scope.root}${store.scope.repo !== undefined ? ` (repo ${store.scope.repo})` : ''}`,
-                )
-                lines.push(
-                    `  records: ${counts.total} (active ${counts.active} / pending ${counts.pending} / archived ${counts.archived}) · expired ${counts.expired} · superseded ${counts.superseded}`,
-                )
-                lines.push(`  conflicts: ${conflictCount(store.db)} recorded · open promotion proposals: ${openProposalsCount(store.db)}`)
-                const episodes = episodeDigest(store.db)
-                lines.push(
-                    `  episodes (90d): ${episodes.signals} signal(s) — ${Object.entries(episodes.byKind).map(([kind, n]) => `${kind}=${n}`).join(' ') || 'none'}`,
-                )
-                const usage = recallStats(store.db)
-                lines.push(
-                    `  recalls: ${usage.injections} · attributed ${usage.attributed} (success ${usage.success} / failure ${usage.failure})`,
-                )
-                lines.push(
-                    `  tasks: ${metrics.tasks} (success ${metrics.success} / partial ${metrics.partial} / failed ${metrics.failed}) · lessons logged: ${metrics.lessons}`,
-                )
-            }
-            return lines.join('\n')
         },
     })
 }

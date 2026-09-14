@@ -7,7 +7,7 @@
  * degrades to a plain-table index when the SQLite build lacks it.
  */
 
-export const SCHEMA_VERSION = 3
+export const SCHEMA_VERSION = 4
 
 export const CORE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -123,6 +123,20 @@ CREATE TABLE IF NOT EXISTS proposals (
   at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS proposals_status_idx ON proposals(status, at DESC);
+
+-- Frozen metric snapshots: the regression gate compares against these instead of
+-- rewriting baseline.md, which stays a human-owned, read-only document.
+CREATE TABLE IF NOT EXISTS baseline_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  at TEXT NOT NULL,
+  scope TEXT,
+  tasks INTEGER,
+  success_rate REAL,
+  avg_duration REAL,
+  avg_disturb REAL,
+  avg_rework REAL,
+  note TEXT
+);
 
 CREATE TABLE IF NOT EXISTS consolidate_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

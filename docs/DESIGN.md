@@ -367,7 +367,7 @@ src/
 | **M2 学习闭环** | 信号采集 + L1 落盘 + 有界自动蒸馏 + 门控 + `memory_save` + 技能改造 | 一次真实任务：signals 落项目目录、lessons 自动 +N、重复被合并、指标入账 | ✅ 已完成（技能改造留待 M3） |
 | **M3 质量工序** | 矛盾消解 / 衰减 / 归档 / 晋升提案 + `memory_consolidate` + `memory_forget` | 合并后条目下降、无矛盾残留、索引同步、备份可回滚 | ✅ 已完成 |
 | **M4 git 化同步** | autoCommit(task-end) + `memory_sync` + 冲突合并 + `--rebuild` | 克隆目录重建后检索结果一致 | ✅ 已完成 |
-| **M5 评估门禁** | baseline 7 任务回归 + `memory_stats` 趋势 + 可选语义检索 | 四项指标不退化 | 进行中 |
+| **M5 评估门禁** | baseline 7 任务回归 + `memory_stats` 趋势 + 可选语义检索 | 四项指标不退化 | ✅ 已完成（语义检索见 §15 未实现项） |
 
 ---
 
@@ -416,7 +416,28 @@ src/
 | `Session.header.cwd` | 存在（创建期校验的绝对路径）→ 会话级作用域解析可行 |
 | `ToolRunContext` | 含 `agent?`、`deferContext()`、`concludeTurn()` |
 
-### 14.2 使用的宿主扩展点（已核对类型）
+### 14.2 实现状态（M0–M5）
+
+| 里程碑 | 状态 | 关键验证 |
+|---|---|---|
+| M0 骨架 + 导入 | ✅ | 真实 18 条 lessons 导入零漂移；三端 `--dump-config` 均见 `id: memory` |
+| M1 召回闭环 | ✅ | 真实语料三条查询全部命中正确教训；单轮 209–238 tok（预算 800）；重复查询零注入 |
+| M2 学习闭环 | ✅ | 模拟疼痛会话：项目库自动新增蒸馏记录 + 证据行 + 审计；全局库零污染 |
+| M3 质量工序 | ✅ | 衰减 ×0.5、过期归档（文件移入 archive）、矛盾先记录后消解、晋升提案人审 |
+| M4 git 化同步 | ✅ | 真实 git：提交只含记忆目录；双克隆交换；克隆重建后指纹与检索结果完全一致 |
+| M5 评估门禁 | ✅ | 真实 metrics/baseline：解析 7 个基线任务、冻结快照、四项指标退化全部识别 |
+
+### 14.3 未实现 / 后续可做
+
+- **语义检索（embedding）**：设计里即为"可选"。当前检索是 FTS5(bm25) + CJK bigram + 词法/置信度/新鲜度加权；
+  若日后召回率不足，`recall/rank.ts` 的 `RankOptions.relevance` 就是接入向量相似度的位置。
+- **蒸馏的 `jobs` 运行器**：当前是 `turn-stopping` 内有界 await（默认 3s）；`learn.distillRunner: 'jobs'`
+  可改为后台作业保活（`@deepseek-ai/dsh-jobs`），设计 §4.2 已预留。
+- **实机三端会话验证**：本机沙箱禁止启动 dsh 会话（profile 写入被拒），因此端到端行为由
+  单元/集成测试 + `--dump-config` 挂载验证覆盖；真实会话首次运行时请核对
+  `~/.dsh/memory-plugin.log` 中的 `memory: ready (...)` 行。
+
+### 14.4 使用的宿主扩展点（已核对类型）
 
 `ctx.tools.register(defineTool())`、`ctx.systemPrompt.section()/.context()/.variable()`、
 `agent/pre-step`(waterfall)、`agent/turn-stopping`(serial)、`agent/request-error`、

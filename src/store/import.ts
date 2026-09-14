@@ -11,7 +11,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { log } from '../log.js'
 import { expiresToIso, parseLesson } from './frontmatter.js'
 import type { ParsedLesson } from './frontmatter.js'
-import { materialize, upsertRecord } from './sqlite/records.js'
+import { getRecord, materialize, upsertRecord } from './sqlite/records.js'
 import { transact } from './sqlite/db.js'
 import type { Layer, MemoryRecord, MemoryScope, RecordStatus } from './types.js'
 
@@ -24,6 +24,15 @@ export interface ImportResult {
 }
 
 export interface ImportOptions {
+    /**
+     * Only insert ids the store does not have yet.
+     *
+     * The adoption pass (export) must never overwrite live state: the text view
+     * does not carry everything the store knows (usage counters, distillations,
+     * merges), so an unconditional upsert would silently revert them — an
+     * archived record came back as active because its file has no status line.
+     */
+    onlyMissing?: boolean
     /** Replace the records table content instead of upserting into it. */
     rebuild?: boolean
 }
@@ -66,7 +75,12 @@ export function importLessons(db: DatabaseSync, scope: MemoryScope, options: Imp
                     result.skipped += 1
                     continue
                 }
-                upsertRecord(db, recordFromLesson(parsed, layer, scope, path.basename(name, '.md')))
+                const id = path.basename(name, '.md')
+                if (options.onlyMissing === true && getRecord(db, id) !== undefined) {
+                    result.skipped += 1
+                    continue
+                }
+                upsertRecord(db, recordFromLesson(parsed, layer, scope, id))
                 result.imported += 1
             } catch (error) {
                 result.errors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`)

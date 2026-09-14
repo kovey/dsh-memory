@@ -36,21 +36,81 @@ export interface ConflictSides {
     theirs: string
 }
 
-/** Split one conflicted file into its two sides. */
-export function splitConflict(text: string): ConflictSides | undefined {
-    const oursStart = text.indexOf('<<<<<<<')
-    if (oursStart === -1) return undefined
-    const divider = text.indexOf('\n=======', oursStart)
-    if (divider === -1) return undefined
-    const theirsStart = text.indexOf('\n>>>>>>>', divider)
-    if (theirsStart === -1) return undefined
-    const before = text.slice(0, oursStart)
-    const after = text.indexOf('\n', theirsStart + 1)
-    const tail = after === -1 ? '' : text.slice(after + 1)
-    return {
-        ours: `${before}${text.slice(text.indexOf('\n', oursStart) + 1, divider)}\n${tail}`,
-        theirs: `${before}${text.slice(divider + '\n=======\n'.length, theirsStart)}\n${tail}`,
+/** One `<<<<<<< / ======= / >>>>>>>` block, as line indices. */
+export interface ConflictHunk {
+    /** First line index of the marker block. */
+    start: number
+    /** Index of the closing marker line. */
+    end: number
+    ours: string
+    theirs: string
+}
+
+/**
+ * Parse *every* conflict hunk in a file.
+ *
+ * Git can leave several hunks in one file, and an earlier implementation only
+ * understood the first: it reported a successful merge whose output still
+ * contained markers and had silently dropped text — which then got `git add`ed
+ * into the memory repository. Returns `[]` for malformed markers, which callers
+ * must treat as "a human decides".
+ */
+export function parseConflictHunks(text: string): ConflictHunk[] {
+    const lines = text.split('\n')
+    const hunks: ConflictHunk[] = []
+    let index = 0
+    while (index < lines.length) {
+        if (!(lines[index] ?? '').startsWith('<<<<<<<')) {
+            index += 1
+            continue
+        }
+        const start = index
+        const ours: string[] = []
+        const theirs: string[] = []
+        let section: 'ours' | 'theirs' = 'ours'
+        let closed = false
+        index += 1
+        for (; index < lines.length; index += 1) {
+            const line = lines[index] ?? ''
+            if (line.startsWith('|||||||')) continue
+            if (line.startsWith('=======')) {
+                section = 'theirs'
+                continue
+            }
+            if (line.startsWith('>>>>>>>')) {
+                closed = true
+                break
+            }
+            if (section === 'ours') ours.push(line)
+            else theirs.push(line)
+        }
+        if (!closed) return []
+        hunks.push({ start, end: index, ours: ours.join('\n'), theirs: theirs.join('\n') })
     }
+    return hunks
+}
+
+/** Rebuild a complete file taking one side of every hunk. */
+export function reconstructSide(text: string, side: 'ours' | 'theirs', hunks = parseConflictHunks(text)): string | undefined {
+    if (hunks.length === 0) return undefined
+    const lines = text.split('\n')
+    const out: string[] = []
+    let cursor = 0
+    for (const hunk of hunks) {
+        out.push(...lines.slice(cursor, hunk.start))
+        out.push(...(side === 'ours' ? hunk.ours : hunk.theirs).split('\n'))
+        cursor = hunk.end + 1
+    }
+    out.push(...lines.slice(cursor))
+    return out.join('\n')
+}
+
+/** Split one conflicted file into its two complete sides (first-hunk view kept for tests). */
+export function splitConflict(text: string): ConflictSides | undefined {
+    const ours = reconstructSide(text, 'ours')
+    const theirs = reconstructSide(text, 'theirs')
+    if (ours === undefined || theirs === undefined) return undefined
+    return { ours, theirs }
 }
 
 export interface MergeDeps {
@@ -83,13 +143,24 @@ export function resolveConflict(absolutePath: string, deps: MergeDeps = {}): Con
         }
     }
 
+    const hunks = parseConflictHunks(text)
+    if (hunks.length === 0) return { path: absolutePath, strategy: 'manual', note: 'conflict markers are malformed' }
     const sides = splitConflict(text)
     if (sides === undefined) return { path: absolutePath, strategy: 'manual', note: 'conflict markers are malformed' }
+
     const ours = parseLesson(sides.ours)
     const theirs = parseLesson(sides.theirs)
     if (ours === undefined || theirs === undefined) {
-        // Not a lesson document (e.g. metrics.jsonl): prefer the newer side, but
-        // say so instead of pretending the merge was intelligent.
+        // Not a lesson document (e.g. metrics.jsonl). Taking a side is only safe
+        // when the file had a single hunk; with several, a human decides rather
+        // than have us silently drop text.
+        if (hunks.length > 1) {
+            return {
+                path: absolutePath,
+                strategy: 'manual',
+                note: `not a lesson document and ${hunks.length} conflict hunks — needs a human`,
+            }
+        }
         const oursLonger = sides.ours.length >= sides.theirs.length
         return {
             path: absolutePath,
@@ -101,11 +172,16 @@ export function resolveConflict(absolutePath: string, deps: MergeDeps = {}): Con
 
     const merged = mergeFrontmatter(ours.frontmatter, theirs.frontmatter)
     const body = ours.body.length >= theirs.body.length ? ours.body : theirs.body
+    const content = renderLesson(merged, body)
+    // Belt and braces: never hand back a "merged" file that still has markers.
+    if (hasConflictMarkers(content)) {
+        return { path: absolutePath, strategy: 'manual', note: 'merge output still contained conflict markers' }
+    }
     return {
         path: absolutePath,
         strategy: 'merge-lesson',
-        content: renderLesson(merged, body),
-        note: `merged: times_seen ${merged.timesSeen}, confidence ${merged.confidence}, expires ${merged.expires}`,
+        content,
+        note: `merged ${hunks.length} hunk(s): times_seen ${merged.timesSeen}, confidence ${merged.confidence}, expires ${merged.expires}`,
     }
 }
 

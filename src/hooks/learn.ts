@@ -9,7 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { RequestErrorAction } from '@deepseek-ai/dsh-agent'
 import type { MemoryConfig } from '../config.js'
 import { log } from '../log.js'
-import { attributeOutcome } from '../recall/usage.js'
+import { applyOutcome } from '../recall/usage.js'
 import type { SessionState } from '../recall/session-state.js'
 import { ScopeResolver, sessionIdOf } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
@@ -50,7 +50,13 @@ interface ToolResultLike {
  * naturally idempotent: any attempt writes a `distill` audit row, so a group is
  * retried until its first attempt and never again.
  */
-export async function recoverPendingDistillations(deps: LearnDeps, agent: AgentLike | undefined): Promise<number> {
+export async function recoverPendingDistillations(
+    deps: LearnDeps,
+    agent: AgentLike | undefined,
+    options: { budgetMs?: number } = {},
+): Promise<number> {
+    const startedAt = Date.now()
+    const budgetMs = options.budgetMs ?? deps.config.learn.recoverBudgetMs
     const limit = deps.config.learn.maxRecoverPerSession
     if (limit <= 0 || !deps.config.learn.autoDistill) return 0
     if (!deps.resolver.mayWrite(agent)) return 0
@@ -72,6 +78,10 @@ export async function recoverPendingDistillations(deps: LearnDeps, agent: AgentL
     }
     let recovered = 0
     for (const group of groups) {
+        if (Date.now() - startedAt > budgetMs) {
+            log('debug', `memory: recovery budget (${budgetMs}ms) reached — remaining groups stay pending`)
+            break
+        }
         const signals = loadGroupSignals(store.db, group)
         if (signals.length === 0) continue
         const runner = await runDistillation(
@@ -112,6 +122,7 @@ export function registerLearnHooks(ctx: Context, deps: LearnDeps): (() => void)[
                 const failure = detectResultFailure(contentText(result?.content), {
                     isError: result?.isError === true,
                     exitCodeMode: deps.config.learn.exitCodeSignals,
+                    ...(typeof exec.name === 'string' ? { tool: exec.name } : {}),
                 })
                 deps.ledger.noteToolCall(sessionId, turn, failure !== undefined)
                 if (failure === undefined) return undefined
@@ -198,6 +209,33 @@ export function registerLearnHooks(ctx: Context, deps: LearnDeps): (() => void)[
     return disposers
 }
 
+/**
+ * Attribute an outcome in *every* open store that has unattributed usage rows
+ * for this session and turn.
+ *
+ * Recall writes its usage rows into the store a record came from, so a turn that
+ * injected both project and global memories has rows in two databases. Only
+ * attributing the session's own store left global memory permanently
+ * unattributed — its use-weight could never rise, and DESIGN §7's "a memory that
+ * failed after recall loses confidence" never applied to it.
+ */
+function attributeAcrossRoots(
+    deps: LearnDeps,
+    sessionId: string,
+    outcome: 'success' | 'failure',
+    turn: number,
+): number {
+    let attributed = 0
+    for (const candidate of deps.registry.listOpen()) {
+        try {
+            attributed += applyOutcome(candidate.db, sessionId, outcome, turn)
+        } catch (error) {
+            log('debug', 'memory: outcome attribution failed for a root:', error)
+        }
+    }
+    return attributed
+}
+
 /** One recovery pass per scope per process (see pending.ts). */
 const recoveredScopes = new Set<string>()
 
@@ -211,17 +249,7 @@ async function handleTurnEnd(deps: LearnDeps, payload: { agent?: AgentLike; turn
     const store = deps.registry.open(deps.resolver.resolve({ agent: payload.agent }))
     if (store === undefined) return
 
-    // Recovery rides turn-stopping: the store is open, the agent is alive, and
-    // the await is bounded exactly like an inline distillation. A session-start
-    // timer cannot do this — it races host teardown on one-shot surfaces.
-    if (deps.config.learn.autoDistill && !recoveredScopes.has(store.scope.root)) {
-        recoveredScopes.add(store.scope.root)
-        try {
-            await recoverPendingDistillations(deps, payload.agent)
-        } catch (error) {
-            log('warn', 'memory: pending-distillation recovery failed:', error)
-        }
-    }
+
 
     if (!deps.config.learn.collectSignals) {
         // learning disabled: only keep the session counters tidy
@@ -230,11 +258,23 @@ async function handleTurnEnd(deps: LearnDeps, payload: { agent?: AgentLike; turn
     }
 
     if (collected.signals.length === 0) {
+        // Recovery rides a *quiet* turn: the store is open, the agent is alive,
+        // and it never stacks on top of this turn's own distillation (whose
+        // result the user is waiting for). Once per scope per process, and
+        // wall-clock bounded so a debt of groups cannot stall turn closure.
+        if (deps.config.learn.autoDistill && !recoveredScopes.has(store.scope.root)) {
+            recoveredScopes.add(store.scope.root)
+            try {
+                await recoverPendingDistillations(deps, payload.agent)
+            } catch (error) {
+                log('warn', 'memory: pending-distillation recovery failed:', error)
+            }
+        }
         // A quiet turn that did real work counts as evidence the recalled
         // memory did not mislead: attribute success, raise its weight.
         if (ledger.recalled > 0 && ledger.toolCalls > 0) {
             try {
-                attributeOutcome(store.db, sessionId, 'success', turn)
+                attributeAcrossRoots(deps, sessionId, 'success', turn)
             } catch (error) {
                 log('debug', 'memory: success attribution failed:', error)
             }
@@ -248,9 +288,10 @@ async function handleTurnEnd(deps: LearnDeps, payload: { agent?: AgentLike; turn
         signals: collected.signals,
         verdict: 'failure',
         recalled: [],
+        captureUserText: deps.config.episodic.captureUserText,
     })
     try {
-        attributeOutcome(store.db, sessionId, 'failure', turn)
+        attributeAcrossRoots(deps, sessionId, 'failure', turn)
     } catch (error) {
         log('debug', 'memory: failure attribution failed:', error)
     }

@@ -36,6 +36,9 @@ export function importEpisodes(db: DatabaseSync, scope: MemoryScope): number {
     } catch {
         return 0
     }
+    // Nothing to restore from: wiping the table would lose signals that exist
+    // only in the database (an append that failed, or files past retention).
+    if (files.length === 0) return 0
     let imported = 0
     transact(db, () => {
         // episodes are append-only logs: rebuild them from scratch
@@ -99,6 +102,14 @@ export function rebuildScope(db: DatabaseSync, scope: MemoryScope, fts5: boolean
         }
     } catch {
         // no lessons directory: everything is stale
+    }
+    const archivedDir = path.join(scope.root, 'archive', 'lessons')
+    try {
+        for (const name of fs.readdirSync(archivedDir)) {
+            if (name.endsWith('.md')) onDisk.add(name.slice(0, -3))
+        }
+    } catch {
+        // no archive directory: nothing archived in this root yet
     }
     const stale = listRecords(db).filter((record) => !onDisk.has(record.id))
     if (stale.length > 0) {

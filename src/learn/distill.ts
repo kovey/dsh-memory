@@ -39,6 +39,12 @@ export interface DistillRequest {
     sessionId: string
     turn: number
     signals: readonly Signal[]
+    /**
+     * External cancellation (a job being killed, a session shutting down). The
+     * timeout controller is local, so without this a "cancelled" distillation
+     * kept running: it spent tokens, wrote records and reported `completed`.
+     */
+    signal?: AbortSignal
     recalled: readonly string[]
 }
 
@@ -145,6 +151,16 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
     const prompt = buildPrompt(request)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), deps.config.learn.distillTimeoutMs)
+    const external = request.signal
+    const onExternalAbort = (): void => controller.abort()
+    if (external !== undefined) {
+        if (external.aborted) controller.abort()
+        else external.addEventListener('abort', onExternalAbort, { once: true })
+    }
+    const clearTimer = (): void => {
+        clearTimeout(timer)
+        external?.removeEventListener('abort', onExternalAbort)
+    }
     let text = ''
     let timedOut = false
     let finishNote: string | undefined
@@ -202,7 +218,7 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
         timedOut = controller.signal.aborted
         log('warn', `memory: distillation ${timedOut ? 'timed out' : 'failed'}:`, error)
     } finally {
-        clearTimeout(timer)
+        clearTimer()
     }
 
     const tokensIn = estimateTokens(prompt) + estimateTokens(SYSTEM_PROMPT)

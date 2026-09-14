@@ -53,6 +53,15 @@ export class TurnLedger {
         this.record(sessionId, turn).recalled += count
     }
 
+    /** Tool calls across every turn this process observed for a session. */
+    sessionToolCalls(sessionId: string): number {
+        const turns = this.bySession.get(sessionId)
+        if (turns === undefined) return 0
+        let total = 0
+        for (const entry of turns.values()) total += entry.toolCalls
+        return total
+    }
+
     peek(sessionId: string, turn: number): TurnRecord {
         return this.bySession.get(sessionId)?.get(turn) ?? { toolCalls: 0, toolErrors: 0, corrections: 0, recalled: 0 }
     }

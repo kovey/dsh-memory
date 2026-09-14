@@ -71,7 +71,7 @@ async function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decis
     // Only the first step of a turn carries new user input; later steps are
     // tool continuations that already have the pack in context.
     if ((payload.step ?? 1) > 1) return decision
-    if (payload.signal?.aborted === true) return decision
+    if (isAborted(payload.signal)) return decision
 
     const messages = admitted as readonly MessageLike[]
     if (messages.some((message) => isMemoryMessage(message))) return decision
@@ -85,6 +85,9 @@ async function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decis
         agent: payload.agent,
         terms: query.terms,
         text: query.text,
+        // `recall.layers` was declared but never passed: the configured layer
+        // restriction now actually applies to automatic recall.
+        ...(deps.config.recall.layers.length > 0 ? { layers: deps.config.recall.layers } : {}),
         ...(payload.signal !== undefined ? { signal: payload.signal } : {}),
         exclude: (id) => sessionId !== undefined && deps.state.hasInjected(sessionId, id),
     })
@@ -92,6 +95,9 @@ async function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decis
         log('debug', `memory: recall miss for "${query.text.slice(0, 60)}" (considered ${outcome.considered})`)
         return decision
     }
+    // The semantic half is an awaited network call: the step may have been
+    // cancelled while it ran, and an aborted step must not receive a message.
+    if (isAborted(payload.signal)) return decision
 
     const text = renderRecallPack(outcome.hits, outcome.dropped)
     const message = createUserMessage({
@@ -154,6 +160,11 @@ function noteUserCorrection(
         at: new Date().toISOString(),
     })
     log('info', `memory: user-correction signal recorded (marker "${marker}") turn ${payload.turn}`)
+}
+
+/** Helper rather than an inline check: an awaited call can invalidate TS' narrowing. */
+function isAborted(signal: AbortSignal | undefined): boolean {
+    return signal?.aborted === true
 }
 
 function recordUsage(

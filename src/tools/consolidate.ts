@@ -141,9 +141,10 @@ export function forgetTool(deps: ConsolidateToolDeps) {
 
 /** Which roots a consolidation call should touch. */
 function resolveTargets(deps: ConsolidateToolDeps, agent: AgentLike | undefined, scope: string): MemoryScope[] {
-    const targets: MemoryScope[] = []
-    const primary = deps.resolver.resolve({ agent })
-    targets.push(primary)
+    // `scope: 'global'` means "the global root only": always including the
+    // session's own root made it an alias of 'all', so a global pass also
+    // decayed, archived and rewrote the project store.
+    const targets: MemoryScope[] = scope === 'global' ? [] : [deps.resolver.resolve({ agent })]
     if (scope === 'global' || scope === 'all') {
         const global = deps.resolver.globalScope()
         if (!targets.some((candidate) => candidate.root === global.root)) targets.push(global)

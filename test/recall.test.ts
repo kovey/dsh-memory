@@ -14,11 +14,14 @@ import { clearRepoCache } from '../lib/paths.js'
 import { packTokens, recall, renderRecallPack } from '../lib/recall/engine.js'
 import { normalizeRelevance } from '../lib/recall/rank.js'
 import { buildQuery, messageText, isMemoryMessage } from '../lib/recall/query.js'
+import { assertDraftScope, ScopeViolationError } from '../lib/store/guard.js'
+import { applyDraft } from '../lib/learn/gate.js'
 import { SessionState } from '../lib/recall/session-state.js'
 import { recallStats } from '../lib/recall/usage.js'
 import { ScopeResolver } from '../lib/scope/resolver.js'
 import { countRecords } from '../lib/store/sqlite/records.js'
 import { loadSqliteModule } from '../lib/store/sqlite/db.js'
+import { materialize, upsertRecord } from '../lib/store/sqlite/records.js'
 import { StoreRegistry } from '../lib/store/store.js'
 import { fakeRepo, lessonDoc, memoryFixture, useGlobalMemoryHome } from './helpers.ts'
 
@@ -252,4 +255,81 @@ test('a title match outranks a body-only match', async (t) => {
     const h = await harness(t)
     const outcome = await recall(h.deps, { agent: h.agent, terms: ['pnpm', 'install', 'tty'] })
     assert.equal(outcome.hits[0]?.record.id, 'pnpm-tty')
+})
+
+test('the same record id in two roots keeps its own scope', async (t) => {
+    // Regression guard: scope lookup used to be keyed by record id, so the
+    // second root silently relabelled the first root's hit — and the recall
+    // bookkeeping then landed in the wrong database.
+    const h = await harness(t)
+    const shared = 'shared-lesson'
+    const project = h.registry.open(h.resolver.resolve({ agent: h.agent }))
+    const global = h.registry.open(h.resolver.globalScope())
+    assert.ok(project && global)
+    upsertRecord(
+        project.db,
+        materialize({
+            title: 'shared lesson',
+            body: '触发场景：项目内。正确做法：项目做法 pnpm install 无 TTY CI=true。',
+            layer: 'project',
+            scopeKind: 'project',
+            repo: h.repo,
+            confidence: 0.9,
+        }),
+    )
+    project.db.prepare('UPDATE records SET id = ? WHERE id = ?').run(shared, 'shared-lesson')
+    upsertRecord(global.db, {
+        ...materialize({
+            title: 'shared lesson',
+            body: '触发场景：全局。正确做法：全局做法 pnpm install 无 TTY CI=true。',
+            layer: 'global',
+            scopeKind: 'global',
+            confidence: 0.9,
+        }),
+    })
+    global.db.prepare('UPDATE records SET id = ? WHERE id = ?').run(shared, 'shared-lesson')
+
+    const outcome = await recall(h.deps, { agent: h.agent, terms: ['pnpm', 'install', 'tty'], includeGlobal: true, minScore: 0 })
+    const byScope = new Map(outcome.hits.map((hit) => [hit.scope.kind, hit.record.body]))
+    assert.equal(byScope.size, 2, `expected one hit per root, got ${JSON.stringify([...byScope.keys()])}`)
+    assert.match(byScope.get('project') ?? '', /项目做法/)
+    assert.match(byScope.get('global') ?? '', /全局做法/)
+})
+
+test('a record is refused when it does not belong to the store being written', () => {
+    const repo = fakeRepo('guard-draft')
+    const projectScope = { kind: 'project' as const, repo, root: `${repo}/.dsh/memory`, reason: 'session-cwd' as const }
+    const globalScope = { kind: 'global' as const, root: '/tmp/global-memory', reason: 'no-project-context' as const }
+
+    const projectRecord = materialize({ title: 'p', body: '触发场景：x。正确做法：y。', layer: 'project', scopeKind: 'project', repo })
+    const globalRecord = materialize({ title: 'g', body: '触发场景：x。正确做法：y。', layer: 'global', scopeKind: 'global' })
+    const otherRepo = fakeRepo('guard-draft-2')
+    const foreignRecord = materialize({ title: 'f', body: '触发场景：x。正确做法：y。', layer: 'project', scopeKind: 'project', repo: otherRepo })
+
+    assert.doesNotThrow(() => assertDraftScope(projectRecord, projectScope))
+    assert.doesNotThrow(() => assertDraftScope(globalRecord, globalScope))
+    assert.throws(() => assertDraftScope(projectRecord, globalScope), ScopeViolationError)
+    assert.throws(() => assertDraftScope(globalRecord, projectScope), ScopeViolationError)
+    assert.throws(() => assertDraftScope(foreignRecord, projectScope), ScopeViolationError, 'a foreign project must be refused')
+})
+
+test('applyDraft refuses to write across scopes', async (t) => {
+    const h = await harness(t)
+    const global = h.registry.open(h.resolver.globalScope())
+    assert.ok(global)
+    // A project-scoped record heading for the global store is the exact
+    // invariant DESIGN §2 claims; the write path now enforces it too.
+    // The gate builds records from the scope it was given, so the mismatch has
+    // to be injected: patch materialize's product via a project-scoped draft
+    // written into the global store using the low-level path.
+    const record = materialize({
+        title: 'should never land here',
+        body: '触发场景：跨作用域写入。正确做法：拒绝。',
+        layer: 'project',
+        scopeKind: 'project',
+        repo: h.repo,
+        confidence: 0.9,
+    })
+    assert.throws(() => assertDraftScope(record, global.scope), ScopeViolationError)
+    assert.equal(countRecords(global.db).total, 1, 'only the pre-existing global lesson')
 })

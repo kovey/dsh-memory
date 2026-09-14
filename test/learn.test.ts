@@ -12,11 +12,14 @@ import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveConfig } from '../lib/config.js'
 import { recoverPendingDistillations, registerLearnHooks } from '../lib/hooks/learn.js'
+import { materialize, upsertRecord } from '../lib/store/sqlite/records.js'
+import { recall } from '../lib/recall/engine.js'
 import { candidateConfidence, nextConfidence, statusFor } from '../lib/learn/confidence.js'
 import { buildPrompt, dailyDistillTokens, distillAllowed, distillTurn, parseCandidates, resolveDistillRoute } from '../lib/learn/distill.js'
-import { episodeDigest, pruneEpisodes, recordEpisode, sessionsDir } from '../lib/learn/episodic.js'
+import { episodeDigest, pruneEpisodes, pruneSignals, recordEpisode, sessionsDir } from '../lib/learn/episodic.js'
 import { loadGroupSignals, pendingDistillations } from '../lib/learn/pending.js'
-import { applyDraft, gateDraft, jaccard, looksGeneric, similarity, tokens } from '../lib/learn/gate.js'
+import { buildLedgerRow, recordSessionMetric, sessionStats, withLearningCounters } from '../lib/learn/task-metrics.js'
+import { applyDraft, gateDraft, jaccard, looksGeneric, mergeRecord, similarity, tokens } from '../lib/learn/gate.js'
 import { TurnLedger } from '../lib/learn/ledger.js'
 import { redact } from '../lib/learn/redact.js'
 import { runDistillation } from '../lib/learn/distill-runner.js'
@@ -149,9 +152,23 @@ test('gate rejects vague or empty drafts and creates real ones', async (t) => {
         origin: 'distilled',
     })
     assert.equal(created.action, 'create')
-    assert.equal(created.confidence, 0.85)
+    // DESIGN §7: a model-distilled candidate is a hypothesis, not a fact — it
+    // enters `pending` capped below the human threshold. Repetition promotes it.
+    assert.equal(created.confidence, 0.6)
+    assert.equal(getRecord(h.store.db, created.recordId)?.status, 'pending')
     assert.equal(countRecords(h.store.db).total, 2)
     assert.equal(getRecord(h.store.db, created.recordId)?.evidence.length, 1)
+
+    // a human-authored draft of the same shape is still taken at face value
+    const byHand = applyDraft(h.store.db, h.scope, h.store.fts5, {
+        title: '人工确认的教训',
+        body: '触发场景：无 TTY 下 pnpm install 中止。正确做法：设置 CI=true 后重试安装命令。',
+        confidence: 0.85,
+        evidence: [evidence('user-statement', '用户确认')],
+        origin: 'user',
+    })
+    assert.equal(byHand.confidence, 0.85)
+    assert.equal(getRecord(h.store.db, byHand.recordId)?.status, 'active')
 })
 
 test('gate merges near-duplicates instead of piling up variants', async (t) => {
@@ -726,4 +743,218 @@ test('recovery always runs inline, even when the configured runner is jobs', asy
     assert.equal(recovered, 1, 'recovery must complete, not hand the group to another job')
     assert.deepEqual(started, [], 'no job may be started for recovery')
     assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'], 1)
+})
+
+test('recovery stops at its wall-clock budget', async (t) => {
+    const h = await harness(t)
+    h.store.db
+        .prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+        .run('sess-slow', 3, 1, 'tool-failure', 'bash', 'exit code 2', new Date(Date.now() - 60_000).toISOString())
+    const recovered = await recoverPendingDistillations(
+        { ctx: fakeCtx(LESSON_JSON), config: h.resolved, registry: h.registry, resolver: h.resolver, state: new SessionState(), signals: new SignalBuffer(), ledger: new TurnLedger() },
+        h.agent,
+        { budgetMs: -1 },
+    )
+    assert.equal(recovered, 0, 'an exhausted budget must not start another group')
+    assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM distill').get()?.['n'], 0)
+})
+
+test('episodic retention prunes files and signal rows, never dropping recent debt', async (t) => {
+    const h = await harness(t)
+    const old = new Date(Date.now() - 200 * 86_400_000)
+    const recent = new Date(Date.now() - 60 * 86_400_000)
+    const now = new Date()
+    recordEpisode(h.store.db, h.scope, {
+        sessionId: 'ancient',
+        turn: 1,
+        verdict: 'failure',
+        signals: [{ sessionId: 'ancient', kind: 'tool-failure', turn: 1, detail: 'old', at: old.toISOString() }],
+    }, old)
+    recordEpisode(h.store.db, h.scope, {
+        sessionId: 'recent',
+        turn: 1,
+        verdict: 'failure',
+        signals: [{ sessionId: 'recent', kind: 'tool-failure', turn: 1, detail: 'new', at: recent.toISOString() }],
+    }, recent)
+
+    const files = pruneEpisodes(h.scope, 90, now)
+    const rows = pruneSignals(h.store.db, 90, now)
+    assert.equal(files, 1, 'the 200-day-old episode file is pruned')
+    assert.equal(rows, 1, 'its signal row goes too')
+    const remaining = h.store.db.prepare('SELECT session_id FROM signals').all()
+    assert.deepEqual(remaining.map((row) => row['session_id']), ['recent'])
+
+    // A debt is pruned only when it is past BOTH the retention window and the
+    // 14-day recovery horizon: 17 days old goes, 12 days old stays.
+    const insert = h.store.db.prepare(
+        'INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    )
+    insert.run('debt-gone', 1, 1, 'tool-failure', 'bash', 'unrecovered', new Date(Date.now() - 17 * 86_400_000).toISOString())
+    insert.run('debt-kept', 1, 1, 'tool-failure', 'bash', 'unrecovered', new Date(Date.now() - 12 * 86_400_000).toISOString())
+    pruneSignals(h.store.db, 10, now)
+    assert.equal(h.store.db.prepare("SELECT COUNT(*) AS n FROM signals WHERE session_id = 'debt-gone'").get()?.['n'], 0)
+    assert.equal(
+        h.store.db.prepare("SELECT COUNT(*) AS n FROM signals WHERE session_id = 'debt-kept'").get()?.['n'],
+        1,
+        'an undistilled debt inside the recovery horizon must survive pruning',
+    )
+})
+
+test('the configured capture policy actually governs what episodes keep', async (t) => {
+    const h = await harness(t)
+    const at = new Date(Date.now() - 3_600_000).toISOString()
+    const signal = {
+        sessionId: 'sess-policy',
+        kind: 'user-correction' as const,
+        turn: 1,
+        detail: '用户纠正：我说的是 /Users/zhangyong/secret 那个目录，token=abcdefghijk',
+        at,
+    }
+    recordEpisode(h.store.db, h.scope, { sessionId: 'sess-policy', turn: 1, verdict: 'failure', signals: [signal], captureUserText: 'redacted' }, new Date())
+    const redactedRow = h.store.db.prepare("SELECT detail FROM signals WHERE session_id = 'sess-policy'").get()
+    assert.match(String(redactedRow?.['detail']), /~\/secret/, 'home path is masked')
+    assert.doesNotMatch(String(redactedRow?.['detail']), /abcdefghijk/, 'secret is masked')
+
+    recordEpisode(h.store.db, h.scope, { sessionId: 'sess-none', turn: 1, verdict: 'failure', signals: [{ ...signal, sessionId: 'sess-none' }], captureUserText: 'none' }, new Date())
+    const bare = h.store.db.prepare("SELECT detail, kind FROM signals WHERE session_id = 'sess-none'").get()
+    assert.equal(bare?.['detail'], null, "'none' keeps the signal but drops the text")
+    assert.equal(bare?.['kind'], 'user-correction')
+})
+
+test('a session that did work leaves one ledger row', async (t) => {
+    const h = await harness(t)
+    const started = Date.now() - 12 * 60_000
+    const stats = sessionStats(h.store.db, {
+        sessionId: 'sess-ledger',
+        startedAt: started,
+        turns: 4,
+        toolCalls: 9,
+        signals: 0,
+        rework: 0,
+        corrections: 0,
+    })
+    assert.equal(stats.signals, 0)
+
+    // no pain signals + real work → success
+    const clean = withLearningCounters(h.store.db, buildLedgerRow(stats)!, 'sess-ledger')
+    assert.equal(clean.outcome, 'success')
+    assert.equal(clean.durationMin, 12)
+    assert.match(clean.summary, /4 turn\(s\), 9 tool call\(s\)/)
+    recordSessionMetric(h.store.db, h.scope, clean)
+    assert.equal(h.store.db.prepare('SELECT COUNT(*) AS n FROM tasks').get()?.['n'], 1)
+    assert.ok(fs.readFileSync(path.join(h.scope.root, 'metrics.jsonl'), 'utf8').includes(clean.taskId), 'jsonl view is written too')
+
+    // pain signals in the session flip it to failed, and the audit supplies the learning counters
+    const at = new Date(Date.now() - 60_000).toISOString()
+    h.store.db.prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?,?,?,?,?,?,?)').run('sess-bad', 1, 1, 'tool-failure', 'bash', 'x', at)
+    h.store.db.prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?,?,?,?,?,?,?)').run('sess-bad', 2, 1, 'rework', 'bash', 'x', at)
+    h.store.db.prepare('INSERT INTO signals (session_id, turn, step, kind, tool, detail, at) VALUES (?,?,?,?,?,?,?)').run('sess-bad', 3, 1, 'user-correction', null, 'x', at)
+    h.store.db.prepare('INSERT INTO distill (session_id, turn, model, prompt_hash, tokens_in, tokens_out, created_count, timed_out, at) VALUES (?,?,?,?,?,?,?,?,?)').run('sess-bad', 1, 'p/m', 'h', 100, 50, 2, 0, at)
+    const bad = withLearningCounters(
+        h.store.db,
+        buildLedgerRow(sessionStats(h.store.db, { sessionId: 'sess-bad', turns: 3, toolCalls: 5, signals: 0, rework: 0, corrections: 0 }))!,
+        'sess-bad',
+    )
+    assert.equal(bad.outcome, 'failed')
+    assert.equal(bad.reworkRounds, 1)
+    assert.equal(bad.disturbCount, 1)
+    assert.equal(bad.lessons, 2)
+    assert.equal(bad.tokens, 150)
+
+    // a session that never ran a turn writes nothing
+    assert.equal(buildLedgerRow({ sessionId: 'boot-only', turns: 0, toolCalls: 0, signals: 0, rework: 0, corrections: 0 }), undefined)
+})
+
+// ---- audit fixes ------------------------------------------------------------
+
+test('content heuristics only govern command runners', () => {
+    // A healthy `read` of a document that *mentions* an error string used to be
+    // recorded as a failure: one wasted distillation call and a fabricated
+    // lesson per document read.
+    const doc = 'docs/DESIGN.md: 当出现 No such file or directory 时……'
+    assert.equal(detectResultFailure(doc, { isError: false, tool: 'read' }), undefined)
+    assert.equal(detectResultFailure('errno 2', { isError: false, tool: 'grep' }), undefined)
+    assert.ok(detectResultFailure('boom\n[exit code: 3]', { isError: false, tool: 'bash' }))
+    // a registry-level error counts for every tool
+    assert.ok(detectResultFailure('read failed', { isError: true, tool: 'read' }))
+})
+
+test('merging takes the higher confidence and the newer body', async (t) => {
+    const h = await harness(t)
+    const existing = {
+        ...materialize({ title: 'CI 变量', body: '旧：不要用 CI=true。', layer: 'project', scopeKind: 'project', repo: h.repo, confidence: 0.9 }),
+        timesSeen: 4,
+        failAfterRecall: 4,
+    }
+    const merged = mergeRecord(existing, {
+        title: 'CI 变量',
+        body: '新：应当用 CI=true 绕过无 TTY 限制。',
+        confidence: 0.9,
+        origin: 'user',
+    })
+    assert.ok(merged.confidence >= 0.9, `a merge must never lower confidence (got ${merged.confidence})`)
+    assert.match(merged.body, /应当用 CI=true/, 'the newer correction is kept')
+    assert.equal(merged.timesSeen, 5)
+})
+
+test('two lessons that slugify to the same id stay two lessons', async (t) => {
+    const h = await harness(t)
+    const before = countRecords(h.store.db).total
+    const first = applyDraft(h.store.db, h.scope, h.store.fts5, {
+        title: 'dsh: 记忆插件',
+        body: '触发场景：A。正确做法：A 的做法说明。',
+        confidence: 0.9,
+        origin: 'user',
+    })
+    const second = applyDraft(h.store.db, h.scope, h.store.fts5, {
+        title: 'dsh: 权限模式',
+        body: '触发场景：B。正确做法：B 的做法说明。',
+        confidence: 0.9,
+        origin: 'user',
+    })
+    assert.notEqual(second.recordId, first.recordId, 'the second lesson must not overwrite the first')
+    assert.equal(countRecords(h.store.db).total, before + 2)
+    assert.match(getRecord(h.store.db, first.recordId)?.body ?? '', /A 的做法/)
+    assert.match(getRecord(h.store.db, second.recordId)?.body ?? '', /B 的做法/)
+})
+
+test('the configured distillation timeout is not silently clamped', () => {
+    // The cap used to be 10s while the default was 15s, so anyone copying the
+    // documented default into a profile got 10s.
+    assert.equal(resolveConfig({ learn: { distillTimeoutMs: 15_000 } }).learn.distillTimeoutMs, 15_000)
+    assert.equal(resolveConfig({ learn: { distillTimeoutMs: 60_000 } }).learn.distillTimeoutMs, 60_000)
+    assert.equal(resolveConfig({ learn: { distillTimeoutMs: 999_999 } }).learn.distillTimeoutMs, 60_000)
+})
+
+test('already-injected records do not consume pack slots', async (t) => {
+    const h = await harness(t)
+    upsertRecord(
+        h.store.db,
+        materialize({
+            title: 'second recall candidate',
+            body: '触发场景：pnpm install 无 TTY 中止。正确做法：用 CI=true 重试。',
+            layer: 'project',
+            scopeKind: 'project',
+            repo: h.repo,
+            confidence: 0.9,
+        }),
+    )
+    const injected: string[] = []
+    const request = {
+        agent: h.agent,
+        terms: ['pnpm', 'install', 'tty', 'trigger'],
+        text: 'pnpm install 无 TTY trigger',
+        maxItems: 1,
+        minScore: 0,
+        exclude: (id: string) => injected.includes(id),
+    }
+    const first = await recall({ config: h.resolved, registry: h.registry, resolver: h.resolver }, request)
+    assert.equal(first.hits.length, 1)
+    injected.push(first.hits[0]!.record.id)
+
+    // With the exclusion applied *after* picking, this second call returned an
+    // empty pack even though other matches existed.
+    const second = await recall({ config: h.resolved, registry: h.registry, resolver: h.resolver }, request)
+    assert.equal(second.hits.length, 1, 'the next best record must still be injected')
+    assert.notEqual(second.hits[0]!.record.id, injected[0])
 })

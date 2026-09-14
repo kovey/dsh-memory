@@ -121,7 +121,7 @@ function startJob(deps: RunnerDeps, request: RunnerRequest): {
     const controller = new AbortController()
     const promise = distillTurn(
         { ctx: deps.ctx, config: deps.config, registry: deps.registry, resolver: deps.resolver, state: deps.state },
-        request,
+        { ...request, signal: controller.signal },
     )
         .then((outcome) => {
             log('info', `memory: job distillation finished (${outcome.status}, +${outcome.created}/~${outcome.merged})`)

@@ -47,6 +47,11 @@ export function parseTtl(ttl: string | undefined, now = new Date()): string | un
     return /^\d{4}-\d{2}-\d{2}$/.test(ttl.trim()) ? ttl.trim() : undefined
 }
 
+/** Caps that keep a model from bloating the text view or the memory pack. */
+export const MAX_SAVE_BODY_CHARS = 4_000
+export const MAX_SAVE_TITLE_CHARS = 120
+export const MAX_SAVE_TAGS = 8
+
 export function saveTool(deps: SaveToolDeps) {
     return defineTool({
         name: 'memory_save',
@@ -81,7 +86,16 @@ export function saveTool(deps: SaveToolDeps) {
             if (!deps.resolver.mayWrite(agent)) {
                 return 'refused: subagent sessions do not author memory (routing.subagentWrite is off)'
             }
-            const scope = deps.resolver.resolve({ agent, ...(args.layer === 'global' ? { explicit: 'global' as const } : {}) })
+            const title = args.title.trim().slice(0, MAX_SAVE_TITLE_CHARS)
+            const body = args.body.trim()
+            if (title.length < 4) return 'rejected: title is too short to be a useful lesson id'
+            if (body.length > MAX_SAVE_BODY_CHARS) {
+                return `rejected: body is ${body.length} characters (limit ${MAX_SAVE_BODY_CHARS}). Keep the trigger situation plus the concrete action; put longer detail in the project's docs instead.`
+            }
+            // `routing.defaultScope` is the user's configured default layer; an
+            // explicit `layer` argument still wins.
+            const explicitGlobal = args.layer === 'global' || (args.layer === undefined && deps.config.routing.defaultScope === 'global')
+            const scope = deps.resolver.resolve({ agent, ...(explicitGlobal ? { explicit: 'global' as const } : {}) })
             const store = deps.registry.open(scope)
             if (store === undefined) return 'memory store unavailable (SQLite driver missing or memory root unwritable)'
 
@@ -95,10 +109,10 @@ export function saveTool(deps: SaveToolDeps) {
             ]
             const sessionId = sessionIdOf(agent)
             const draft: CandidateDraft = {
-                title: args.title,
-                body: args.body,
+                title,
+                body,
                 confidence: typeof args.confidence === 'number' ? args.confidence : evidenceKind === 'self-report' ? 0.6 : 0.8,
-                ...(args.tags !== undefined ? { tags: args.tags } : {}),
+                ...(args.tags !== undefined ? { tags: args.tags.slice(0, MAX_SAVE_TAGS) } : {}),
                 ...(parseTtl(args.ttl) !== undefined ? { expiresAt: parseTtl(args.ttl) as string } : {}),
                 evidence,
                 origin: 'user',

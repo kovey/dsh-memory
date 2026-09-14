@@ -14,6 +14,7 @@ import { clearRepoCache } from '../lib/paths.js'
 import { ScopeResolver } from '../lib/scope/resolver.js'
 import { exportAll, exportIndex } from '../lib/store/export.js'
 import { assertRecordScope, ScopeViolationError } from '../lib/store/guard.js'
+import { rebuildScope } from '../lib/store/rebuild.js'
 import { parseLesson } from '../lib/store/frontmatter.js'
 import { countRecords, extractTerms, getRecord, materialize, rawSearch } from '../lib/store/sqlite/records.js'
 import { loadSqliteModule } from '../lib/store/sqlite/db.js'
@@ -140,15 +141,80 @@ test('exports back to the text view preserving legacy frontmatter', async (t) =>
     assert.ok(fs.existsSync(path.join(scope.root, 'MEMORY.md')))
 })
 
-test('export prunes lesson files whose records are gone', async (t) => {
-    const { store, scope } = await openProjectStore(t, 'store-prune', {
+test('export adopts un-imported lesson files and never deletes by default', async (t) => {
+    // Regression guards from an audit: the old export pruned every `.md` the
+    // store did not know, which deleted files written by memory-lesson.sh (the
+    // designed fallback path) and, in a repo whose .gitignore covers `.dsh/`,
+    // did so unrecoverably.
+    const { store, scope } = await openProjectStore(t, 'store-adopt', {
         'kept.md': lessonDoc({ title: 'kept', body: 'body' }),
     })
     assert.ok(store)
-    fs.writeFileSync(path.join(scope.root, 'lessons', 'stale.md'), lessonDoc({ title: 'stale', body: 'body' }))
+    const scripted = path.join(scope.root, 'lessons', 'scripted-lesson.md')
+    fs.writeFileSync(scripted, lessonDoc({ title: 'scripted lesson', body: '触发场景：x。正确做法：y。' }))
+    const notes = path.join(scope.root, 'lessons', 'notes.md')
+    fs.writeFileSync(notes, 'just notes, not a lesson\n')
+
     const result = exportAll(store.db, scope)
-    assert.equal(result.removed, 1)
-    assert.equal(fs.existsSync(path.join(scope.root, 'lessons', 'stale.md')), false)
+    assert.equal(result.removed, 0, 'a default export deletes nothing')
+    assert.equal(fs.existsSync(scripted), true)
+    assert.equal(fs.existsSync(notes), true)
+    assert.ok(getRecord(store.db, 'scripted-lesson'), 'the scripted lesson is adopted into the store')
+
+    // An explicit rebuild may prune lesson files the store still does not own —
+    // and only files that are recognizable lessons: notes are not ours to delete.
+    const orphan = path.join(scope.root, 'lessons', 'orphan-lesson.md')
+    fs.writeFileSync(orphan, lessonDoc({ title: 'orphan lesson', body: '触发场景：x。正确做法：y。' }))
+    const pruned = exportAll(store.db, scope, { prune: true, adopt: false })
+    assert.equal(pruned.removed, 1, 'the unowned lesson file is removed')
+    assert.equal(fs.existsSync(orphan), false)
+    assert.equal(fs.existsSync(notes), true, 'a file that is not a lesson is never deleted')
+    assert.equal(fs.existsSync(scripted), true, 'an adopted lesson is owned now and stays')
+})
+
+test('a failed write never costs the record its existing file', async (t) => {
+    const { store, scope } = await openProjectStore(t, 'store-fail', {
+        'kept.md': lessonDoc({ title: 'kept', body: 'body' }),
+    })
+    assert.ok(store)
+    exportAll(store.db, scope, { prune: true })
+    const good = path.join(scope.root, 'lessons', 'kept.md')
+    const before = fs.readFileSync(good, 'utf8')
+    // make the atomic temp path a directory so the write fails
+    const blocker = path.join(scope.root, 'lessons', `.kept.md.${process.pid}.tmp`)
+    fs.mkdirSync(blocker)
+    try {
+        const result = exportAll(store.db, scope, { prune: true })
+        assert.ok(result.errors.some((error) => error.includes('kept')), 'the failure is reported')
+        assert.equal(fs.existsSync(good), true, 'the previous good file survives a failed rewrite')
+        assert.equal(fs.readFileSync(good, 'utf8'), before)
+    } finally {
+        fs.rmSync(blocker, { recursive: true, force: true })
+    }
+})
+
+test('rebuild keeps archived records and their files', async (t) => {
+    // The archive directory was not scanned, so archived records looked like
+    // records whose file vanished: rebuild dropped them and the next export
+    // deleted the archive file — "archive, never delete" became a delayed delete.
+    const { store, scope } = await openProjectStore(t, 'store-archive-rebuild', {
+        'keeper.md': lessonDoc({ title: 'keeper', body: '触发场景：x。正确做法：y。' }),
+        'archived-one.md': lessonDoc({ title: 'archived one', body: '触发场景：x。正确做法：y。' }),
+    })
+    assert.ok(store)
+    store.db.prepare('UPDATE records SET status = ? WHERE id = ?').run('archived', 'archived-one')
+    exportAll(store.db, scope, { prune: true })
+    assert.equal(fs.existsSync(path.join(scope.root, 'archive', 'lessons', 'archived-one.md')), true)
+
+    const rebuilt = rebuildScope(store.db, scope, true)
+    assert.equal(rebuilt.removed, 0, 'an archived record is not an orphan')
+    assert.ok(getRecord(store.db, 'archived-one'), 'the archived record survives a rebuild')
+    exportAll(store.db, scope, { prune: true })
+    assert.equal(
+        fs.existsSync(path.join(scope.root, 'archive', 'lessons', 'archived-one.md')),
+        true,
+        'and so does its file',
+    )
 })
 
 test('the index export lists active records with metadata', async (t) => {

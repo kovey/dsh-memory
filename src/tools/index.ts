@@ -69,7 +69,10 @@ export function registerTools(ctx: Context, deps: ToolDeps): (() => void)[] {
 function targetStores(deps: ToolDeps, agent: AgentLike | undefined, scope: 'auto' | 'project' | 'global' | 'all'): ScopeStore[] {
     const primary = deps.registry.open(deps.resolver.resolve({ agent }))
     const stores: ScopeStore[] = []
-    if (primary !== undefined) stores.push(primary)
+    // An explicit scope means exactly that scope: `global` used to still include
+    // the session root, and the search tool collapsed `project`/`global` into
+    // 'auto', so the parameter only ever worked for 'all'.
+    if (scope !== 'global' && primary !== undefined) stores.push(primary)
     if (scope === 'global' || scope === 'all') {
         const global = deps.registry.open(deps.resolver.globalScope())
         if (global !== undefined && !stores.some((store) => store.scope.root === global.scope.root)) stores.push(global)
@@ -88,22 +91,34 @@ function recallTool(deps: ToolDeps) {
                 required: true,
                 description: 'Task description, question or keywords to recall memory for.',
             },
-            budgetTokens: { type: 'number', description: 'Token budget for the pack (default from config).' },
-            maxItems: { type: 'number', description: 'Maximum records to include (default from config).' },
+            budgetTokens: { type: 'number', description: 'Token budget for the pack (default from config, capped at 4000).' },
+            maxItems: { type: 'number', description: 'Maximum records to include (default from config, capped at 20).' },
             includeGlobal: { type: 'boolean', description: 'Also search global memory (default: yes for project sessions).' },
+            layer: { type: 'string', enum: [...LAYER_ENUM], description: 'Restrict recall to one memory layer.' },
         },
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
             const agent = exec.agent as unknown as AgentLike | undefined
             const query = buildQuery([{ content: [{ type: 'text', text: args.task }] }])
             if (query.terms.length === 0) return 'task text contained no searchable terms'
+            // A model-supplied budget must not blow up the calling context.
+            const budgetTokens =
+                args.budgetTokens !== undefined
+                    ? Math.max(50, Math.min(4_000, Math.floor(args.budgetTokens)))
+                    : undefined
+            const maxItems = args.maxItems !== undefined ? Math.max(1, Math.min(20, Math.floor(args.maxItems))) : undefined
             const sessionId = exec.agent === undefined ? undefined : (exec.agent as unknown as AgentLike).session?.id
             const outcome = await recall(deps, {
                 agent,
                 terms: query.terms,
                 text: args.task,
-                ...(args.budgetTokens !== undefined ? { budgetTokens: args.budgetTokens } : {}),
-                ...(args.maxItems !== undefined ? { maxItems: args.maxItems } : {}),
+                ...(args.layer !== undefined
+                    ? { layers: [args.layer as Layer] }
+                    : deps.config.recall.layers.length > 0
+                      ? { layers: deps.config.recall.layers }
+                      : {}),
+                ...(budgetTokens !== undefined ? { budgetTokens } : {}),
+                ...(maxItems !== undefined ? { maxItems } : {}),
                 ...(args.includeGlobal !== undefined ? { includeGlobal: args.includeGlobal } : {}),
                 exclude: (id) => typeof sessionId === 'string' && deps.state.hasInjected(sessionId, id),
             })
@@ -187,14 +202,15 @@ function getTool(deps: ToolDeps) {
             id: { type: 'string', required: true, description: 'Record id (slug).' },
             scope: {
                 type: 'string',
-                enum: ['auto', 'all'],
-                description: 'auto = the scope owning this session; all = also look in global memory.',
+                enum: ['auto', 'project', 'global', 'all'],
+                description:
+                    'auto = the scope owning this session plus global; project = this session only; global = global memory only; all = the same as auto.',
             },
         },
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
             const agent = exec.agent as unknown as AgentLike | undefined
-            const stores = targetStores(deps, agent, args.scope === 'all' ? 'all' : 'auto')
+            const stores = targetStores(deps, agent, args.scope ?? 'auto')
             for (const store of stores) {
                 const record = getRecord(store.db, args.id)
                 if (record === undefined) continue

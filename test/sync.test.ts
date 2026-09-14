@@ -20,7 +20,15 @@ import { fingerprint, importEpisodes, rebuildScope } from '../lib/store/rebuild.
 import { StoreRegistry } from '../lib/store/store.js'
 import { AutoCommitter } from '../lib/sync/autocommit.js'
 import { commitMemory, ensureGitignore, ensureRepo, hasRemote, isRepo, repoRootOf, sync } from '../lib/sync/git.js'
-import { hasConflictMarkers, laterExpiry, mergeFrontmatter, resolveConflict, splitConflict } from '../lib/sync/merge.js'
+import {
+    hasConflictMarkers,
+    laterExpiry,
+    mergeFrontmatter,
+    parseConflictHunks,
+    reconstructSide,
+    resolveConflict,
+    splitConflict,
+} from '../lib/sync/merge.js'
 import { lessonDoc, tempDir } from './helpers.ts'
 import { parseLesson, renderLesson } from '../lib/store/frontmatter.js'
 
@@ -363,4 +371,69 @@ test('a symlinked memory root still commits (macOS /tmp vs /private/tmp)', async
     assert.equal(result.committed, true)
     const committed = git(repo, 'show', '--name-only', '--pretty=format:')
     assert.match(committed, /lessons\/symlinked-lesson\.md/)
+})
+
+test('multiple conflict hunks are merged without leaving markers behind', () => {
+    // Regression guard: the first implementation merged only the first hunk and
+    // returned content that still contained markers (with text silently
+    // dropped) — which the sync path would then `git add`.
+    const dir = tempDir('m4-merge-multi')
+    const file = path.join(dir, 'multi-hunk.md')
+    fs.writeFileSync(
+        file,
+        `---
+title: multi hunk
+confidence: 0.8
+expires: permanent
+times_seen: 1
+updated: 2026-09-01
+---
+
+<<<<<<< HEAD
+第一段：本项目做法 pnpm 安装。
+=======
+第一段：另一台机器的做法 pnpm 安装，带更多上下文说明。
+>>>>>>> other
+
+中间不变的行。
+
+<<<<<<< HEAD
+第二段：本项目做法。
+=======
+第二段：另一台机器的做法，也更长一些。
+>>>>>>> other
+`,
+    )
+    const hunks = parseConflictHunks(fs.readFileSync(file, 'utf8'))
+    assert.equal(hunks.length, 2)
+
+    const resolution = resolveConflict(file)
+    assert.equal(resolution.strategy, 'merge-lesson')
+    const content = resolution.content ?? ''
+    assert.equal(hasConflictMarkers(content), false, 'no markers may survive a merge')
+    assert.match(content, /第一段：另一台机器的做法/, 'longer side wins per hunk')
+    assert.match(content, /第二段：另一台机器的做法/, 'the second hunk is resolved too')
+    assert.match(content, /中间不变的行/, 'untouched text between hunks survives')
+    assert.equal(parseLesson(content)?.frontmatter.timesSeen, 2)
+    assert.equal(reconstructSide(fs.readFileSync(file, 'utf8'), 'ours')?.includes('第二段：本项目做法'), true)
+})
+
+test('several hunks in a non-lesson file are left for a human', () => {
+    const dir = tempDir('m4-merge-manual')
+    const file = path.join(dir, 'metrics.jsonl')
+    fs.writeFileSync(
+        file,
+        `<<<<<<< HEAD
+{"task_id":"a"}
+=======
+{"task_id":"b"}
+>>>>>>> other
+<<<<<<< HEAD
+{"task_id":"c"}
+=======
+{"task_id":"d"}
+>>>>>>> other
+`,
+    )
+    assert.equal(resolveConflict(file).strategy, 'manual')
 })

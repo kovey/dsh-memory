@@ -57,6 +57,31 @@ export function assertRecordScope(record: MemoryRecord, scope: MemoryScope, glob
     }
 }
 
+/**
+ * Assert a record about to be written belongs to the store it is written into.
+ *
+ * `assertRecordScope` needs the canonical global root and is therefore only
+ * usable where the dsh home is known; this is the self-contained form that every
+ * write path can afford: kind must match, and a project record must name the
+ * same repository the scope resolved.
+ */
+export function assertDraftScope(record: MemoryRecord, scope: MemoryScope): void {
+    if (record.scopeKind !== scope.kind) {
+        throw new ScopeViolationError(`refusing to write a ${record.scopeKind} record into the ${scope.kind} store (${record.id})`)
+    }
+    if (scope.kind === 'project') {
+        if (record.repo === undefined || scope.repo === undefined || path.resolve(record.repo) !== path.resolve(scope.repo)) {
+            throw new ScopeViolationError(
+                `refusing to write ${record.id} into ${scope.repo ?? '?'} — the record belongs to ${record.repo ?? 'no repository'}`,
+            )
+        }
+        return
+    }
+    if (record.repo !== undefined) {
+        throw new ScopeViolationError(`refusing to write project-scoped ${record.id} (${record.repo}) into the global store`)
+    }
+}
+
 /** Path of one lesson inside a scope root. */
 export function lessonPath(scopeRoot: string, id: string): string {
     return path.join(scopeRoot, 'lessons', `${id}.md`)

@@ -11,6 +11,8 @@ import type { DatabaseSync } from 'node:sqlite'
 import { log } from '../log.js'
 import { ensureDir } from '../paths.js'
 import { assertInsideScope } from './guard.js'
+import { importLessons } from './import.js'
+import { parseLesson } from './frontmatter.js'
 import { isoToExpires, renderLesson } from './frontmatter.js'
 import { countRecords, listRecords } from './sqlite/records.js'
 import type { MemoryRecord, MemoryScope } from './types.js'
@@ -22,6 +24,21 @@ export interface ExportResult {
     errors: string[]
 }
 
+export interface ExportOptions {
+    /**
+     * Delete `.md` files this store does not own.
+     *
+     * Off by default: a file written by `memory-lesson.sh`, by hand, or by a
+     * colleague's machine is not ours to delete, and in a project whose
+     * `.gitignore` covers `.dsh/` such a deletion is unrecoverable. Adopting
+     * unknown lesson files (below) is the designed behaviour; pruning is only
+     * for an explicit rebuild.
+     */
+    prune?: boolean
+    /** Adopt lesson files that no record claims yet (the script fallback path). */
+    adopt?: boolean
+}
+
 /**
  * Write every record of a root to its text-view path: active/pending records to
  * `lessons/<id>.md`, archived records to `archive/lessons/<id>.md`.
@@ -30,7 +47,7 @@ export interface ExportResult {
  * of delete" into a silent loss — so an archived record is *moved* and files
  * with no surviving record in that state are pruned.
  */
-export function exportLessons(db: DatabaseSync, scope: MemoryScope): ExportResult {
+export function exportLessons(db: DatabaseSync, scope: MemoryScope, options: ExportOptions = {}): ExportResult {
     const result: ExportResult = { root: scope.root, written: 0, removed: 0, errors: [] }
     const activeDir = path.join(scope.root, 'lessons')
     const archiveDir = path.join(scope.root, 'archive', 'lessons')
@@ -42,6 +59,7 @@ export function exportLessons(db: DatabaseSync, scope: MemoryScope): ExportResul
     const records = listRecords(db)
     const expectedActive = new Set<string>()
     const expectedArchived = new Set<string>()
+    const failed = new Set<string>()
     for (const record of records) {
         const name = `${record.id}.md`
         const archived = record.status === 'archived'
@@ -64,16 +82,24 @@ export function exportLessons(db: DatabaseSync, scope: MemoryScope): ExportResul
             }
         } catch (error) {
             result.errors.push(`${record.id}: ${error instanceof Error ? error.message : String(error)}`)
+            failed.add(record.id)
         }
     }
 
-    result.removed += pruneDir(scope, activeDir, expectedActive, result)
-    result.removed += pruneDir(scope, archiveDir, expectedArchived, result)
+    if (options.prune === true) {
+        result.removed += pruneDir(scope, activeDir, expectedActive, result, failed)
+        result.removed += pruneDir(scope, archiveDir, expectedArchived, result, failed)
+    }
     return result
 }
 
-/** Remove `*.md` files in `dir` that no record claims. */
-function pruneDir(scope: MemoryScope, dir: string, expected: Set<string>, result: ExportResult): number {
+/**
+ * Remove `*.md` files in `dir` that no record claims.
+ *
+ * `failed` holds records whose write failed this pass: their existing file is
+ * the only good copy, so it must never be treated as an orphan.
+ */
+function pruneDir(scope: MemoryScope, dir: string, expected: Set<string>, result: ExportResult, failed: Set<string>): number {
     let removed = 0
     // A scope that never archived anything has no archive directory: that is a
     // normal state, not an export error.
@@ -81,8 +107,19 @@ function pruneDir(scope: MemoryScope, dir: string, expected: Set<string>, result
     try {
         for (const name of fs.readdirSync(dir)) {
             if (!name.endsWith('.md') || expected.has(name)) continue
+            if (failed.has(name.slice(0, -'.md'.length))) continue
             const file = path.join(dir, name)
             assertInsideScope(scope, file)
+            // Only delete something we recognize as one of ours: a file that is
+            // not a lesson document (notes, an empty placeholder left by the old
+            // script workflow) is not ours to remove.
+            let owned = false
+            try {
+                owned = parseLesson(fs.readFileSync(file, 'utf8')) !== undefined
+            } catch {
+                owned = false
+            }
+            if (!owned) continue
             fs.rmSync(file)
             removed += 1
         }
@@ -153,8 +190,19 @@ export function writeAtomic(file: string, content: string): void {
 }
 
 /** Full text-view export for one root. */
-export function exportAll(db: DatabaseSync, scope: MemoryScope): ExportResult {
-    const result = exportLessons(db, scope)
+export function exportAll(db: DatabaseSync, scope: MemoryScope, options: ExportOptions = {}): ExportResult {
+    // Adopt before writing: a lesson produced by the fallback script — or by
+    // hand on another machine — must enter the store rather than look like an
+    // orphan. DESIGN §5.3 promises this "slow import"; without it the file was
+    // pruned before it could ever be adopted.
+    if (options.adopt !== false) {
+        try {
+            importLessons(db, scope, { onlyMissing: true })
+        } catch (error) {
+            log('debug', 'memory: lesson adoption during export failed:', error)
+        }
+    }
+    const result = exportLessons(db, scope, options)
     try {
         exportIndex(db, scope)
     } catch (error) {

@@ -19,8 +19,9 @@ import { rebuildScope } from '../store/rebuild.js'
 import type { StoreRegistry } from '../store/store.js'
 import type { MemoryScope } from '../store/types.js'
 import { AutoCommitter } from '../sync/autocommit.js'
-import { abortRebase, continueRebase, ensureRepo, hasRemote, sync } from '../sync/git.js'
-import { resolveConflict } from '../sync/merge.js'
+import { abortRebase, continueRebase, ensureRepo, hasRemote, repoRootOf, sync } from '../sync/git.js'
+import { assertInsideScope } from '../store/guard.js'
+import { hasConflictMarkers, resolveConflict } from '../sync/merge.js'
 import type { ConflictResolution } from '../sync/merge.js'
 
 export interface SyncToolDeps {
@@ -100,19 +101,30 @@ function syncOne(deps: SyncToolDeps, scope: MemoryScope, options: SyncOptions): 
                 return lines
             }
             const store = deps.registry.open(scope)
-            const resolutions: ConflictResolution[] = outcome.conflicts.map((file) =>
-                resolveConflict(file, {
+            // `git diff --name-only` reports repo-relative paths: resolving them
+            // against the process cwd either failed ("ENOENT → needs a human", so
+            // automatic merges never happened) or, worse, wrote the merged lesson
+            // to an unrelated file with the same relative path.
+            const repoRoot = repoRootOf(scope.root) ?? scope.root
+            const resolutions: ConflictResolution[] = outcome.conflicts.map((file) => {
+                const absolute = path.resolve(repoRoot, file)
+                assertInsideScope(scope, absolute)
+                return resolveConflict(absolute, {
                     regenerateIndex: () => {
                         if (store === undefined) return ''
                         exportIndex(store.db, store.scope)
-                        return fs.readFileSync(file, 'utf8')
+                        return fs.readFileSync(absolute, 'utf8')
                     },
-                }),
-            )
+                })
+            })
             const manual = resolutions.filter((item) => item.strategy === 'manual')
             const resolved: string[] = []
             for (const item of resolutions) {
                 if (item.strategy === 'manual' || item.content === undefined) continue
+                if (hasConflictMarkers(item.content)) {
+                    manual.push({ ...item, strategy: 'manual', note: 'refusing to write unresolved conflict markers' })
+                    continue
+                }
                 try {
                     fs.writeFileSync(item.path, item.content)
                     resolved.push(item.path)
@@ -161,7 +173,10 @@ function rebuildLine(deps: SyncToolDeps, scope: MemoryScope): string[] {
 }
 
 function resolveTargets(deps: SyncToolDeps, agent: AgentLike | undefined, scope: string): MemoryScope[] {
-    const targets: MemoryScope[] = [deps.resolver.resolve({ agent })]
+    // `scope: 'global'` must not drag the session's own root along: with push
+    // enabled that committed and pushed the *project* memory repository.
+    const globalOnly = scope === 'global'
+    const targets: MemoryScope[] = globalOnly ? [] : [deps.resolver.resolve({ agent })]
     if (scope === 'global' || scope === 'all') {
         const global = deps.resolver.globalScope()
         if (!targets.some((candidate) => candidate.root === global.root)) targets.push(global)

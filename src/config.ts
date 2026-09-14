@@ -68,6 +68,8 @@ export interface MemoryConfig {
          * cancelled with its agent) and survives crashes mid-distillation.
          */
         maxRecoverPerSession: number
+        /** Wall-clock budget for one recovery pass (never stalls turn closure). */
+        recoverBudgetMs: number
     }
     episodic: {
         enabled: boolean
@@ -156,6 +158,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         distillRunner: 'inline',
         exitCodeSignals: 'strong',
         maxRecoverPerSession: 2,
+        recoverBudgetMs: 20_000,
     },
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
     consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true },
@@ -264,7 +267,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             },
             maxDistillPerSession: num(learn['maxDistillPerSession'], d.learn.maxDistillPerSession, 0, 100),
             maxDistillTokensPerDay: num(learn['maxDistillTokensPerDay'], d.learn.maxDistillTokensPerDay, 0, 100_000_000),
-            distillTimeoutMs: num(learn['distillTimeoutMs'], d.learn.distillTimeoutMs, 500, 10_000),
+            distillTimeoutMs: num(learn['distillTimeoutMs'], d.learn.distillTimeoutMs, 500, 60_000),
             distillMaxTokens: num(learn['distillMaxTokens'], d.learn.distillMaxTokens, 64, 32_000),
             distillReasoningEffort: str(learn['distillReasoningEffort'], d.learn.distillReasoningEffort),
             minSignals: num(learn['minSignals'], d.learn.minSignals, 0, 50),
@@ -275,6 +278,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
                 d.learn.exitCodeSignals,
             ),
             maxRecoverPerSession: num(learn['maxRecoverPerSession'], d.learn.maxRecoverPerSession, 0, 20),
+            recoverBudgetMs: num(learn['recoverBudgetMs'], d.learn.recoverBudgetMs, 1_000, 120_000),
         },
         episodic: {
             enabled: bool(episodic['enabled'], d.episodic.enabled),

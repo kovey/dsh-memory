@@ -139,6 +139,11 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
     }
 
     merged.sort((a, b) => b.item.score - a.item.score)
+    // Scope lookup keyed by the scored-item *identity*, not by record id: the
+    // same slug can exist in two roots (a project and the global store), and an
+    // id-keyed map silently relabels one of them — which then writes its recall
+    // bookkeeping into the wrong database.
+    const scopeByItem = new Map(merged.map(({ item, scope }) => [item, scope]))
     // `minScore` is calibrated for lexical relevance (normalized bm25). A
     // semantic-only hit has already cleared `minSimilarity`, and scaling it by
     // `weight` would otherwise drop it below that lexical floor every time —
@@ -148,12 +153,13 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
     const ranked = merged
         .map(({ item }) => item)
         .filter((item) => item.score >= minScore || semanticOnlyIds.has(item.record.id))
-    const scopeOf = new Map(ranked.map((item, index) => [item.record.id, merged[index]?.scope]))
     const budgetTokens = Math.max(0, (request.budgetTokens ?? deps.config.recall.budgetTokens) - estimateTokens(HEADER))
-    const fitted = fitBudget(ranked, (item) => renderHit({ record: item.record, scope: scopeOf.get(item.record.id) ?? stores[0]!.scope, score: item.score }), {
+    const scopeOf = (item: ScoredRecord): MemoryScope => scopeByItem.get(item) ?? stores[0]!.scope
+    const fitted = fitBudget(ranked, (item) => renderHit({ record: item.record, scope: scopeOf(item), score: item.score }), {
         budgetTokens,
         maxItems: request.maxItems ?? deps.config.recall.maxItems,
         minScore: 0,
+        ...(request.exclude !== undefined ? { skip: request.exclude } : {}),
     })
 
     let dropped = fitted.dropped
@@ -163,8 +169,7 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
             dropped += 1
             continue
         }
-        const scope = scopeOf.get(item.record.id) ?? stores[0]!.scope
-        hits.push({ record: item.record, scope, score: item.score })
+        hits.push({ record: item.record, scope: scopeOf(item), score: item.score })
     }
     return {
         hits,

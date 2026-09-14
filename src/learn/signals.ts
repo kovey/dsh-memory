@@ -83,6 +83,24 @@ const ERROR_MARKERS = [
     'timedout',
 ]
 
+/**
+ * Tools whose results are command output, so their content may be read for
+ * failures. `isError` is honoured for every tool; this list only governs the
+ * content heuristics.
+ */
+export const DEFAULT_COMMAND_TOOLS: readonly string[] = [
+    'bash',
+    'sh',
+    'shell',
+    'zsh',
+    'pwsh',
+    'powershell',
+    'cmd',
+    'exec',
+    'run_command',
+    'run_terminal_cmd',
+]
+
 /** `[exit code: 3]` as rendered by the bash tool. */
 const EXIT_CODE = /\[exit code:\s*(\d+)\]/i
 
@@ -96,6 +114,17 @@ export interface FailureDetectionOptions {
     isError: boolean
     /** `learn.exitCodeSignals`. */
     exitCodeMode?: 'strong' | 'all' | 'off'
+    /**
+     * Tool that produced the result.
+     *
+     * Content heuristics only make sense for command runners: a healthy
+     * `read docs/DESIGN.md` whose text mentions "No such file or directory"
+     * is not a failure, and treating it as one spends an LLM call and can
+     * distil a lesson out of nothing. Registry-level `isError` always counts.
+     */
+    tool?: string
+    /** Tools whose *content* may be read as command output. */
+    commandTools?: readonly string[]
 }
 
 /**
@@ -111,6 +140,8 @@ export function detectResultFailure(content: string, options: FailureDetectionOp
     if (options.isError) {
         return { kind: looksLikeTestFailure(text) ? 'test-failure' : 'tool-failure', detail: summarize(text, 200) }
     }
+    const commandTools = options.commandTools ?? DEFAULT_COMMAND_TOOLS
+    if (options.tool !== undefined && !commandTools.includes(options.tool.toLowerCase())) return undefined
     const exit = EXIT_CODE.exec(text)
     const exitCode = exit !== null ? Number(exit[1]) : undefined
     const mode = options.exitCodeMode ?? 'strong'

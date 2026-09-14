@@ -160,6 +160,13 @@ export function estimateTokens(text: string): number {
 }
 
 export interface FitOptions {
+    /**
+     * Skip an item *before* it consumes a slot. Applying the exclusion after the
+     * pick meant records already injected this session filled every slot, so a
+     * follow-up turn on the same topic received an empty pack even though fresh
+     * matches existed.
+     */
+    skip?: (recordId: string) => boolean
     budgetTokens: number
     maxItems: number
     minScore: number
@@ -176,7 +183,10 @@ export function fitBudget(ranked: readonly ScoredRecord[], render: (item: Scored
     const selected: ScoredRecord[] = []
     let tokensUsed = 0
     let dropped = 0
-    for (const item of ranked) {
+    // Skip before the slot is spent: a record already injected this session must
+    // not occupy one of the `maxItems` places and shut out a fresh match.
+    const candidates = options.skip === undefined ? ranked : ranked.filter((item) => !options.skip!(item.record.id))
+    for (const item of candidates) {
         if (selected.length >= options.maxItems) {
             dropped += 1
             continue

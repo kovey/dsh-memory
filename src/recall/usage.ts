@@ -4,6 +4,8 @@
  */
 import type { DatabaseSync } from 'node:sqlite'
 import { transact } from '../store/sqlite/db.js'
+import { getRecord, upsertRecord } from '../store/sqlite/records.js'
+import { nextConfidence } from '../learn/confidence.js'
 
 export interface UsageRow {
     recordId: string
@@ -34,6 +36,47 @@ export function recordRecalls(db: DatabaseSync, rows: readonly UsageRow[], at = 
  * M2 calls this when a turn carries pain signals; success raises the usage
  * weight, failure lowers it (the negative feedback of DESIGN §7).
  */
+/**
+ * Attribute an outcome and apply DESIGN §7's feedback to the records involved.
+ *
+ * A memory that keeps being recalled into failing turns must lose confidence —
+ * that is the only mechanism that separates "useful memory" from "plausible
+ * noise". The penalty is applied here, once per observed failure, because
+ * `mergeRecord` no longer re-derives confidence.
+ */
+export function applyOutcome(
+    db: DatabaseSync,
+    sessionId: string,
+    outcome: 'success' | 'failure',
+    turn?: number,
+): number {
+    const attributed = attributeOutcome(db, sessionId, outcome, turn)
+    // Success only needs the counter (already bumped) to affect later maths.
+    if (attributed === 0 || outcome === 'success') return attributed
+    const rows = turn === undefined
+        ? db.prepare('SELECT DISTINCT record_id FROM usage WHERE session_id = ?').all(sessionId)
+        : db.prepare('SELECT DISTINCT record_id FROM usage WHERE session_id = ? AND turn = ?').all(sessionId, turn)
+    transact(db, () => {
+        for (const row of rows) {
+            const id = row['record_id']
+            if (typeof id !== 'string') continue
+            const record = getRecord(db, id)
+            if (record === undefined) continue
+            // The failure counter was just bumped; re-derive confidence once so a
+            // memory that keeps feeding failing turns actually loses confidence.
+            const confidence = nextConfidence({
+                base: record.confidence,
+                timesSeen: record.timesSeen,
+                successAfterRecall: record.successAfterRecall,
+                failAfterRecall: record.failAfterRecall,
+                updatedAt: record.updatedAt,
+            })
+            if (confidence !== record.confidence) upsertRecord(db, { ...record, confidence })
+        }
+    })
+    return attributed
+}
+
 export function attributeOutcome(
     db: DatabaseSync,
     sessionId: string,

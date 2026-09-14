@@ -15,6 +15,7 @@ import { transact } from '../store/sqlite/db.js'
 import type { MemoryScope } from '../store/types.js'
 import type { Signal } from './signals.js'
 import { redact } from './redact.js'
+import type { RedactPolicy } from './redact.js'
 
 export interface EpisodeInput {
     sessionId: string
@@ -23,6 +24,11 @@ export interface EpisodeInput {
     verdict: 'failure' | 'success' | 'neutral'
     /** Recalled record ids for this turn, for later attribution. */
     recalled?: readonly string[]
+    /**
+     * How much of the user's own words to keep (`episodic.captureUserText`).
+     * `none` stores the signal kind and tool but drops the detail entirely.
+     */
+    captureUserText?: RedactPolicy
 }
 
 /** Directory holding episode logs for one scope. */
@@ -48,17 +54,19 @@ export function recordEpisode(db: DatabaseSync, scope: MemoryScope, input: Episo
         return 0
     }
 
-    const lines = input.signals.map((signal) =>
-        JSON.stringify({
+    const policy: RedactPolicy = input.captureUserText ?? 'redacted'
+    const lines = input.signals.map((signal) => {
+        const detail = signal.detail !== undefined ? redact(signal.detail, policy) : ''
+        return JSON.stringify({
             at: signal.at,
             session: input.sessionId,
             turn: signal.turn,
             ...(signal.step !== undefined ? { step: signal.step } : {}),
             kind: signal.kind,
             ...(signal.tool !== undefined ? { tool: signal.tool } : {}),
-            ...(signal.detail !== undefined ? { detail: redact(signal.detail, 'redacted') } : {}),
-        }),
-    )
+            ...(detail !== '' ? { detail } : {}),
+        })
+    })
     try {
         fs.appendFileSync(file, `${lines.join('\n')}\n`)
     } catch (error) {
@@ -77,7 +85,7 @@ export function recordEpisode(db: DatabaseSync, scope: MemoryScope, input: Episo
                     signal.step ?? null,
                     signal.kind,
                     signal.tool ?? null,
-                    signal.detail !== undefined ? redact(signal.detail, 'redacted') : null,
+                    signal.detail !== undefined ? redact(signal.detail, policy) || null : null,
                     signal.at,
                 )
             }
@@ -113,6 +121,30 @@ export function episodeDigest(db: DatabaseSync, sinceDays = 90): EpisodeDigest {
     }
     return { sessions, signals, byKind }
 }
+
+/**
+ * Delete `signals` rows older than the retention window.
+ *
+ * The pending-distillation window is 14 days, so anything past the retention
+ * period can no longer be recovered and only costs space. Rows are deleted only
+ * when they have already been distilled *or* are far past recovery age — a debt
+ * is never silently dropped.
+ */
+export function pruneSignals(db: DatabaseSync, retentionDays: number, now = new Date()): number {
+    const cutoff = new Date(now.getTime() - retentionDays * 86_400_000).toISOString()
+    const result = db
+        .prepare(
+            `DELETE FROM signals
+             WHERE at < ?
+               AND (EXISTS (SELECT 1 FROM distill d WHERE d.session_id = signals.session_id AND d.turn = signals.turn)
+                    OR at < ?)`,
+        )
+        .run(cutoff, new Date(now.getTime() - PENDING_RETENTION_DAYS * 86_400_000).toISOString())
+    return typeof result.changes === 'number' ? result.changes : 0
+}
+
+/** Signals older than this are never recovered, so they may be pruned. */
+export const PENDING_RETENTION_DAYS = 14
 
 /** Delete episode files older than the retention window (D5: 90 days). */
 export function pruneEpisodes(scope: MemoryScope, retentionDays: number, now = new Date()): number {

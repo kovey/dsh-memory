@@ -11,6 +11,7 @@ import { cjkBigrams } from '../store/sqlite/cjk.js'
 import { extractTerms, getRecord, materialize, rawSearch, upsertRecord } from '../store/sqlite/records.js'
 import type { Evidence, MemoryRecord, MemoryScope } from '../store/types.js'
 import { nextConfidence, statusFor } from './confidence.js'
+import { assertDraftScope } from '../store/guard.js'
 
 export interface CandidateDraft {
     title: string
@@ -126,18 +127,28 @@ function slugOf(title: string): string {
 /** Merge a draft into an existing record, keeping the curated content intact. */
 export function mergeRecord(existing: MemoryRecord, draft: CandidateDraft, now = new Date()): MemoryRecord {
     const timesSeen = existing.timesSeen + 1
-    const base = Math.max(existing.confidence, draft.confidence)
     const updatedAt = now.toISOString()
-    const confidence = nextConfidence({
-        base,
+    // Repetition still raises confidence (DESIGN §7: times_seen is evidence), but
+    // the after-recall penalty is neutralised here — it is applied exactly once,
+    // by the attribution path that observes the failure (`applyOutcome`).
+    // Re-deriving it on every merge charged the same historical failures over and
+    // over and could push a good lesson below its own starting point.
+    const floor = Math.max(existing.confidence, draft.confidence)
+    const grown = nextConfidence({
+        base: floor,
         timesSeen,
-        successAfterRecall: existing.successAfterRecall,
-        failAfterRecall: existing.failAfterRecall,
+        successAfterRecall: 0,
+        failAfterRecall: 0,
         updatedAt,
         now,
     })
+    const confidence = Math.max(floor, grown)
     const mergedEvidence = dedupeEvidence([...existing.evidence, ...(draft.evidence ?? [])])
-    const body = draft.body.trim().length > existing.body.trim().length * 1.3 ? draft.body.trim() : existing.body
+    // DESIGN §8: the body takes the *newer* observation. The old rule only
+    // accepted a candidate more than 30% longer, so a corrected instruction of
+    // similar length was silently dropped while its metadata was refreshed.
+    const candidateBody = draft.body.trim()
+    const body = candidateBody !== '' ? candidateBody : existing.body
     const tags = [...new Set([...existing.tags, ...(draft.tags ?? [])])]
     return {
         ...existing,
@@ -190,6 +201,7 @@ export function applyDraft(
     const layer = scope.kind === 'project' ? 'project' : 'global'
     if (decision.action === 'merge' && decision.target !== undefined) {
         const merged = mergeRecord(decision.target, draft, now)
+        assertDraftScope(merged, scope)
         upsertRecord(db, merged)
         return {
             action: 'merge',
@@ -199,6 +211,10 @@ export function applyDraft(
             record: merged,
         }
     }
+    // DESIGN §7: a model-distilled candidate enters `pending` below the human
+    // threshold, so unreviewed model output is never injected as if someone had
+    // confirmed it. Repetition still promotes it through the normal rules.
+    const distilledCandidate = draft.origin === 'distilled'
     const record = materialize(
         {
             title: draft.title.trim(),
@@ -206,16 +222,28 @@ export function applyDraft(
             layer,
             scopeKind: scope.kind,
             ...(scope.repo !== undefined ? { repo: scope.repo } : {}),
-            confidence: decision.confidence,
+            confidence: distilledCandidate ? Math.min(decision.confidence, 0.6) : decision.confidence,
             ...(draft.expiresAt !== undefined ? { expiresAt: draft.expiresAt } : {}),
             ...(draft.tags !== undefined ? { tags: draft.tags } : {}),
             ...(draft.evidence !== undefined ? { evidence: draft.evidence } : {}),
             origin: draft.origin,
             ...(draft.source !== undefined ? { source: draft.source } : {}),
-            ...(draft.status !== undefined ? { status: draft.status } : {}),
+            ...(draft.status !== undefined && !distilledCandidate ? { status: draft.status } : {}),
+            ...(distilledCandidate ? { status: 'pending' as const } : {}),
         },
         now.toISOString(),
     )
-    upsertRecord(db, record)
-    return { action: 'create', recordId: record.id, reason: decision.reason, confidence: record.confidence, record }
+    // Two different lessons can collapse to the same slug (titles differ only in
+    // characters that are stripped) — `dsh: 记忆插件` and `dsh: 权限模式` both
+    // become `dsh`. Writing the second one over the first replaced it wholesale:
+    // body, evidence, counters and status all belonged to another lesson.
+    let unique = record
+    if (getRecord(db, record.id) !== undefined) {
+        let suffix = 2
+        while (getRecord(db, `${record.id}-${suffix}`) !== undefined) suffix += 1
+        unique = { ...record, id: `${record.id}-${suffix}` }
+    }
+    assertDraftScope(unique, scope)
+    upsertRecord(db, unique)
+    return { action: 'create', recordId: unique.id, reason: decision.reason, confidence: unique.confidence, record: unique }
 }

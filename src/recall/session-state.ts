@@ -17,6 +17,7 @@ export class SessionState {
     private readonly injected = new Map<string, Set<string>>()
     private readonly distill = new Map<string, DistillBudget>()
     private readonly turns = new Map<string, number>()
+    private readonly startedAt = new Map<string, number>()
     private readonly order: string[] = []
 
     constructor(private readonly maxSessions = 256) {}
@@ -49,6 +50,17 @@ export class SessionState {
 
     injectedCount(sessionId: string): number {
         return this.injected.get(sessionId)?.size ?? 0
+    }
+
+    /** Remember when a session was first seen (duration for the metric ledger). */
+    markSessionStart(sessionId: string, at: number = Date.now()): void {
+        if (this.startedAt.has(sessionId)) return
+        this.startedAt.set(sessionId, at)
+        this.touch(sessionId)
+    }
+
+    sessionStart(sessionId: string): number | undefined {
+        return this.startedAt.get(sessionId)
     }
 
     /** Record the highest turn number observed, for metric bookkeeping. */
@@ -85,6 +97,7 @@ export class SessionState {
         this.injected.delete(sessionId)
         this.distill.delete(sessionId)
         this.turns.delete(sessionId)
+        this.startedAt.delete(sessionId)
         const index = this.order.indexOf(sessionId)
         if (index !== -1) this.order.splice(index, 1)
     }

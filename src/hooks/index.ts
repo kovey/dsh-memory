@@ -45,6 +45,7 @@ export function createHookDeps(
     registry: StoreRegistry,
     resolver: ScopeResolver,
     capabilities: { save: boolean },
+    semantic?: { provider?: import('../recall/semantic.js').EmbeddingProvider | undefined; cache?: import('../recall/semantic.js').QueryVectorCache } | undefined,
 ): HookDeps {
     return {
         config,
@@ -55,6 +56,7 @@ export function createHookDeps(
         signals: new SignalBuffer(),
         ledger: new TurnLedger(),
         committer: new AutoCommitter(config),
+        ...(semantic !== undefined ? { semantic } : {}),
     }
 }
 

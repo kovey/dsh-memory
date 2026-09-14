@@ -21,6 +21,8 @@ import { episodeDigest } from '../learn/episodic.js'
 import { openProposalsCount } from '../learn/stats.js'
 import { conflictCount } from '../learn/conflicts.js'
 import { recallStats } from '../recall/usage.js'
+import { indexStats } from '../recall/semantic.js'
+import type { EmbeddingProvider } from '../recall/semantic.js'
 import { ScopeResolver } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
 import { summarizeMetrics } from '../store/metrics.js'
@@ -32,6 +34,7 @@ export interface StatsToolDeps {
     config: MemoryConfig
     registry: StoreRegistry
     resolver: ScopeResolver
+    semantic?: { provider?: EmbeddingProvider | undefined } | undefined
 }
 
 const TEXT_OUTPUT = { type: 'string' } as const
@@ -95,6 +98,18 @@ export function statsTool(deps: StatsToolDeps) {
                 const trend = {
                     current: windowSummary(store.db, windowDays, 0),
                     previous: windowSummary(store.db, windowDays, windowDays),
+                }
+                const semanticCfg = deps.config.semantic
+                if (!semanticCfg.enabled) {
+                    lines.push('  semantic: off (lexical FTS5 + CJK bigram ranking only)')
+                } else if (deps.semantic?.provider === undefined) {
+                    lines.push(`  semantic: enabled but no provider (baseUrl/model configured? provider=${semanticCfg.provider})`)
+                } else {
+                    const stats = indexStats(store.db, semanticCfg.model)
+                    const error = deps.semantic.provider.lastError()
+                    lines.push(
+                        `  semantic: ${deps.semantic.provider.id} — indexed ${stats.indexed}, pending ${stats.pending}, weight ${semanticCfg.weight}${error !== undefined ? ` (last error: ${error})` : ''}`,
+                    )
                 }
                 const baselineDoc = readBaseline(store.scope)
                 lines.push(...renderEvaluation(gate, healthDigest(store.db, windowDays), trend, baselineDoc?.tasks ?? []))

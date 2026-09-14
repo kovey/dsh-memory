@@ -22,6 +22,7 @@ import { resolveConfig } from './config.js'
 import { createHookDeps, registerHooks } from './hooks/index.js'
 import { log, setLogFile } from './log.js'
 import { expandHome } from './paths.js'
+import { createEmbeddingProvider, QueryVectorCache } from './recall/semantic.js'
 import { ScopeResolver } from './scope/resolver.js'
 import { loadSqliteModule } from './store/sqlite/db.js'
 import { StoreRegistry } from './store/store.js'
@@ -42,7 +43,8 @@ export function apply(ctx: Context, config: unknown = {}): void {
 
         const registry = new StoreRegistry(resolved)
         const resolver = new ScopeResolver(resolved)
-        const deps = createHookDeps(resolved, registry, resolver, CAPABILITIES)
+        const semantic = { provider: createEmbeddingProvider(resolved), cache: new QueryVectorCache() }
+        const deps = createHookDeps(resolved, registry, resolver, CAPABILITIES, semantic)
 
         const toolDisposers = registerTools(ctx, {
             config: resolved,
@@ -50,6 +52,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
             resolver,
             state: deps.state,
             committer: deps.committer,
+            semantic,
         })
         const hooks = registerHooks(ctx, deps)
 
@@ -77,7 +80,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
             }
             log(
                 'info',
-                `memory: ready (node:sqlite ${report.probe.sqliteVersion ?? '?'}, fts5=${report.probe.fts5 ? 'yes' : 'no'}, recall=${resolved.recall.autoInject ? `on/${resolved.recall.budgetTokens}tok` : 'off'}, protocol=${resolved.prompt.protocol.enabled ? 'on' : 'off'}, learn=${resolved.learn.autoDistill ? `on/${resolved.learn.distillModel.model}` : 'off'})`,
+                `memory: ready (node:sqlite ${report.probe.sqliteVersion ?? '?'}, fts5=${report.probe.fts5 ? 'yes' : 'no'}, recall=${resolved.recall.autoInject ? `on/${resolved.recall.budgetTokens}tok` : 'off'}, protocol=${resolved.prompt.protocol.enabled ? 'on' : 'off'}, learn=${resolved.learn.autoDistill ? `on/${resolved.learn.distillModel.model}` : 'off'}, semantic=${resolved.semantic.enabled ? `on/${resolved.semantic.model}` : 'off'})`,
             )
         })
     } catch (error) {

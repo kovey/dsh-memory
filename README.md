@@ -7,7 +7,7 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
 - 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
 - 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
-- 当前进度：**M5 完成**（M0–M5 全部落地，见设计文档 §11）
+- 当前进度：**M0–M5 全部完成 + 语义检索 + 蒸馏后台运行器**（见设计文档 §11、§14）
 
 ## 状态（M5：全部里程碑完成）
 
@@ -40,6 +40,9 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 | 评估门禁：baseline.md 解析（基线任务集）、指标快照冻结、四项指标回归判定 | ✅ |
 | 记忆健康度：召回命中率、召回后成败、pending 积压、蒸馏成本/超时、矛盾与提案 | ✅ |
 | 趋势窗口对比（近 N 天 vs 前 N 天）+ `memory_stats({ setBaseline: true })` | ✅ |
+| 可选语义召回：OpenAI 兼容 /embeddings + 按内容哈希增量缓存 + 与词法打分混合（**默认关**） | ✅ |
+| 蒸馏运行器可选 `jobs`：交给 `ctx.jobs`，轮次立即结束，作业可见/可取消 | ✅ |
+| 实机验证：真实 dsh 宿主中加载、引导导入 18 条、turn 1 自动召回 4 条（533 tok） | ✅ |
 | 质量工序：矛盾/衰减/归档/晋升（M3） | ⏳ |
 | git 化同步与 `--rebuild`（M4） | ⏳ |
 | baseline 回归门禁（M5） | ⏳ |
@@ -87,6 +90,29 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 | `memory_consolidate` | 记忆质量巩固：过期归档 / 衰减 / 矛盾检测与消解 / 晋升提案（默认 dry-run） |
 | `memory_forget` | 退役一条记忆（归档保留文件，不物理删除） |
 | `memory_reindex` | 从文本视图重建派生索引；`rebuild=true` 时做完整重建（删除磁盘上已不存在的记录、重导 episodes 与指标） |
+
+## 语义召回（可选，默认关）
+
+词法检索（FTS5 + CJK bigram）零成本、离线可用，是默认路径。当它召回不足时，可以叠加
+embedding 语义召回：
+
+```yaml
+- config:
+    - id: memory
+      config:
+        semantic:
+          enabled: true
+          baseUrl: 'https://api.example.com/v1'   # OpenAI 兼容 /embeddings
+          model: 'text-embedding-3-small'
+          apiKeyEnv: 'EMBEDDING_API_KEY'
+          weight: 0.5            # 0=纯词法，1=纯语义
+          minLexicalHits: 3      # 词法已召回 ≥N 条时不再调 embedding（不花冤枉钱）
+          minSimilarity: 0.35
+```
+
+行为保证：仅当词法召回不足时才调用；单次调用有超时（默认 1.5s），失败**静默降级为词法**；
+向量按内容哈希缓存，未变动的教训永不重复嵌入；作用域内无记录时直接跳过。
+用 `memory_reindex({ embeddings: true })` 做一次全量回填，`memory_stats` 会显示索引与最近错误。
 
 ## 评估与门禁
 

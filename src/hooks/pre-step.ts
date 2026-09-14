@@ -26,6 +26,7 @@ import type { MessageLike } from '../recall/query.js'
 import type { SessionState } from '../recall/session-state.js'
 import type { StoreRegistry } from '../store/store.js'
 import type { TurnLedger } from '../learn/ledger.js'
+import type { EmbeddingProvider, QueryVectorCache } from '../recall/semantic.js'
 import { detectCorrection } from '../learn/signals.js'
 import type { SignalBuffer } from '../learn/signals.js'
 
@@ -37,6 +38,8 @@ export interface RecallHookDeps {
     /** Present when signal collection is wired (M2). */
     signals?: SignalBuffer
     ledger?: TurnLedger
+    /** Optional semantic recall runtime (absent = lexical only). */
+    semantic?: { provider?: EmbeddingProvider | undefined; cache?: QueryVectorCache } | undefined
 }
 
 interface PreStepPayload {
@@ -52,7 +55,7 @@ export function createPreStepHook(deps: RecallHookDeps) {
     return async (payload: PreStepPayload, next: () => Promise<PreStepDecision>): Promise<PreStepDecision> => {
         const decision = await next()
         try {
-            return injectRecall(deps, payload, decision)
+            return await injectRecall(deps, payload, decision)
         } catch (error) {
             log('error', 'memory: pre-step recall failed:', error)
             return decision
@@ -60,7 +63,7 @@ export function createPreStepHook(deps: RecallHookDeps) {
     }
 }
 
-function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decision: PreStepDecision): PreStepDecision {
+async function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decision: PreStepDecision): Promise<PreStepDecision> {
     if (decision.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
     const admitted: readonly UserMessage[] = decision.messages
     const config = deps.config
@@ -78,9 +81,11 @@ function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decision: P
 
     const sessionId = sessionIdOf(payload.agent)
     noteUserCorrection(deps, payload, sessionId, query.text)
-    const outcome = recall(deps, {
+    const outcome = await recall(deps, {
         agent: payload.agent,
         terms: query.terms,
+        text: query.text,
+        ...(payload.signal !== undefined ? { signal: payload.signal } : {}),
         exclude: (id) => sessionId !== undefined && deps.state.hasInjected(sessionId, id),
     })
     if (outcome.hits.length === 0) {

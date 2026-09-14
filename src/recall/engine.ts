@@ -13,16 +13,24 @@ import type { StoreRegistry, ScopeStore } from '../store/store.js'
 import type { Layer, MemoryRecord, MemoryScope } from '../store/types.js'
 import type { AgentLike } from '../scope/resolver.js'
 import { ScopeResolver } from '../scope/resolver.js'
+import { blendRelevance, semanticRecall } from './semantic.js'
+import type { EmbeddingProvider, QueryVectorCache } from './semantic.js'
 
 export interface RecallDeps {
     config: MemoryConfig
     registry: StoreRegistry
     resolver: ScopeResolver
+    /** Optional semantic recall (DESIGN §14.3). Absent = lexical only. */
+    semantic?: { provider?: EmbeddingProvider | undefined; cache?: QueryVectorCache } | undefined
 }
 
 export interface RecallRequest {
     agent?: AgentLike | undefined
     terms: readonly string[]
+    /** Original query text, used for the embedding request. */
+    text?: string | undefined
+    /** Cancellation for the bounded embedding call. */
+    signal?: AbortSignal | undefined
     /** Records already surfaced in this session (idempotence, DESIGN §6). */
     exclude?: (recordId: string) => boolean
     budgetTokens?: number
@@ -47,12 +55,14 @@ export interface RecallOutcome {
     /** Records that matched the query before filtering. */
     considered: number
     scopes: MemoryScope[]
+    /** Semantic pass bookkeeping (absent when semantic recall is off). */
+    semantic?: { used: boolean; embedded: number; semanticOnly: number; reason?: string }
 }
 
 const HEADER = '相关记忆（dsh-memory 自动召回；confidence < 0.7 仅为提示，需自行验证）：'
 
-/** Retrieve and rank memory for one query. */
-export function recall(deps: RecallDeps, request: RecallRequest): RecallOutcome {
+/** Retrieve and rank memory for one query (lexical, optionally blended). */
+export async function recall(deps: RecallDeps, request: RecallRequest): Promise<RecallOutcome> {
     const empty: RecallOutcome = { hits: [], dropped: 0, tokensUsed: 0, considered: 0, scopes: [] }
     if (request.terms.length === 0) return empty
 
@@ -61,14 +71,45 @@ export function recall(deps: RecallDeps, request: RecallRequest): RecallOutcome 
 
     const merged: { item: ScoredRecord; scope: MemoryScope }[] = []
     let considered = 0
+    let semanticUsed = false
+    let semanticEmbedded = 0
+    let semanticOnly = 0
+    let semanticReason: string | undefined
+
     for (const store of stores) {
         const hits = rawSearch(store.db, request.terms, store.fts5, {
             ...(request.layers !== undefined ? { layers: request.layers } : {}),
             status: ['active', 'pending'],
         })
-        const relevance = normalizeRelevance(new Map(hits.map((hit) => [hit.id, hit.raw])))
-        const records = hits
-            .map((hit) => getRecord(store.db, hit.id))
+        let relevance = normalizeRelevance(new Map(hits.map((hit) => [hit.id, hit.raw])))
+
+        // Semantic half: only when enabled, and only when lexical recall is thin.
+        if (deps.semantic !== undefined) {
+            const outcome = await semanticRecall(
+                { config: deps.config, registry: deps.registry, provider: deps.semantic.provider, cache: deps.semantic.cache },
+                store,
+                request.text ?? request.terms.join(' '),
+                hits.length,
+                { ...(request.signal !== undefined ? { signal: request.signal } : {}) },
+            )
+            semanticEmbedded += outcome.embedded
+            if (outcome.used && outcome.scores.size > 0) {
+                const blended = blendRelevance(
+                    relevance,
+                    outcome.scores,
+                    deps.config.semantic.weight,
+                    deps.config.semantic.minSimilarity,
+                )
+                relevance = blended.relevance
+                semanticUsed = true
+                semanticOnly += blended.semanticOnly.length
+            } else if (outcome.reason !== undefined) {
+                semanticReason = outcome.reason
+            }
+        }
+
+        const records = [...relevance.keys()]
+            .map((id) => getRecord(store.db, id))
             .filter((record): record is MemoryRecord => record !== undefined)
         considered += records.length
         for (const item of rankRecords(records, { relevance, queryTerms: request.terms })) {
@@ -96,7 +137,23 @@ export function recall(deps: RecallDeps, request: RecallRequest): RecallOutcome 
         const scope = scopeOf.get(item.record.id) ?? stores[0]!.scope
         hits.push({ record: item.record, scope, score: item.score })
     }
-    return { hits, dropped, tokensUsed: fitted.tokensUsed + estimateTokens(HEADER), considered, scopes: stores.map((s) => s.scope) }
+    return {
+        hits,
+        dropped,
+        tokensUsed: fitted.tokensUsed + estimateTokens(HEADER),
+        considered,
+        scopes: stores.map((s) => s.scope),
+        ...(deps.semantic !== undefined
+            ? {
+                  semantic: {
+                      used: semanticUsed,
+                      embedded: semanticEmbedded,
+                      semanticOnly,
+                      ...(semanticReason !== undefined ? { reason: semanticReason } : {}),
+                  },
+              }
+            : {}),
+    }
 }
 
 /** Which roots a recall pass consults: project first, then global (DESIGN §3). */

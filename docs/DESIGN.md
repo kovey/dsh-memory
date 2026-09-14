@@ -427,15 +427,50 @@ src/
 | M4 git 化同步 | ✅ | 真实 git：提交只含记忆目录；双克隆交换；克隆重建后指纹与检索结果完全一致 |
 | M5 评估门禁 | ✅ | 真实 metrics/baseline：解析 7 个基线任务、冻结快照、四项指标退化全部识别 |
 
-### 14.3 未实现 / 后续可做
+### 14.3 语义召回（已实现，默认关）
 
-- **语义检索（embedding）**：设计里即为"可选"。当前检索是 FTS5(bm25) + CJK bigram + 词法/置信度/新鲜度加权；
-  若日后召回率不足，`recall/rank.ts` 的 `RankOptions.relevance` 就是接入向量相似度的位置。
-- **蒸馏的 `jobs` 运行器**：当前是 `turn-stopping` 内有界 await（默认 3s）；`learn.distillRunner: 'jobs'`
-  可改为后台作业保活（`@deepseek-ai/dsh-jobs`），设计 §4.2 已预留。
-- **实机三端会话验证**：本机沙箱禁止启动 dsh 会话（profile 写入被拒），因此端到端行为由
-  单元/集成测试 + `--dump-config` 挂载验证覆盖；真实会话首次运行时请核对
-  `~/.dsh/memory-plugin.log` 中的 `memory: ready (...)` 行。
+- 接入点就是设计预留的 `RankOptions.relevance`：`recall/semantic.ts` 把 bm25 归一化后的
+  `lexical` 与余弦相似度 `semantic` 按 `weight` 混合，其余权重（置信度/新鲜度/层权/复现）不变。
+- 成本控制：`enabled` 默认 false；仅当词法命中的**记录数** < `minLexicalHits` 才嵌入查询；
+  调用有 `timeoutMs`；失败静默降级词法；向量按内容哈希增量缓存；空作用域直接跳过。
+- 验证：假 embedding 服务 + 真实 HTTP 服务端到端；增量缓存（未改动不重复调用）；降级路径；
+  "无语义时找不到、有语义时命中"的对照。
+- 顺带修正：`normalizeRelevance` 原为 min-max 归一，会把两个真实命中里较弱的一个压成 0 分、
+  被分数门槛丢掉；改为按最强命中缩放并设下限（0.15）。
+
+### 14.4 蒸馏运行器（已实现）
+
+`learn.distillRunner: inline | jobs`：
+
+- `inline`（默认）：`agent/turn-stopping` 内有界 await（`distillTimeoutMs`，默认 3s）。
+- `jobs`：交给 `ctx.jobs`（dsh-base 装配的 `dsh-jobs-local`），**轮次立即结束**，作业在作业列表中可见、
+  随 owner agent 销毁自动取消；未装配 jobs 或提交失败时自动回落到 inline。
+- 两者都不跨进程存活——所以信号在蒸馏**之前**已写入 L1，技能仍可事后蒸馏。
+
+### 14.5 未实现 / 后续可做
+
+- **实机三端全链路验证未完成**：真实宿主已加载插件并完成引导导入与首轮自动召回（见 §14.6），
+  但"一次完整的三端会话（含模型工具调用）"未验证：本机非交互 shell 没有 `DEEPSEEK_API_KEY`
+  （宿主在 LLM 预检处报 `MISSING_CREDENTIAL`）。
+- **向量检索未做 ANN 索引**：当前是内存内全量余弦（数百到数千条量级足够）；若记忆库达到
+  数万条，应换成 sqlite-vec / HNSW。
+
+### 14.6 实机验证记录（2026-09-14，真实 dsh 宿主）
+
+在临时 profile（`dsh-base` + `dsh-headless` + `dsh-memory`）中启动一次真实会话，
+`~/.dsh/memory-plugin.log`：
+
+```
+dsh-memory applying (default scope: project)
+memory: ready (node:sqlite 3.53.1, fts5=yes, recall=on/600tok, protocol=on, learn=on/deepseek-v4-flash, semantic=off)
+imported 18/18 lessons from ~/.dsh/memory/lessons
+memory: bootstrapped 18 records for ~/.dsh/memory
+memory: imported 5 task metrics for ~/.dsh/memory
+memory: injected 4 record(s) (~533 tok) turn 1 step 1 → dsh-session--append, npmdsh--scoped-tarball-url-epermmacos-timeoutrc, pnpm-install--tty--json, stdioinherit--bash-timeout
+```
+
+即：真实宿主中插件装配成功、能力探测通过、真实语料引导导入成功、**首轮自动召回在真实会话里生效**
+（4 条 / 533 tok，预算 800）。会话随后因环境缺少 LLM 凭据而未进入模型调用。
 
 ### 14.4 使用的宿主扩展点（已核对类型）
 

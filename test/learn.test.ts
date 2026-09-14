@@ -18,6 +18,7 @@ import { episodeDigest, pruneEpisodes, recordEpisode, sessionsDir } from '../lib
 import { applyDraft, gateDraft, jaccard, looksGeneric, similarity, tokens } from '../lib/learn/gate.js'
 import { TurnLedger } from '../lib/learn/ledger.js'
 import { redact } from '../lib/learn/redact.js'
+import { runDistillation } from '../lib/learn/distill-runner.js'
 import { SignalBuffer, detectCorrection, looksLikeTestFailure, summarize } from '../lib/learn/signals.js'
 import type { Signal } from '../lib/learn/signals.js'
 import { clearRepoCache } from '../lib/paths.js'
@@ -444,4 +445,56 @@ test('a quiet productive turn attributes success to recalled memory', async (t) 
     const record = getRecord(h.store.db, 'existing-lesson')
     assert.equal(record?.successAfterRecall, 1)
     assert.equal(signals.count('sess-learn'), 0)
+})
+
+// ---- distillation runners ---------------------------------------------------
+
+test('the jobs runner hands work to ctx.jobs and the inline runner stays bounded', async (t) => {
+    const h = await harness(t)
+    const signals: Signal[] = [
+        { sessionId: 'sess-learn', kind: 'tool-failure', turn: 1, tool: 'bash', detail: 'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY', at: new Date().toISOString() },
+    ]
+    const started: { kind: string; label: string; owner?: unknown }[] = []
+    const jobsStub = {
+        start(spec: { kind: string; label: string; owner?: unknown; run: () => { done: Promise<unknown> } }) {
+            started.push({ kind: spec.kind, label: spec.label, ...(spec.owner !== undefined ? { owner: spec.owner } : {}) })
+            const hooks = spec.run()
+            void hooks.done
+            return 'memory-distill-1'
+        },
+    }
+    const ctxWithJobs = { llm: { stream: (fakeCtx(LESSON_JSON) as unknown as { llm: { stream: unknown } }).llm.stream }, reflect: { get: (name: string) => (name === 'jobs' ? jobsStub : undefined) } } as unknown as Context
+
+    const jobResult = await runDistillation(
+        { ctx: ctxWithJobs, config: resolveConfig({ learn: { distillRunner: 'jobs' } }), registry: h.registry, resolver: h.resolver, state: new SessionState() },
+        { agent: h.agent, sessionId: 'sess-learn', turn: 1, signals, recalled: [], ownerAgent: h.agent },
+    )
+    assert.equal(jobResult.mode, 'jobs')
+    assert.equal(jobResult.jobId, 'memory-distill-1')
+    assert.equal(started[0]?.kind, 'memory-distill')
+    assert.match(started[0]?.label ?? '', /turn 1/)
+    assert.equal(started[0]?.owner, h.agent, 'the job is fenced to its owning agent')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.ok(getRecord(h.store.db, 'pnpm-tty'), 'the job actually distilled')
+
+    // no jobs service → the inline path runs instead of silently dropping work
+    const inline = await runDistillation(
+        { ctx: fakeCtx(LESSON_JSON), config: resolveConfig({ learn: { distillRunner: 'jobs' } }), registry: h.registry, resolver: h.resolver, state: new SessionState() },
+        { agent: h.agent, sessionId: 'sess-learn', turn: 2, signals, recalled: [] },
+    )
+    assert.equal(inline.mode, 'inline')
+    assert.ok((inline.outcome?.created ?? 0) + (inline.outcome?.merged ?? 0) >= 0)
+
+    // a throwing registry must not lose the turn's learning
+    const brokenJobs = {
+        start() {
+            throw new Error('registry full')
+        },
+    }
+    const brokenCtx = { llm: (fakeCtx(LESSON_JSON) as unknown as { llm: unknown }).llm, reflect: { get: () => brokenJobs } } as unknown as Context
+    const fallback = await runDistillation(
+        { ctx: brokenCtx, config: resolveConfig({ learn: { distillRunner: 'jobs' } }), registry: h.registry, resolver: h.resolver, state: new SessionState() },
+        { agent: h.agent, sessionId: 'sess-learn', turn: 3, signals, recalled: [] },
+    )
+    assert.equal(fallback.mode, 'inline')
 })

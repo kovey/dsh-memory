@@ -43,23 +43,26 @@ export interface RankOptions {
  * Normalize raw bm25 values into 0..1.
  *
  * SQLite's `bm25()` is negative and *more negative means a better match*, so
- * relevance grows with the magnitude: the best hit scores 1 and the worst 0.
- * A single hit (or a LIKE fallback where every raw value is 0) scores 1.
+ * relevance grows with the magnitude: the best hit scores 1.
+ *
+ * Scaling is by the strongest hit, not min-max: with min-max the weakest of two
+ * genuine matches would score exactly 0, and the score floor would then drop a
+ * record that really did match. A single hit (or a LIKE fallback, where every
+ * raw value is 0) scores 1.
  */
+export const MIN_RELEVANCE = 0.15
+
 export function normalizeRelevance(raw: Map<string, number>): Map<string, number> {
     if (raw.size === 0) return new Map()
-    let min = Number.POSITIVE_INFINITY
-    let max = Number.NEGATIVE_INFINITY
+    let max = 0
     for (const value of raw.values()) {
         const magnitude = Math.abs(value)
-        if (magnitude < min) min = magnitude
         if (magnitude > max) max = magnitude
     }
-    const span = max - min
     const out = new Map<string, number>()
     for (const [id, value] of raw) {
         const magnitude = Math.abs(value)
-        out.set(id, span <= Number.EPSILON ? 1 : (magnitude - min) / span)
+        out.set(id, max <= Number.EPSILON ? 1 : Math.max(MIN_RELEVANCE, magnitude / max))
     }
     return out
 }

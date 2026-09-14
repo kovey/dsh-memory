@@ -7,7 +7,7 @@
  * degrades to a plain-table index when the SQLite build lacks it.
  */
 
-export const SCHEMA_VERSION = 4
+export const SCHEMA_VERSION = 5
 
 export const CORE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -126,6 +126,19 @@ CREATE INDEX IF NOT EXISTS proposals_status_idx ON proposals(status, at DESC);
 
 -- Frozen metric snapshots: the regression gate compares against these instead of
 -- rewriting baseline.md, which stays a human-owned, read-only document.
+-- Semantic index (optional, default off): one vector per record and model.
+-- hash is the content hash the vector was computed from, so a changed lesson
+-- is re-embedded and an unchanged one never costs a call again.
+CREATE TABLE IF NOT EXISTS embeddings (
+  record_id TEXT NOT NULL,
+  model TEXT NOT NULL,
+  dim INTEGER NOT NULL,
+  hash TEXT NOT NULL,
+  vector BLOB NOT NULL,
+  at TEXT NOT NULL,
+  PRIMARY KEY (record_id, model)
+);
+
 CREATE TABLE IF NOT EXISTS baseline_snapshots (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   at TEXT NOT NULL,

@@ -23,7 +23,9 @@ import { consolidateTool, forgetTool } from './consolidate.js'
 import { syncTool } from './sync.js'
 import { statsTool } from './stats.js'
 import { rebuildScope } from '../store/rebuild.js'
+import { ensureEmbeddings, indexStats } from '../recall/semantic.js'
 import type { AutoCommitter } from '../sync/autocommit.js'
+import type { EmbeddingProvider, QueryVectorCache } from '../recall/semantic.js'
 
 export interface ToolDeps {
     config: MemoryConfig
@@ -31,6 +33,7 @@ export interface ToolDeps {
     resolver: ScopeResolver
     state: SessionState
     committer: AutoCommitter
+    semantic?: { provider?: EmbeddingProvider | undefined; cache?: QueryVectorCache } | undefined
 }
 
 type TextOutput = { type: 'string' }
@@ -95,9 +98,10 @@ function recallTool(deps: ToolDeps) {
             const query = buildQuery([{ content: [{ type: 'text', text: args.task }] }])
             if (query.terms.length === 0) return 'task text contained no searchable terms'
             const sessionId = exec.agent === undefined ? undefined : (exec.agent as unknown as AgentLike).session?.id
-            const outcome = recall(deps, {
+            const outcome = await recall(deps, {
                 agent,
                 terms: query.terms,
+                text: args.task,
                 ...(args.budgetTokens !== undefined ? { budgetTokens: args.budgetTokens } : {}),
                 ...(args.maxItems !== undefined ? { maxItems: args.maxItems } : {}),
                 ...(args.includeGlobal !== undefined ? { includeGlobal: args.includeGlobal } : {}),
@@ -227,6 +231,10 @@ function reindexTool(deps: ToolDeps) {
                 type: 'boolean',
                 description: 'When true, drop existing records first (full rebuild from disk).',
             },
+            embeddings: {
+                type: 'boolean',
+                description: 'Also (re)build the semantic index for every changed record. Requires semantic.enabled.',
+            },
         },
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
@@ -235,6 +243,23 @@ function reindexTool(deps: ToolDeps) {
             targets.push(deps.resolver.resolve({ agent }))
             if (args.scope === 'global' || args.scope === 'all') targets.push(deps.resolver.globalScope())
             const lines: string[] = []
+            if (args.embeddings === true) {
+                const provider = deps.semantic?.provider
+                if (provider === undefined || !deps.config.semantic.enabled) {
+                    return 'semantic recall is disabled (set semantic.enabled=true and configure semantic.baseUrl/model)'
+                }
+                const model = deps.config.semantic.model
+                for (const scope of targets) {
+                    const store = deps.registry.open(scope)
+                    if (store === undefined) continue
+                    const embedded = await ensureEmbeddings(store.db, provider, model, { limit: -1 })
+                    const stats = indexStats(store.db, model)
+                    lines.push(
+                        `${scope.kind} (${scope.root}): embedded ${embedded} record(s) — indexed ${stats.indexed}, pending ${stats.pending}${provider.lastError() !== undefined ? ` (last error: ${provider.lastError()})` : ''}`,
+                    )
+                }
+                return lines.join('\n') || 'no scope resolved'
+            }
             for (const scope of targets) {
                 if (args.rebuild === true) {
                     const store = deps.registry.open(scope)

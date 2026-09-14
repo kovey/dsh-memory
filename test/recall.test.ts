@@ -99,28 +99,28 @@ test('buildQuery skips plugin-injected messages and extracts terms', () => {
 
 test('recall ranks matches and respects the token budget', async (t) => {
     const h = await harness(t)
-    const outcome = recall(h.deps, { agent: h.agent, terms: ['pnpm', 'sandbox', 'install'] })
+    const outcome = await recall(h.deps, { agent: h.agent, terms: ['pnpm', 'sandbox', 'install'] })
     assert.ok(outcome.hits.length >= 1)
     assert.ok(outcome.hits.every((hit) => hit.score > 0))
     assert.ok(outcome.scopes.some((scope) => scope.kind === 'project'))
 
-    const tight = recall(h.deps, { agent: h.agent, terms: ['pnpm', 'sandbox'], budgetTokens: 40 })
+    const tight = await recall(h.deps, { agent: h.agent, terms: ['pnpm', 'sandbox'], budgetTokens: 40 })
     assert.ok(tight.tokensUsed <= 60, `expected a small pack, got ${tight.tokensUsed}`)
     assert.ok(tight.hits.length <= outcome.hits.length)
 
-    const floor = recall(h.deps, { agent: h.agent, terms: ['pnpm'], minScore: 1e9 })
+    const floor = await recall(h.deps, { agent: h.agent, terms: ['pnpm'], minScore: 1e9 })
     assert.equal(floor.hits.length, 0)
 })
 
 test('recall can reach global memory for cross-project facts', async (t) => {
     const h = await harness(t)
-    const outcome = recall(h.deps, { agent: h.agent, terms: ['tarball', 'registry', 'scoped'] })
+    const outcome = await recall(h.deps, { agent: h.agent, terms: ['tarball', 'registry', 'scoped'] })
     assert.ok(outcome.hits.some((hit) => hit.scope.kind === 'global'))
 })
 
 test('the rendered pack carries the confidence caveat', async (t) => {
     const h = await harness(t)
-    const outcome = recall(h.deps, { agent: h.agent, terms: ['pnpm'] })
+    const outcome = await recall(h.deps, { agent: h.agent, terms: ['pnpm'] })
     const text = renderRecallPack(outcome.hits, outcome.dropped)
     assert.match(text, /dsh-memory 自动召回/)
     assert.match(text, /以当前事实为准/)
@@ -240,14 +240,16 @@ test('bm25 normalization ranks the strongest match first', () => {
         ]),
     )
     assert.equal(normalized.get('strong'), 1)
-    assert.equal(normalized.get('weak'), 0)
-    assert.ok((normalized.get('middle') ?? 0) > 0 && (normalized.get('middle') ?? 0) < 1)
+    // scaled by the strongest hit, with a floor so a real match is never zeroed
+    assert.ok((normalized.get('weak') ?? 0) > 0 && (normalized.get('weak') ?? 0) < 0.2)
+    assert.ok((normalized.get('middle') ?? 0) > (normalized.get('weak') ?? 0))
+    assert.ok((normalized.get('middle') ?? 0) < 1)
     assert.equal(normalizeRelevance(new Map([['only', -2.5]])).get('only'), 1)
     assert.equal(normalizeRelevance(new Map()).size, 0)
 })
 
 test('a title match outranks a body-only match', async (t) => {
     const h = await harness(t)
-    const outcome = recall(h.deps, { agent: h.agent, terms: ['pnpm', 'install', 'tty'] })
+    const outcome = await recall(h.deps, { agent: h.agent, terms: ['pnpm', 'install', 'tty'] })
     assert.equal(outcome.hits[0]?.record.id, 'pnpm-tty')
 })

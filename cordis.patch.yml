@@ -49,6 +49,10 @@
           maxDistillTokensPerDay: 200000
           distillTimeoutMs: 3000
           minSignals: 1
+          # inline: bounded await inside turn-stopping (default).
+          # jobs:   hand the work to ctx.jobs — the turn closes immediately and
+          #         the distillation shows up in the job list.
+          distillRunner: inline
 
         # Episodic (L1) capture: structured signals only, redacted by default.
         episodic:
@@ -73,3 +77,20 @@
         sqlite:
           journalMode: wal
           busyTimeoutMs: 5000
+
+        # Optional semantic recall — OFF by default because it is the only
+        # feature that can spend money outside the bounded distillation path.
+        # When enabled it blends an OpenAI-compatible /embeddings endpoint into
+        # the lexical ranking, and only for queries lexical recall found thin.
+        semantic:
+          enabled: false
+          provider: remote
+          baseUrl: ''            # e.g. https://api.example.com/v1
+          model: ''              # e.g. text-embedding-3-small / bge-m3
+          apiKeyEnv: ''          # read from this env var (preferred over apiKey)
+          apiKey: ''
+          timeoutMs: 1500
+          weight: 0.5            # 0 = lexical only, 1 = semantic only
+          minLexicalHits: 3      # only embed the query when lexical recall is thinner
+          maxRecordsPerRun: 200  # incremental backfill per recall pass
+          minSimilarity: 0.35    # floor for a semantic-only hit

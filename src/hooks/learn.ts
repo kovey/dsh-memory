@@ -14,7 +14,7 @@ import type { SessionState } from '../recall/session-state.js'
 import { ScopeResolver, sessionIdOf } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
 import type { StoreRegistry } from '../store/store.js'
-import { distillTurn } from '../learn/distill.js'
+import { runDistillation } from '../learn/distill-runner.js'
 import type { DistillOutcome } from '../learn/distill.js'
 import { recordEpisode } from '../learn/episodic.js'
 import { TurnLedger } from '../learn/ledger.js'
@@ -154,17 +154,28 @@ async function handleTurnEnd(deps: LearnDeps, payload: { agent?: AgentLike; turn
         log('debug', 'memory: failure attribution failed:', error)
     }
 
-    const outcome = await distillTurn(
-        { ctx: deps.ctx, config: deps.config, registry: deps.registry, resolver: deps.resolver, state: deps.state },
+    const runner = await runDistillation(
+        {
+            ctx: deps.ctx,
+            config: deps.config,
+            registry: deps.registry,
+            resolver: deps.resolver,
+            state: deps.state,
+        },
         {
             agent: payload.agent,
             sessionId,
             turn,
             signals: collected.signals,
             recalled: [],
+            ownerAgent: payload.agent,
         },
     )
-    logOutcome(turn, collected.signals.length, outcome)
+    if (runner.mode === 'jobs') {
+        log('info', `memory: turn ${turn} distillation handed to job ${runner.jobId ?? '?'} (${collected.signals.length} signal(s))`)
+        return
+    }
+    if (runner.outcome !== undefined) logOutcome(turn, collected.signals.length, runner.outcome)
 }
 
 function logOutcome(turn: number, signalCount: number, outcome: DistillOutcome): void {

@@ -38,6 +38,13 @@ export interface MemoryConfig {
         maxDistillTokensPerDay: number
         distillTimeoutMs: number
         minSignals: number
+        /**
+         * `inline` keeps distillation inside turn-stopping (bounded await);
+         * `jobs` hands it to `ctx.jobs` so the turn closes immediately and the
+         * work becomes observable/cancellable. Signals stay in L1 either way,
+         * because neither runner survives process exit.
+         */
+        distillRunner: 'inline' | 'jobs'
     }
     episodic: {
         enabled: boolean
@@ -61,6 +68,28 @@ export interface MemoryConfig {
         journalMode: 'wal' | 'delete'
         busyTimeoutMs: number
         fallback: 'none' | 'json'
+    }
+    /**
+     * Optional semantic recall (DESIGN §14.3). Off by default: it is the only
+     * feature that can spend money *outside* the bounded distillation path.
+     */
+    semantic: {
+        enabled: boolean
+        /** `remote` = OpenAI-compatible /embeddings endpoint. */
+        provider: 'remote' | 'none'
+        baseUrl: string
+        model: string
+        apiKeyEnv: string
+        apiKey: string
+        timeoutMs: number
+        /** Blend weight: 0 = lexical only, 1 = semantic only. */
+        weight: number
+        /** Only embed the query when lexical recall returned fewer hits than this. */
+        minLexicalHits: number
+        /** Records embedded per recall pass (backfill is incremental). */
+        maxRecordsPerRun: number
+        /** Minimum cosine similarity for a semantic-only hit to count. */
+        minSimilarity: number
     }
 }
 
@@ -87,11 +116,25 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         maxDistillTokensPerDay: 200_000,
         distillTimeoutMs: 3_000,
         minSignals: 1,
+        distillRunner: 'inline',
     },
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
     consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true },
     git: { enabled: true, autoCommit: 'task-end', checkpointMinutes: 30, autoPush: false },
     sqlite: { journalMode: 'wal', busyTimeoutMs: 5_000, fallback: 'none' },
+    semantic: {
+        enabled: false,
+        provider: 'remote',
+        baseUrl: '',
+        model: '',
+        apiKeyEnv: '',
+        apiKey: '',
+        timeoutMs: 1_500,
+        weight: 0.5,
+        minLexicalHits: 3,
+        maxRecordsPerRun: 200,
+        minSimilarity: 0.35,
+    },
 }
 
 type Dict = Record<string, unknown>
@@ -139,6 +182,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
     const consolidate = obj(root['consolidate'])
     const git = obj(root['git'])
     const sqlite = obj(root['sqlite'])
+    const semantic = obj(root['semantic'])
     const d = DEFAULT_CONFIG
 
     const memoryHome = root['memoryHome']
@@ -181,6 +225,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             maxDistillTokensPerDay: num(learn['maxDistillTokensPerDay'], d.learn.maxDistillTokensPerDay, 0, 100_000_000),
             distillTimeoutMs: num(learn['distillTimeoutMs'], d.learn.distillTimeoutMs, 500, 10_000),
             minSignals: num(learn['minSignals'], d.learn.minSignals, 0, 50),
+            distillRunner: oneOf(learn['distillRunner'], ['inline', 'jobs'] as const, d.learn.distillRunner),
         },
         episodic: {
             enabled: bool(episodic['enabled'], d.episodic.enabled),
@@ -207,6 +252,19 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             journalMode: oneOf(sqlite['journalMode'], ['wal', 'delete'] as const, d.sqlite.journalMode),
             busyTimeoutMs: num(sqlite['busyTimeoutMs'], d.sqlite.busyTimeoutMs, 0, 60_000),
             fallback: oneOf(sqlite['fallback'], ['none', 'json'] as const, d.sqlite.fallback),
+        },
+        semantic: {
+            enabled: bool(semantic['enabled'], d.semantic.enabled),
+            provider: oneOf(semantic['provider'], ['remote', 'none'] as const, d.semantic.provider),
+            baseUrl: str(semantic['baseUrl'], d.semantic.baseUrl),
+            model: str(semantic['model'], d.semantic.model),
+            apiKeyEnv: str(semantic['apiKeyEnv'], d.semantic.apiKeyEnv),
+            apiKey: str(semantic['apiKey'], d.semantic.apiKey),
+            timeoutMs: num(semantic['timeoutMs'], d.semantic.timeoutMs, 100, 30_000),
+            weight: num(semantic['weight'], d.semantic.weight, 0, 1),
+            minLexicalHits: num(semantic['minLexicalHits'], d.semantic.minLexicalHits, 0, 100),
+            maxRecordsPerRun: num(semantic['maxRecordsPerRun'], d.semantic.maxRecordsPerRun, 0, 5_000),
+            minSimilarity: num(semantic['minSimilarity'], d.semantic.minSimilarity, 0, 1),
         },
     }
 }

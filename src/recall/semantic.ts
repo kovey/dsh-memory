@@ -120,8 +120,12 @@ export function createEmbeddingProvider(config: MemoryConfig): EmbeddingProvider
     const semantic = config.semantic
     if (!semantic.enabled || semantic.provider !== 'remote') return undefined
     const apiKey = semantic.apiKeyEnv !== '' ? process.env[semantic.apiKeyEnv] : semantic.apiKey
+    // The endpoint may be indirection-only (e.g. the same gateway the session
+    // already uses), so an env var can supply the base URL.
+    const fromEnv = semantic.baseUrlEnv !== '' ? process.env[semantic.baseUrlEnv] : undefined
+    const baseUrl = fromEnv !== undefined && fromEnv !== '' ? fromEnv : semantic.baseUrl
     return createRemoteProvider({
-        baseUrl: semantic.baseUrl,
+        baseUrl,
         model: semantic.model,
         apiKey: apiKey !== undefined && apiKey !== '' ? apiKey : semantic.apiKey,
         timeoutMs: semantic.timeoutMs,

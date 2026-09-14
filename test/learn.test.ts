@@ -13,7 +13,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { resolveConfig } from '../lib/config.js'
 import { registerLearnHooks } from '../lib/hooks/learn.js'
 import { candidateConfidence, nextConfidence, statusFor } from '../lib/learn/confidence.js'
-import { buildPrompt, dailyDistillTokens, distillAllowed, distillTurn, parseCandidates } from '../lib/learn/distill.js'
+import { buildPrompt, dailyDistillTokens, distillAllowed, distillTurn, parseCandidates, resolveDistillRoute } from '../lib/learn/distill.js'
 import { episodeDigest, pruneEpisodes, recordEpisode, sessionsDir } from '../lib/learn/episodic.js'
 import { applyDraft, gateDraft, jaccard, looksGeneric, similarity, tokens } from '../lib/learn/gate.js'
 import { TurnLedger } from '../lib/learn/ledger.js'
@@ -77,7 +77,7 @@ async function harness(t: { skip: (reason: string) => void }, config: Record<str
         throw new Error('unreachable')
     }
     const resolver = new ScopeResolver(resolved)
-    const agent = { session: { id: 'sess-learn', header: { cwd: repo } } }
+    const agent = { options: { provider: 'test-provider', model: 'test-model' }, session: { id: 'sess-learn', header: { cwd: repo } } }
     const scope = resolver.resolve({ agent })
     const store = registry.open(scope)
     assert.ok(store)
@@ -597,4 +597,39 @@ test('distillation degrades to "llm service unavailable" instead of failing the 
         ).reason,
         'llm service unavailable',
     )
+})
+
+test('the distillation route is inherited from the session unless configured', async (t) => {
+    const h = await harness(t)
+    const signals: Signal[] = [{ sessionId: 's', kind: 'tool-failure', turn: 1, at: new Date().toISOString() }]
+
+    // default: follow the session's own provider/model — no second config to keep in sync
+    const inherited = resolveDistillRoute(h.resolved, h.agent)
+    assert.deepEqual(inherited, { provider: 'test-provider', model: 'test-model' })
+
+    // an explicit setting wins
+    const explicit = resolveDistillRoute(
+        resolveConfig({ learn: { distillModel: { provider: 'cheap', model: 'tiny' } } }),
+        h.agent,
+    )
+    assert.deepEqual(explicit, { provider: 'cheap', model: 'tiny' })
+
+    // no session route and no config → nothing to call, and the turn is untouched
+    const routeless = resolveDistillRoute(resolveConfig({}), { session: { id: 's' } })
+    assert.equal(routeless, undefined)
+    const allowed = distillAllowed(
+        { ctx: fakeCtx(LESSON_JSON), config: h.resolved, registry: h.registry, resolver: h.resolver, state: new SessionState() },
+        { agent: { session: { id: 's' } }, sessionId: 's', turn: 1, signals, recalled: [] },
+    )
+    assert.equal(allowed.allowed, false)
+    assert.equal(allowed.reason, 'no model route available')
+
+    // and the end-to-end call reports which route it used
+    const outcome = await distillTurn(
+        { ctx: fakeCtx(LESSON_JSON), config: h.resolved, registry: h.registry, resolver: h.resolver, state: new SessionState() },
+        { agent: h.agent, sessionId: 'sess-learn', turn: 1, signals, recalled: [] },
+    )
+    assert.notEqual(outcome.status, 'skipped')
+    const audit = h.store.db.prepare('SELECT model FROM distill ORDER BY id DESC LIMIT 1').get()
+    assert.equal(audit?.['model'], 'test-provider/test-model')
 })

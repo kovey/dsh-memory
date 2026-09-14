@@ -42,9 +42,11 @@
         learn:
           collectSignals: true
           autoDistill: true
+          # 留空 = 继承当前会话自己的 provider/model（推荐：不用额外维护一套配置）。
+          # 需要固定用便宜模型时再显式写死。
           distillModel:
-            provider: deepseek-official
-            model: deepseek-v4-flash
+            provider: ''
+            model: ''
           maxDistillPerSession: 3
           maxDistillTokensPerDay: 200000
           # 实测：一次 flash 模型的 JSON 蒸馏 >3s，3s 会让真实调用每次都被自己中断。
@@ -96,6 +98,7 @@
           enabled: false
           provider: remote
           baseUrl: ''            # e.g. https://api.example.com/v1
+          baseUrlEnv: ''         # 或从环境变量取 base URL（如 DEEPSEEK_BASE_URL）
           model: ''              # e.g. text-embedding-3-small / bge-m3
           apiKeyEnv: ''          # read from this env var (preferred over apiKey)
           apiKey: ''

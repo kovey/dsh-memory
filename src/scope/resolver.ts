@@ -13,6 +13,8 @@ import type { MemoryScope } from '../store/types.js'
 
 /** Structural view of the bits of a live Agent this plugin needs. */
 export interface AgentLike {
+    /** Provider route + model the session runs on (source of truth for distillation). */
+    options?: { provider?: string; model?: string }
     session?: {
         id?: string
         header?: {

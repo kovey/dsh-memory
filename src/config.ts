@@ -33,6 +33,11 @@ export interface MemoryConfig {
     learn: {
         collectSignals: boolean
         autoDistill: boolean
+        /**
+         * Distillation route. Empty (the default) means "inherit the session's
+         * own provider/model" — the plugin then follows whatever the user
+         * already configured, with no separate LLM settings to keep in sync.
+         */
         distillModel: { provider: string; model: string }
         maxDistillPerSession: number
         maxDistillTokensPerDay: number
@@ -90,6 +95,8 @@ export interface MemoryConfig {
         /** `remote` = OpenAI-compatible /embeddings endpoint. */
         provider: 'remote' | 'none'
         baseUrl: string
+        /** Read the base URL from this env var instead of `baseUrl`. */
+        baseUrlEnv: string
         model: string
         apiKeyEnv: string
         apiKey: string
@@ -123,7 +130,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
     learn: {
         collectSignals: true,
         autoDistill: true,
-        distillModel: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
+        distillModel: { provider: '', model: '' },
         maxDistillPerSession: 3,
         maxDistillTokensPerDay: 200_000,
         // Measured live: a flash-model JSON distillation turn takes >3s, so the
@@ -145,6 +152,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         enabled: false,
         provider: 'remote',
         baseUrl: '',
+        baseUrlEnv: '',
         model: '',
         apiKeyEnv: '',
         apiKey: '',
@@ -283,6 +291,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             enabled: bool(semantic['enabled'], d.semantic.enabled),
             provider: oneOf(semantic['provider'], ['remote', 'none'] as const, d.semantic.provider),
             baseUrl: str(semantic['baseUrl'], d.semantic.baseUrl),
+            baseUrlEnv: str(semantic['baseUrlEnv'], d.semantic.baseUrlEnv),
             model: str(semantic['model'], d.semantic.model),
             apiKeyEnv: str(semantic['apiKeyEnv'], d.semantic.apiKeyEnv),
             apiKey: str(semantic['apiKey'], d.semantic.apiKey),

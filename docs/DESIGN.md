@@ -427,7 +427,20 @@ src/
 | M4 git 化同步 | ✅ | 真实 git：提交只含记忆目录；双克隆交换；克隆重建后指纹与检索结果完全一致 |
 | M5 评估门禁 | ✅ | 真实 metrics/baseline：解析 7 个基线任务、冻结快照、四项指标退化全部识别 |
 
-### 14.3 语义召回（已实现，默认关）
+### 14.3 蒸馏路由：跟随会话（默认）
+
+`learn.distillModel` 默认为空字符串对，含义是"**继承当前会话自己的 provider/model**"
+（`resolveDistillRoute()`：显式配置 > `agent.options` > 无路由则跳过并说明原因）。
+理由：插件不该要求第二套 LLM 配置与用户既有设置保持同步；固定便宜模型仍是显式配置的选项。
+
+真机验证（nvim-tui 官方 e2e，**零配置、无 --patch**）：
+
+```
+memory: distilled 1 new + 0 merged record(s) from turn 7 via deepseek-official/deepseek-v4-flash
+audit: turn 7 | model=deepseek-official/deepseek-v4-flash | in 299 / out 232 | created 1 | timed_out 0
+```
+
+### 14.4 语义召回（已实现，默认关）
 
 - 接入点就是设计预留的 `RankOptions.relevance`：`recall/semantic.ts` 把 bm25 归一化后的
   `lexical` 与余弦相似度 `semantic` 按 `weight` 混合，其余权重（置信度/新鲜度/层权/复现）不变。
@@ -438,7 +451,7 @@ src/
 - 顺带修正：`normalizeRelevance` 原为 min-max 归一，会把两个真实命中里较弱的一个压成 0 分、
   被分数门槛丢掉；改为按最强命中缩放并设下限（0.15）。
 
-### 14.4 蒸馏运行器（已实现）
+### 14.5 蒸馏运行器（已实现）
 
 `learn.distillRunner: inline | jobs`：
 
@@ -447,15 +460,16 @@ src/
   随 owner agent 销毁自动取消；未装配 jobs 或提交失败时自动回落到 inline。
 - 两者都不跨进程存活——所以信号在蒸馏**之前**已写入 L1，技能仍可事后蒸馏。
 
-### 14.5 未实现 / 后续可做
+### 14.6 未实现 / 后续可做
 
-- **实机三端全链路验证未完成**：真实宿主已加载插件并完成引导导入与首轮自动召回（见 §14.6），
-  但"一次完整的三端会话（含模型工具调用）"未验证：本机非交互 shell 没有 `DEEPSEEK_API_KEY`
-  （宿主在 LLM 预检处报 `MISSING_CREDENTIAL`）。
+- **语义召回的真机链路未验证**：不是管道问题，而是**端点不存在**——实测当前网关
+  `/embeddings` 对 `text-embedding-3-small`、`bge-m3`、`embedding-2`、`gemini-embedding-001`
+  一律返回 `model_not_found`（41 个模型里没有 embedding 通道）。换一个有 embedding 的端点即可；
+  配置已支持 `baseUrlEnv` 间接指向（例如复用 `DEEPSEEK_BASE_URL`）。
 - **向量检索未做 ANN 索引**：当前是内存内全量余弦（数百到数千条量级足够）；若记忆库达到
   数万条，应换成 sqlite-vec / HNSW。
 
-### 14.6 实机验证记录（2026-09-14，真实 dsh 宿主）
+### 14.7 实机验证记录（2026-09-14，真实 dsh 宿主）
 
 在临时 profile（`dsh-base` + `dsh-headless` + `dsh-memory`）中启动一次真实会话，
 `~/.dsh/memory-plugin.log`：
@@ -494,7 +508,7 @@ memory: consolidation (first-run) on global — archived 0, decayed 0, conflicts
 返回物理路径而提交路径用逻辑路径计算，导致自动提交被 git 拒绝（"outside repository"）。
 已修复（两侧先 realpath，且解析出仓库外时拒绝而非静默暂存），并补了 symlink 回归测试。
 
-### 14.7 第三轮实机验证：nvim-tui 官方 e2e 模式（学习闭环）
+### 14.8 第三轮实机验证：nvim-tui 官方 e2e 模式（学习闭环）
 
 用 nvim-tui runner 自带的 headless e2e 模式（`DSH_NVIM_TUI_HEADLESS=1` + `DSH_NVIM_TUI_PROMPT`
 + `DSH_NVIM_TUI_DUMP`，隔离记忆根 `DSH_MEMORY_HOME`）连跑 6 次，任务固定为

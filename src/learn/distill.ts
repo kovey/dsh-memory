@@ -66,6 +66,29 @@ const SYSTEM_PROMPT = [
 
 const MAX_SIGNALS_IN_PROMPT = 8
 
+export interface ModelRoute {
+    provider: string
+    model: string
+}
+
+/**
+ * Which route the distillation call uses.
+ *
+ * An explicit `learn.distillModel` wins; otherwise the session's own route is
+ * inherited, so the plugin follows the user's existing configuration instead of
+ * asking for a second set of LLM settings. `undefined` = no route available at
+ * all, and distillation is skipped (signals stay in L1).
+ */
+export function resolveDistillRoute(config: MemoryConfig, agent: AgentLike | undefined): ModelRoute | undefined {
+    const explicit = config.learn.distillModel
+    if (explicit.provider !== '' && explicit.model !== '') return explicit
+    const options = (agent as { options?: { provider?: unknown; model?: unknown } } | undefined)?.options
+    const provider = typeof options?.provider === 'string' ? options.provider : ''
+    const model = typeof options?.model === 'string' ? options.model : ''
+    if (provider !== '' && model !== '') return { provider, model }
+    return undefined
+}
+
 /** Today's distillation spend, in estimated tokens. */
 export function dailyDistillTokens(db: DatabaseSync, now = new Date()): number {
     const start = new Date(now.getTime() - (now.getTime() % 86_400_000)).toISOString()
@@ -89,6 +112,9 @@ export function distillAllowed(deps: DistillDeps, request: DistillRequest): { al
     const store = deps.registry.open(deps.resolver.resolve({ agent: request.agent }))
     if (store === undefined) return { allowed: false, reason: 'memory store unavailable' }
     if (optionalLlm(deps.ctx) === undefined) return { allowed: false, reason: 'llm service unavailable' }
+    if (resolveDistillRoute(deps.config, request.agent) === undefined) {
+        return { allowed: false, reason: 'no model route available' }
+    }
     if (dailyDistillTokens(store.db) >= learn.maxDistillTokensPerDay) {
         return { allowed: false, reason: 'daily token budget exhausted' }
     }
@@ -110,6 +136,11 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
         log('debug', 'memory: distillation skipped — no LLM service in this composition')
         return { ...skip, reason: 'llm service unavailable' }
     }
+    const route = resolveDistillRoute(deps.config, request.agent)
+    if (route === undefined) {
+        log('debug', 'memory: distillation skipped — no model route (session has none and learn.distillModel is empty)')
+        return { ...skip, reason: 'no model route available' }
+    }
 
     const prompt = buildPrompt(request)
     const controller = new AbortController()
@@ -121,8 +152,8 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
     try {
         const assembler = new BlockAssembler()
         const stream = llm.stream({
-            provider: deps.config.learn.distillModel.provider,
-            model: deps.config.learn.distillModel.model,
+            provider: route.provider,
+            model: route.model,
             messages: [
                 createUserMessage({
                     content: [{ type: 'text', text: prompt }],
@@ -179,7 +210,7 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
     deps.state.chargeDistill(request.sessionId, tokensIn + tokensOut)
 
     if (text.trim() === '') {
-        audit(store.db, request, deps.config, tokensIn, tokensOut, 0, timedOut)
+        audit(store.db, request, `${route.provider}/${route.model}`, tokensIn, tokensOut, 0, timedOut)
         const reason = timedOut
             ? `distillation timed out after ${Date.now() - callStartedAt}ms (limit ${deps.config.learn.distillTimeoutMs}ms)`
             : (finishNote ?? 'model returned no text')
@@ -217,10 +248,13 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
             else created += 1
         }
     }
-    audit(store.db, request, deps.config, tokensIn, tokensOut, created + merged, timedOut)
+    audit(store.db, request, `${route.provider}/${route.model}`, tokensIn, tokensOut, created + merged, timedOut)
     if (created + merged > 0) {
         deps.registry.exportScope(store.scope)
-        log('info', `memory: distilled ${created} new + ${merged} merged record(s) from turn ${request.turn}`)
+        log(
+            'info',
+            `memory: distilled ${created} new + ${merged} merged record(s) from turn ${request.turn} via ${route.provider}/${route.model}`,
+        )
     }
     return {
         status: created > 0 ? 'created' : merged > 0 ? 'merged' : 'rejected',
@@ -311,7 +345,7 @@ export function evidenceFromSignals(signals: readonly Signal[]): Evidence[] {
 function audit(
     db: DatabaseSync,
     request: DistillRequest,
-    config: MemoryConfig,
+    resolvedRoute: string,
     tokensIn: number,
     tokensOut: number,
     created: number,
@@ -323,7 +357,7 @@ function audit(
         ).run(
             request.sessionId,
             request.turn,
-            `${config.learn.distillModel.provider}/${config.learn.distillModel.model}`,
+            `${resolvedRoute}`,
             hashish(buildPrompt(request)),
             tokensIn,
             tokensOut,

@@ -91,6 +91,25 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 | `memory_forget` | 退役一条记忆（归档保留文件，不物理删除） |
 | `memory_reindex` | 从文本视图重建派生索引；`rebuild=true` 时做完整重建（删除磁盘上已不存在的记录、重导 episodes 与指标） |
 
+## 蒸馏用哪个模型？——默认跟随会话
+
+不需要额外配置：`learn.distillModel` 留空（默认）时，蒸馏调用**直接沿用当前会话自己的
+provider/model**（`agent.options`）。想固定用便宜模型时再显式写死：
+
+```yaml
+- config:
+    - id: memory
+      config:
+        learn:
+          distillModel: { provider: deepseek-official, model: deepseek-v4-flash }
+```
+
+真机日志会标明实际用的 route，审计表也记录它：
+
+```
+memory: distilled 1 new + 0 merged record(s) from turn 7 via deepseek-official/deepseek-v4-flash
+```
+
 ## 语义召回（可选，默认关）
 
 词法检索（FTS5 + CJK bigram）零成本、离线可用，是默认路径。当它召回不足时，可以叠加
@@ -109,6 +128,21 @@ embedding 语义召回：
           minLexicalHits: 3      # 词法已召回 ≥N 条时不再调 embedding（不花冤枉钱）
           minSimilarity: 0.35
 ```
+
+端点也可以用环境变量间接给出（例如沿用会话同一个网关的地址）：
+
+```yaml
+        semantic:
+          enabled: true
+          baseUrlEnv: 'DEEPSEEK_BASE_URL'   # 或直接写 baseUrl
+          model: 'bge-m3'
+          apiKeyEnv: 'DEEPSEEK_API_KEY'
+```
+
+> ⚠️ 前提是那里**真的有 embedding 模型**。实测当前会话用的网关
+> `ai.wudi360.../v1` 没有任何 embedding 通道（`text-embedding-3-small` / `bge-m3` /
+> `embedding-2` / `gemini-embedding-001` 全部返回 `model_not_found`），所以语义召回
+> 在本机还无法真机跑通——需要另接一个 embedding 端点（或本地模型）。
 
 行为保证：仅当词法召回不足时才调用；单次调用有超时（默认 1.5s），失败**静默降级为词法**；
 向量按内容哈希缓存，未变动的教训永不重复嵌入；作用域内无记录时直接跳过。

@@ -113,9 +113,15 @@ async function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decis
         }
     }
 
+    const semanticNote =
+        outcome.semantic?.used === true
+            ? ` [semantic +${outcome.semantic.semanticOnly}, embedded ${outcome.semantic.embedded}]`
+            : outcome.semantic?.reason !== undefined
+              ? ` [semantic skipped: ${outcome.semantic.reason}]`
+              : ''
     log(
         'info',
-        `memory: injected ${outcome.hits.length} record(s) (~${outcome.tokensUsed} tok) turn ${payload.turn ?? '?'} step ${payload.step ?? '?'} → ${outcome.hits.map((hit) => hit.record.id).join(', ')}`,
+        `memory: injected ${outcome.hits.length} record(s) (~${outcome.tokensUsed} tok)${semanticNote} turn ${payload.turn ?? '?'} step ${payload.step ?? '?'} → ${outcome.hits.map((hit) => hit.record.id).join(', ')}`,
     )
     return {
         kind: 'enter',

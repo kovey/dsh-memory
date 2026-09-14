@@ -370,3 +370,52 @@ test('embeddingText is bounded and covers title plus body', () => {
     assert.equal(recordHash(record), recordHash(record))
     assert.notEqual(recordHash(record), recordHash({ ...record, body: 'other' }))
 })
+
+test('semantic-only additions are bounded by maxAdditions', async (t) => {
+    const h = await harness(t)
+    const provider = fakeProvider()
+    const query = { agent: h.agent, terms: ['终端环境依赖'], text: '怎么在没有终端的环境装依赖', minScore: 0 }
+
+    // `pnpm-tty` matches lexically (the CJK bigram 环境), while `jsonl` is only
+    // semantically near — that second one is the "addition" the cap governs.
+    const allowed = await recall(
+        { config: h.config, registry: h.registry, resolver: h.resolver, semantic: { provider, cache: new QueryVectorCache() } },
+        query,
+    )
+    assert.equal(allowed.semantic?.used, true)
+    assert.equal(allowed.semantic?.semanticOnly, 1, 'the semantic-only lesson was added')
+    assert.deepEqual(allowed.hits.map((hit) => hit.record.id).sort(), ['jsonl', 'pnpm-tty'])
+
+    // maxAdditions: 0 → the pass still runs, but nothing is added
+    const capped = resolveConfig({
+        semantic: { enabled: true, provider: 'remote', baseUrl: 'http://fake', model: 'fake-embed', minLexicalHits: 3, maxAdditions: 0 },
+    })
+    const none = await recall(
+        { config: capped, registry: h.registry, resolver: h.resolver, semantic: { provider, cache: new QueryVectorCache() } },
+        { agent: h.agent, terms: ['终端环境依赖'], text: '怎么在没有终端的环境装依赖', minScore: 0 },
+    )
+    assert.equal(none.semantic?.used, true, 'the pass still ran; it just added nothing')
+    assert.equal(none.semantic?.semanticOnly, 0)
+    assert.deepEqual(none.hits.map((hit) => hit.record.id), ['pnpm-tty'], 'only the lexical hit remains')
+})
+
+test('a semantic-only hit is admitted by minSimilarity, not by the lexical score floor', async (t) => {
+    // Regression guard from a live run: with weight 0.3 a semantic-only record
+    // scores below the 0.35 lexical floor, so it was found and then dropped —
+    // "considered 2, injected 0".
+    const h = await harness(t)
+    const provider = fakeProvider()
+    const lowWeight = resolveConfig({
+        semantic: { enabled: true, provider: 'remote', baseUrl: 'http://fake', model: 'fake-embed', minLexicalHits: 3, weight: 0.3, minSimilarity: 0.45, maxAdditions: 2 },
+    })
+    const outcome = await recall(
+        { config: lowWeight, registry: h.registry, resolver: h.resolver, semantic: { provider, cache: new QueryVectorCache() } },
+        { agent: h.agent, terms: ['终端环境依赖'], text: '怎么在没有终端的环境装依赖' },
+    )
+    assert.equal(outcome.semantic?.used, true)
+    assert.ok(outcome.semantic?.semanticOnly === 1)
+    assert.ok(
+        outcome.hits.some((hit) => hit.record.id === 'jsonl'),
+        `the semantically-near lesson must survive the lexical floor, got ${outcome.hits.map((hit) => hit.record.id).join(',')}`,
+    )
+})

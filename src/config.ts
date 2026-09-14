@@ -109,6 +109,12 @@ export interface MemoryConfig {
         maxRecordsPerRun: number
         /** Minimum cosine similarity for a semantic-only hit to count. */
         minSimilarity: number
+        /**
+         * Cap on semantic-only candidates per query. Without it, semantically
+         * "nearby" lessons pad every pack and the injected token count grows
+         * ~2× for no accuracy gain (measured on the real corpus).
+         */
+        maxAdditions: number
     }
 }
 
@@ -161,6 +167,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         minLexicalHits: 3,
         maxRecordsPerRun: 200,
         minSimilarity: 0.35,
+        maxAdditions: 2,
     },
 }
 
@@ -300,6 +307,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             minLexicalHits: num(semantic['minLexicalHits'], d.semantic.minLexicalHits, 0, 100),
             maxRecordsPerRun: num(semantic['maxRecordsPerRun'], d.semantic.maxRecordsPerRun, 0, 5_000),
             minSimilarity: num(semantic['minSimilarity'], d.semantic.minSimilarity, 0, 1),
+            maxAdditions: num(semantic['maxAdditions'], d.semantic.maxAdditions, 0, 50),
         },
     }
 }

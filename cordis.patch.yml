@@ -107,3 +107,4 @@
           minLexicalHits: 3      # only embed the query when lexical recall is thinner
           maxRecordsPerRun: 200  # incremental backfill per recall pass
           minSimilarity: 0.35    # floor for a semantic-only hit
+          maxAdditions: 2        # 每次最多补几条"纯语义"命中（实测不设上限会让注入 token 翻倍）

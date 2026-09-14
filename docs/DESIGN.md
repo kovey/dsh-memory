@@ -460,6 +460,32 @@ audit: turn 7 | model=deepseek-official/deepseek-v4-flash | in 299 / out 232 | c
   随 owner agent 销毁自动取消；未装配 jobs 或提交失败时自动回落到 inline。
 - 两者都不跨进程存活——所以信号在蒸馏**之前**已写入 L1，技能仍可事后蒸馏。
 
+### 14.9 第四轮实机验证：本地 bge-m3 语义召回（含对照实验）
+
+本机装上 Ollama + bge-m3（1.2GB，1024 维，热调用 0.08s、冷启动 2.78s），在 nvim-tui 上启用后
+真机跑通：`semantic=on/bge-m3`、19 条向量回填、注入包 `[semantic +2, embedded 19]`（182 tok）。
+
+**对照实验**（19 条真实教训，9 个查询：6 个刻意无字面重叠 + 3 个原词）：
+
+| 指标 | 词法 | 混合 |
+|---|---|---|
+| Top-1 / Top-3 | 6/9 · 8/9 | 6/9 · **9/9** |
+| 改写问法 Top-3 | 5/6 | **6/6** |
+| 平均耗时 / 注入 token | 0ms · 2670 | +33ms · 3606 (+35%) |
+
+这一轮又暴露两个问题（都已修）：
+
+1. **语义命中被"双重打折"**：先乘 `weight`，再撞上为词法标定的 `minScore=0.35`，结果
+   "considered 2、injected 0"——语义明明找到了却永远进不了包。修复：`minScore` 只约束词法候选，
+   纯语义候选由 `minSimilarity` 自己把关（附回归测试）。
+2. **无上限的语义补充会让注入 token 翻倍**（+61% 而无准确率提升）。新增 `semantic.maxAdditions`
+   （默认 2，只保留相似度最高的几条），token 增幅收敛到 +35% 且准确率反而上升。
+
+**profile patch 的形状坑**（第二次踩配置形状）：本 profile 里生效的是顶层 `- id: <entry>` + `config:`
+（同 `compaction-basic` 行）；文档里常见的嵌套 `- config: [ {id, config} ]` 在这里**不生效**
+（表现为 `semantic=off`，排查花了三轮）。加上此前发现的 `dsh --patch <file>` overlay 对本插件
+config 无效，结论：**改插件配置就写 profile patch 的顶层 `- id: memory` 形式**。
+
 ### 14.6 未实现 / 后续可做
 
 - **语义召回的真机链路未验证**：不是管道问题，而是**端点不存在**——实测当前网关

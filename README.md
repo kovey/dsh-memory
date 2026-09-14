@@ -110,7 +110,57 @@ provider/model**（`agent.options`）。想固定用便宜模型时再显式写�
 memory: distilled 1 new + 0 merged record(s) from turn 7 via deepseek-official/deepseek-v4-flash
 ```
 
-## 语义召回（可选，默认关）
+## 本地语义召回（已实测，推荐做法）
+
+本机已装好 Ollama + bge-m3（1024 维，1.2GB），插件的 `remote` provider 直接可用：
+
+```bash
+brew install ollama
+brew services start ollama      # 或 ollama serve &
+ollama pull bge-m3
+```
+
+在 profile 的 `cordis.patch.yml` 里（**顶层 `- id: <entry>` + `config:` 形状**）：
+
+```yaml
+- id: memory
+  config:
+    semantic:
+      enabled: true
+      baseUrl: 'http://127.0.0.1:11434/v1'
+      model: 'bge-m3'
+      timeoutMs: 8000      # 冷启动要重新加载模型（约 2.8s），默认 1.5s 会中断自己
+      weight: 0.3
+      minLexicalHits: 3    # 词法召回 ≥3 条时不再调用（不花冤枉时间）
+      minSimilarity: 0.5
+      maxAdditions: 2      # 每次最多补几条纯语义命中，防止注入 token 膨胀
+```
+
+**实测（19 条真实教训，词法 vs 混合）**：
+
+| 指标 | 词法 | 混合 |
+|---|---|---|
+| Top-1 命中 | 6/9 | 6/9 |
+| **Top-3 命中** | 8/9 | **9/9** |
+| **改写问法 Top-3** | 5/6 | **6/6** |
+| 原词问法 Top-3 | 3/3 | 3/3 |
+| 平均耗时 | 0ms | +33ms |
+| 注入 token | 2670 | 3606 (+35%) |
+
+结论：**它救的是"换了说法就搜不到"那类查询**（本次是「家目录写不进去」→ 命中「写入可能被沙箱拒绝」），
+对原词查询无影响；代价是 +33ms 与约 +35% 注入 token。复跑实验：
+
+```bash
+node scripts/eval-semantic.ts --minLex 3 --weight 0.3 --minSim 0.5 --maxAdd 2
+```
+
+真机日志会标明语义贡献了几条：
+
+```
+memory: injected 2 record(s) (~182 tok) [semantic +2, embedded 19] turn 10 step 1 → zh-960299aec0, shell
+```
+
+## 语义召回实现（可选，默认关）
 
 词法检索（FTS5 + CJK bigram）零成本、离线可用，是默认路径。当它召回不足时，可以叠加
 embedding 语义召回：

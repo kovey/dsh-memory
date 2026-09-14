@@ -70,6 +70,8 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
     if (stores.length === 0) return empty
 
     const merged: { item: ScoredRecord; scope: MemoryScope }[] = []
+    /** Records admitted by semantic similarity alone (their id set). */
+    const semanticOnlyIds = new Set<string>()
     let considered = 0
     let semanticUsed = false
     let semanticEmbedded = 0
@@ -100,9 +102,28 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
                     deps.config.semantic.weight,
                     deps.config.semantic.minSimilarity,
                 )
-                relevance = blended.relevance
+                // Semantic-only finds are the whole point (lexical missed them),
+                // but unbounded they pad every pack: keep the best few.
+                const cap = deps.config.semantic.maxAdditions
+                let kept = 0
+                const bounded = new Map<string, number>()
+                const additions = blended.semanticOnly
+                    .map((id) => ({ id, score: outcome.scores.get(id) ?? 0 }))
+                    .sort((a, b) => b.score - a.score)
+                    .slice(0, cap)
+                    .map((entry) => entry.id)
+                for (const [id, score] of blended.relevance) {
+                    const semanticOnlyHit = blended.semanticOnly.includes(id)
+                    if (semanticOnlyHit) {
+                        if (!additions.includes(id)) continue
+                        kept += 1
+                    }
+                    bounded.set(id, score)
+                }
+                relevance = bounded
+                for (const id of additions) semanticOnlyIds.add(id)
                 semanticUsed = true
-                semanticOnly += blended.semanticOnly.length
+                semanticOnly += kept
             } else if (outcome.reason !== undefined) {
                 semanticReason = outcome.reason
             }
@@ -118,13 +139,21 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
     }
 
     merged.sort((a, b) => b.item.score - a.item.score)
-    const ranked = merged.map(({ item }) => item)
+    // `minScore` is calibrated for lexical relevance (normalized bm25). A
+    // semantic-only hit has already cleared `minSimilarity`, and scaling it by
+    // `weight` would otherwise drop it below that lexical floor every time —
+    // which is exactly how a "semantic recall found it" case turns into zero
+    // injected records. Admit those by their own gate.
+    const minScore = request.minScore ?? deps.config.recall.minScore
+    const ranked = merged
+        .map(({ item }) => item)
+        .filter((item) => item.score >= minScore || semanticOnlyIds.has(item.record.id))
     const scopeOf = new Map(ranked.map((item, index) => [item.record.id, merged[index]?.scope]))
     const budgetTokens = Math.max(0, (request.budgetTokens ?? deps.config.recall.budgetTokens) - estimateTokens(HEADER))
     const fitted = fitBudget(ranked, (item) => renderHit({ record: item.record, scope: scopeOf.get(item.record.id) ?? stores[0]!.scope, score: item.score }), {
         budgetTokens,
         maxItems: request.maxItems ?? deps.config.recall.maxItems,
-        minScore: request.minScore ?? deps.config.recall.minScore,
+        minScore: 0,
     })
 
     let dropped = fitted.dropped
@@ -149,7 +178,10 @@ export async function recall(deps: RecallDeps, request: RecallRequest): Promise<
                       used: semanticUsed,
                       embedded: semanticEmbedded,
                       semanticOnly,
-                      ...(semanticReason !== undefined ? { reason: semanticReason } : {}),
+                      // Only surface a reason when the pass contributed nothing:
+                      // otherwise an empty secondary scope would mask the store
+                      // that actually ran semantic recall.
+                      ...(!semanticUsed && semanticReason !== undefined ? { reason: semanticReason } : {}),
                   },
               }
             : {}),

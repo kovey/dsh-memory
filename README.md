@@ -2,12 +2,32 @@
 
 DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / 全局记忆** + **任务前自动召回** + **任务后持续学习**。
 
-设计文档（唯一决策存档）：[`docs/DESIGN.md`](docs/DESIGN.md)。
+设计文档（唯一决策存档）：[`docs/DESIGN.md`](docs/DESIGN.md) ｜
+发布与安装：[`docs/RELEASE.md`](docs/RELEASE.md) ｜
+代码审查记录：[`docs/REVIEW-2026-09-14.md`](docs/REVIEW-2026-09-14.md)
 
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
 - 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
 - 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
 - 当前进度：**M0–M5 全部完成 + 语义检索 + 蒸馏后台运行器**（见设计文档 §11、§14）
+
+## 快速开始
+
+```bash
+# 安装（发布版：GitHub tag）
+dsh plugin --profile nvim-tui add github:kovey/dsh-memory#v0.1.0
+# 然后把 "dsh-memory" 追加到 ~/.dsh/profiles/nvim-tui/package.json 的 dsh.profile.bundles
+# —— 插件自带的 cordis.patch.yml 会插入 id: memory，profile patch 里不要重复 insert
+
+# 本地开发（link 到工作区；`tui` 是生产面，脚本会拒绝操作它）
+ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
+./scripts/install-into-dsh.sh --dry-run && ./scripts/install-into-dsh.sh
+```
+
+重启 profile 后，插件在 `~/.dsh/memory-plugin.log` 打印一行 `memory: ready (…)` 即为就绪；
+模型侧会多出 `memory_save` / `memory_search` / `memory_recall` / `memory_get` / `memory_stats` /
+`memory_forget` / `memory_consolidate` / `memory_sync` / `memory_reindex` / `memory_config` /
+`memory_import` 共 11 个工具（注册失败的工具不会被协议段宣传）。
 
 ## 状态（M5：全部里程碑完成）
 
@@ -17,7 +37,11 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 | 文本视图 → DB 引导导入（`lessons/*.md`、`metrics.jsonl`） | ✅ |
 | DB → 文本视图导出（`lessons/*.md`、`MEMORY.md`）与往返一致性 | ✅ |
 | 作用域解析（会话 cwd → 仓库根）与项目/全局守卫 | ✅ |
-| 常驻协议段（可开关）+ 项目索引摘要（per-agent scoped section） | ✅ |
+| 常驻协议段（可开关）+ 项目索引摘要（per-agent scoped section）+ **L5 偏好层常驻** | ✅ |
+| 11 个工具（含 `memory_config` 会话级降噪、`memory_import` 外部导入） | ✅ |
+| 子代理写保护（写类工具统一拒绝，可由 `routing.subagentWrite` 打开） | ✅ |
+| 门禁三态 `pass / regression / **unknown**`（无数据不再算通过） | ✅ |
+| L4 晋升草稿 `proposals/<id>.SKILL.md`（人审后移动即可，插件不写 `~/.dsh/skills`） | ✅ |
 | `agent/pre-step` 自动召回（阈值 0.35 / 预算 600 tok / 会话内幂等） | ✅ |
 | 召回记账 `usage`（注入次数、召回后成败归因） | ✅ |
 | 工具 `memory_search` / `memory_get` / `memory_recall` / `memory_stats` / `memory_reindex` | ✅ |
@@ -287,6 +311,14 @@ npm test              # 构建后 node --test（Node 原生 TS 执行测试）
 
 测试全部在仓库内 `.tmp-tests/` 运行，并把全局记忆根重定向到临时目录，**不会触碰
 真实的 `~/.dsh/memory`**。
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/DESIGN.md`](docs/DESIGN.md) | 设计存档：分层模型、双库隔离、钩子方案、里程碑与实机验证记录 |
+| [`docs/RELEASE.md`](docs/RELEASE.md) | dev 链路 vs 发布链路、发布前检查、装进 profile 的步骤与回退 |
+| [`docs/REVIEW-2026-09-14.md`](docs/REVIEW-2026-09-14.md) | 一次全面代码审查：59 条发现、修复清单与验证方式 |
 
 ## 日志
 

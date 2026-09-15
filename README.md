@@ -14,8 +14,10 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 ## 快速开始
 
 ```bash
-# 安装（发布版：GitHub tag）
+# 安装（发布版：GitHub tag —— 打成 tag 后固定版本，推荐）
 dsh plugin --profile nvim-tui add github:kovey/dsh-memory#v0.1.0
+# 尚未打 tag 时先用分支体验（不固定版本）：
+#   dsh plugin --profile nvim-tui add github:kovey/dsh-memory#main
 # 然后把 "dsh-memory" 追加到 ~/.dsh/profiles/nvim-tui/package.json 的 dsh.profile.bundles
 # —— 插件自带的 cordis.patch.yml 会插入 id: memory，profile patch 里不要重复 insert
 

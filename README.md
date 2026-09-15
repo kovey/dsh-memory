@@ -20,6 +20,7 @@ dsh plugin --profile nvim-tui add github:kovey/dsh-memory#v0.1.0
 #   dsh plugin --profile nvim-tui add github:kovey/dsh-memory#main
 # 然后把 "dsh-memory" 追加到 ~/.dsh/profiles/nvim-tui/package.json 的 dsh.profile.bundles
 # —— 插件自带的 cordis.patch.yml 会插入 id: memory，profile patch 里不要重复 insert
+# ⚠️ `dsh plugin add` 只是在 profile 目录里执行 pnpm；**只 add 不加 bundles = 装了但不加载**。
 
 # 本地开发（link 到工作区；`tui` 是生产面，脚本会拒绝操作它）
 ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
@@ -307,7 +308,8 @@ tail -20 ~/.dsh/memory-plugin.log
 ## 开发
 
 ```bash
-npm run build         # tsc → lib/
+npm install           # peer @deepseek-ai/* 已在 devDependencies（干净 clone 也能构建）
+npm run build         # tsc → dist/
 npm test              # 构建后 node --test（Node 原生 TS 执行测试）
 ```
 

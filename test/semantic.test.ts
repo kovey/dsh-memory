@@ -12,9 +12,9 @@ import fs from 'node:fs'
 import http from 'node:http'
 import path from 'node:path'
 import test from 'node:test'
-import { resolveConfig } from '../lib/config.js'
-import { clearRepoCache } from '../lib/paths.js'
-import { recall } from '../lib/recall/engine.js'
+import { resolveConfig } from '../dist/config.js'
+import { clearRepoCache } from '../dist/paths.js'
+import { recall } from '../dist/recall/engine.js'
 import {
     QueryVectorCache,
     blendRelevance,
@@ -31,12 +31,12 @@ import {
     similarityScores,
     toBlob,
     fromBlob,
-} from '../lib/recall/semantic.js'
-import type { EmbeddingProvider } from '../lib/recall/semantic.js'
-import { ScopeResolver } from '../lib/scope/resolver.js'
-import { loadSqliteModule } from '../lib/store/sqlite/db.js'
-import { listRecords, materialize, upsertRecord } from '../lib/store/sqlite/records.js'
-import { StoreRegistry } from '../lib/store/store.js'
+} from '../dist/recall/semantic.js'
+import type { EmbeddingProvider } from '../dist/recall/semantic.js'
+import { ScopeResolver } from '../dist/scope/resolver.js'
+import { loadSqliteModule } from '../dist/store/sqlite/db.js'
+import { listRecords, materialize, upsertRecord } from '../dist/store/sqlite/records.js'
+import { StoreRegistry } from '../dist/store/store.js'
 import { fakeRepo, lessonDoc, memoryFixture, useGlobalMemoryHome } from './helpers.ts'
 
 /** Concept vector: [has "terminal-ish", has "install-ish", constant]. */

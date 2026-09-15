@@ -6,8 +6,9 @@ node_modules/
 #
 # The SQLite databases are *derived* from the git-tracked text view
 # (lessons/*.md, MEMORY.md, metrics.jsonl) and are machine-local:
-# 注意：lib/ 故意**入库**（与 dsh-nvim-tui 一致）——`dsh plugin add github:kovey/dsh-memory`
-# 安装的是仓库内容，没有构建产物就会得到一个 main 指向缺失文件的包。
+# 注意：dist/ 故意**入库**——dsh 生态惯例「免构建安装」：pnpm 10 默认禁止依赖执行构建
+# 脚本（ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED），所以 `dsh plugin add github:kovey/dsh-memory`
+# 只有在提交了构建产物时才开箱可用（同 dsh-chat-interaction 的做法）。
 #   ~/.dsh/memory/memory.db, <repo>/.dsh/memory/memory.db
 # They are ignored here for reference; the plugin's own .gitignore template
 # (see src/store/gitignore.ts) writes the real one into memory roots.

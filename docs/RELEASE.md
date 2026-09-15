@@ -30,7 +30,7 @@ npm run build                 # tsc → lib/
 git status --porcelain        # 必须干净（发布产物来自提交，不是工作区）
 ```
 
-发布物内容（`package.json` 的 `files`）：`lib/`、`cordis.patch.yml`、`README.md`。
+发布物内容（`package.json` 的 `files`）：`dist/`、`cordis.patch.yml`、`README.md`。
 peerDependencies 只声明 `@deepseek-ai/*`，运行期零第三方依赖。
 
 ## 发布
@@ -80,7 +80,7 @@ dsh plugin --profile tui add github:<owner>/dsh-memory#v0.1.0
    `memory: ready (node:sqlite …, fts5=yes, recall=on/600tok, protocol=on, learn=on/<route>, semantic=on/bge-m3)`
 2. 确认解析到的是发布产物而不是开发树：
    `node -e "console.log(require.resolve('dsh-memory'))"`（在 `~/.dsh/profiles/tui` 下执行）
-   → 应指向 `~/.dsh/profiles/tui/node_modules/dsh-memory/lib/index.js`，
-   **不是** `~/workspace/deepseek/dsh-memory/lib/index.js`。
+   → 应指向 `~/.dsh/profiles/tui/node_modules/dsh-memory/dist/index.js`，
+   **不是** `~/workspace/deepseek/dsh-memory/dist/index.js`。
 3. 回退：从 bundles 移除该行、`dsh plugin --profile tui remove dsh-memory` 即可（记忆数据不受影响，
    文本视图仍在 `~/.dsh/memory` 与各项目 `.dsh/memory`）。

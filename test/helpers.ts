@@ -4,7 +4,7 @@
  *
  * Test files are TypeScript executed by Node's native type stripping
  * (`node --test test/*.test.ts`), so local imports carry an explicit `.ts`
- * extension while plugin code is imported from the compiled `lib/`.
+ * extension while plugin code is imported from the compiled `dist/`.
  */
 import fs from 'node:fs'
 import os from 'node:os'

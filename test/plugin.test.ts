@@ -7,7 +7,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
-import { apply, inject, name } from '../lib/index.js'
+import { apply, inject, name } from '../dist/index.js'
 import { fakeRepo, tempDir } from './helpers.ts'
 
 interface FakeToolDefinition {

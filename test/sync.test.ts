@@ -11,16 +11,16 @@ import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
-import { resolveConfig } from '../lib/config.js'
-import { clearRepoCache } from '../lib/paths.js'
-import { ScopeResolver } from '../lib/scope/resolver.js'
-import { exportAll } from '../lib/store/export.js'
-import { loadSqliteModule } from '../lib/store/sqlite/db.js'
-import { countRecords, getRecord, materialize, upsertRecord } from '../lib/store/sqlite/records.js'
-import { fingerprint, importEpisodes, rebuildScope } from '../lib/store/rebuild.js'
-import { StoreRegistry } from '../lib/store/store.js'
-import { AutoCommitter } from '../lib/sync/autocommit.js'
-import { commitMemory, ensureGitignore, ensureRepo, hasRemote, isRepo, repoRootOf, sync } from '../lib/sync/git.js'
+import { resolveConfig } from '../dist/config.js'
+import { clearRepoCache } from '../dist/paths.js'
+import { ScopeResolver } from '../dist/scope/resolver.js'
+import { exportAll } from '../dist/store/export.js'
+import { loadSqliteModule } from '../dist/store/sqlite/db.js'
+import { countRecords, getRecord, materialize, upsertRecord } from '../dist/store/sqlite/records.js'
+import { fingerprint, importEpisodes, rebuildScope } from '../dist/store/rebuild.js'
+import { StoreRegistry } from '../dist/store/store.js'
+import { AutoCommitter } from '../dist/sync/autocommit.js'
+import { commitMemory, ensureGitignore, ensureRepo, hasRemote, isRepo, repoRootOf, sync } from '../dist/sync/git.js'
 import {
     hasConflictMarkers,
     laterExpiry,
@@ -29,9 +29,9 @@ import {
     reconstructSide,
     resolveConflict,
     splitConflict,
-} from '../lib/sync/merge.js'
+} from '../dist/sync/merge.js'
 import { lessonDoc, tempDir, useGlobalMemoryHome } from './helpers.ts'
-import { parseLesson, renderLesson } from '../lib/store/frontmatter.js'
+import { parseLesson, renderLesson } from '../dist/store/frontmatter.js'
 
 function git(cwd: string, ...args: string[]): string {
     return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
@@ -522,7 +522,7 @@ test('a real rebase conflict is resolved from any working directory', async (t) 
     const previousCwd = process.cwd()
     process.chdir(elsewhere)
     try {
-        const { syncTool } = await import('../lib/tools/sync.js')
+        const { syncTool } = await import('../dist/tools/sync.js')
         const tool = syncTool({ config, registry, resolver, committer })
         const report = await (tool as unknown as {
             execute: (args: unknown, exec: unknown) => Promise<string>

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
-import { appendPreference, readProfile, renderProfile, writeProfile } from '../lib/learn/profile.js'
+import { appendPreference, readProfile, renderProfile, writeProfile } from '../dist/learn/profile.js'
 import { tempDir } from './helpers.ts'
 
 test('L5 preferences are read from the memory root and rendered within budget', () => {

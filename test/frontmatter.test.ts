@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import test from 'node:test'
-import { expiresToIso, isoToExpires, parseEvidenceSummary, parseLesson, renderLesson } from '../lib/store/frontmatter.js'
+import { expiresToIso, isoToExpires, parseEvidenceSummary, parseLesson, renderLesson } from '../dist/store/frontmatter.js'
 import { lessonDoc } from './helpers.ts'
 
 test('parses the legacy five-field document', () => {

@@ -9,9 +9,9 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
-import { cjkClause, splitTerm } from '../lib/store/sqlite/cjk.js'
-import { loadSqliteModule, openDatabase } from '../lib/store/sqlite/db.js'
-import { extractTerms, materialize, rawSearch, upsertRecord } from '../lib/store/sqlite/records.js'
+import { cjkClause, splitTerm } from '../dist/store/sqlite/cjk.js'
+import { loadSqliteModule, openDatabase } from '../dist/store/sqlite/db.js'
+import { extractTerms, materialize, rawSearch, upsertRecord } from '../dist/store/sqlite/records.js'
 import { tempDir } from './helpers.ts'
 
 test('a term is split into the parts the index actually holds', () => {

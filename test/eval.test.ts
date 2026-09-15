@@ -6,7 +6,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
-import { resolveConfig } from '../lib/config.js'
+import { resolveConfig } from '../dist/config.js'
 import {
     evaluateGate,
     freezeBaseline,
@@ -17,16 +17,16 @@ import {
     renderEvaluation,
     snapshotMetrics,
     windowSummary,
-} from '../lib/eval/baseline.js'
-import { clearRepoCache } from '../lib/paths.js'
-import { setLogFile } from '../lib/log.js'
-import { ScopeResolver } from '../lib/scope/resolver.js'
-import { loadSqliteModule } from '../lib/store/sqlite/db.js'
-import { StoreRegistry } from '../lib/store/store.js'
-import { AutoCommitter } from '../lib/sync/autocommit.js'
-import { consolidateTool, forgetTool } from '../lib/tools/consolidate.js'
-import { statsTool } from '../lib/tools/stats.js'
-import { syncTool } from '../lib/tools/sync.js'
+} from '../dist/eval/baseline.js'
+import { clearRepoCache } from '../dist/paths.js'
+import { setLogFile } from '../dist/log.js'
+import { ScopeResolver } from '../dist/scope/resolver.js'
+import { loadSqliteModule } from '../dist/store/sqlite/db.js'
+import { StoreRegistry } from '../dist/store/store.js'
+import { AutoCommitter } from '../dist/sync/autocommit.js'
+import { consolidateTool, forgetTool } from '../dist/tools/consolidate.js'
+import { statsTool } from '../dist/tools/stats.js'
+import { syncTool } from '../dist/tools/sync.js'
 import { fakeRepo, memoryFixture, tempDir, useGlobalMemoryHome } from './helpers.ts'
 
 const BASELINE_DOC = `# 任务回放基准 (Baseline)

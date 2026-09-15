@@ -9,9 +9,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { resolveConfig } from '../lib/config.js'
-import { clearRepoCache, projectMemoryRoot, resolveRepoRoot } from '../lib/paths.js'
-import { ScopeResolver } from '../lib/scope/resolver.js'
+import { resolveConfig } from '../dist/config.js'
+import { clearRepoCache, projectMemoryRoot, resolveRepoRoot } from '../dist/paths.js'
+import { ScopeResolver } from '../dist/scope/resolver.js'
 import { fakeRepo, memoryFixture, repoRoot, tempDir, useGlobalMemoryHome } from './helpers.ts'
 
 test('resolves a project scope from the session working directory', () => {

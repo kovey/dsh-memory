@@ -13,14 +13,14 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { resolveConfig } from '../lib/config.js'
-import { loadSqliteModule } from '../lib/store/sqlite/db.js'
-import { StoreRegistry } from '../lib/store/store.js'
-import { ScopeResolver } from '../lib/scope/resolver.js'
-import { recall } from '../lib/recall/engine.js'
-import { createRemoteProvider, ensureEmbeddings, QueryVectorCache } from '../lib/recall/semantic.js'
-import { extractTerms } from '../lib/store/sqlite/records.js'
-import type { MemoryScope } from '../lib/store/types.js'
+import { resolveConfig } from '../dist/config.js'
+import { loadSqliteModule } from '../dist/store/sqlite/db.js'
+import { StoreRegistry } from '../dist/store/store.js'
+import { ScopeResolver } from '../dist/scope/resolver.js'
+import { recall } from '../dist/recall/engine.js'
+import { createRemoteProvider, ensureEmbeddings, QueryVectorCache } from '../dist/recall/semantic.js'
+import { extractTerms } from '../dist/store/sqlite/records.js'
+import type { MemoryScope } from '../dist/store/types.js'
 
 interface Query {
     /** What the user would ask. */

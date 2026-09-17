@@ -20,6 +20,9 @@
   现已修正结构并补齐此前丢失的 `sqlite.fallback` / `sqlite.maxOpenRoots` /
   `prompt.indexSummary.profileBudgetTokens`。
 
+  处理方式：**删除并重建了 `v0.1.0` tag**（在维护分支 `release/v0.1.0` 上，只带该修复、版本号不变），
+  main 分支的实现随本版本发布。两个 tag 现均验证可安装。
+
 ### Added
 
 - `test/patch.test.ts`：用真实 YAML 解析器校验随包发布的 `cordis.patch.yml`——
@@ -29,8 +32,10 @@
 
 ## [0.1.0] — 2026-09-14
 
-> ⚠️ 该 tag 的 `cordis.patch.yml` 有缩进错误，**不可安装**（`dsh plugin add github:kovey/dsh-memory#v0.1.0`
-> 会在启动时解析失败）。请使用 v0.1.1 或更新版本。
+> 该版本最初打出的 tag 带有一个发布阻断问题（`cordis.patch.yml` 缩进错误，安装后无法启动）。
+> **该 tag 已删除并在维护分支 [`release/v0.1.0`](https://github.com/kovey/dsh-memory/tree/release/v0.1.0)
+> 上重建**（提交 `1c9a8c1`：内容与 0.1.0 一致，仅含该修复，版本号仍为 0.1.0），
+> 现已验证可安装、可启动。需要 v0.1.1 的新增修复请用 v0.1.1。
 
 首个发布版本。分层记忆（5+1 层）+ 严格的项目/全局双库隔离 + 任务前自动召回 + 任务后持续学习。
 

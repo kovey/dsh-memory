@@ -2,7 +2,7 @@
 
 DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / 全局记忆** + **任务前自动召回** + **任务后持续学习**。
 
-当前版本 **v0.1.1**（变更见 [`CHANGELOG.md`](CHANGELOG.md)；v0.1.0 因 patch 缩进错误不可安装）。
+当前版本 **v0.1.1**（变更见 [`CHANGELOG.md`](CHANGELOG.md)；v0.1.0 曾因 patch 缩进错误不可安装，已删除并在 `release/v0.1.0` 分支重建）。
 
 设计文档（唯一决策存档）：[`docs/DESIGN.md`](docs/DESIGN.md) ｜
 发布与安装：[`docs/RELEASE.md`](docs/RELEASE.md) ｜

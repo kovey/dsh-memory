@@ -2,7 +2,7 @@
 
 DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / 全局记忆** + **任务前自动召回** + **任务后持续学习**。
 
-当前版本 **v0.1.0**（变更见 [`CHANGELOG.md`](CHANGELOG.md)）。
+当前版本 **v0.1.1**（变更见 [`CHANGELOG.md`](CHANGELOG.md)；v0.1.0 因 patch 缩进错误不可安装）。
 
 设计文档（唯一决策存档）：[`docs/DESIGN.md`](docs/DESIGN.md) ｜
 发布与安装：[`docs/RELEASE.md`](docs/RELEASE.md) ｜
@@ -18,7 +18,7 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 
 ```bash
 # 安装（发布版：GitHub tag —— 打成 tag 后固定版本，推荐）
-dsh plugin --profile nvim-tui add github:kovey/dsh-memory#v0.1.0
+dsh plugin --profile nvim-tui add github:kovey/dsh-memory#v0.1.1
 # 尚未打 tag 时先用分支体验（不固定版本）：
 #   dsh plugin --profile nvim-tui add github:kovey/dsh-memory#main
 # 然后把 "dsh-memory" 追加到 ~/.dsh/profiles/nvim-tui/package.json 的 dsh.profile.bundles
@@ -313,7 +313,7 @@ tail -20 ~/.dsh/memory-plugin.log
 ```bash
 npm install           # peer @deepseek-ai/* 已在 devDependencies（干净 clone 也能构建）
 npm run build         # tsc → dist/（dist/ 入库，github: 安装免构建）
-npm test              # 构建后 node --test（Node 原生 TS 执行测试；v0.1.0 为 176 例）
+npm test              # 构建后 node --test（Node 原生 TS 执行测试；v0.1.1 为 178 例）
 npm run typecheck     # 只做类型检查
 ```
 

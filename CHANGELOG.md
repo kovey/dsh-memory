@@ -3,7 +3,34 @@
 本文件记录 dsh-memory 的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1] — 2026-09-17
+
+### Fixed
+
+- **发布阻断：`cordis.patch.yml` 缩进错误导致安装后无法启动**。新增配置项时注释块插错了层级，
+  `consolidate.usageRetentionDays` / `semantic` 掉到了 `insert:` 条目级（被 loader 静默忽略），
+  紧随其后的键缩进错位使 YAML 解析直接失败：
+
+  ```
+  dsh: failed to parse overlay …/cordis.patch.yml: YAMLException:
+       bad indentation of a mapping entry (38:21)
+  ```
+
+  即 `v0.1.0` **不可安装**（打 tag 后从 GitHub 安装时才发现，本地测试从不解析这个文件）。
+  现已修正结构并补齐此前丢失的 `sqlite.fallback` / `sqlite.maxOpenRoots` /
+  `prompt.indexSummary.profileBudgetTokens`。
+
+### Added
+
+- `test/patch.test.ts`：用真实 YAML 解析器校验随包发布的 `cordis.patch.yml`——
+  ① 能解析且结构正确（条目级只允许 `insert`/`config`，避免键掉层级被静默忽略）；
+  ② 声明的每个配置键都存在于解析后的配置中（拼写错误/放错区块当场失败）；
+  ③ 新旋钮确实随包发布。此类回归从此在 `npm test` 就会暴露，而不是等到安装时。
+
 ## [0.1.0] — 2026-09-14
+
+> ⚠️ 该 tag 的 `cordis.patch.yml` 有缩进错误，**不可安装**（`dsh plugin add github:kovey/dsh-memory#v0.1.0`
+> 会在启动时解析失败）。请使用 v0.1.1 或更新版本。
 
 首个发布版本。分层记忆（5+1 层）+ 严格的项目/全局双库隔离 + 任务前自动召回 + 任务后持续学习。
 
@@ -75,4 +102,5 @@
 - 库中已存在的历史重复 id 不会自动删除（import 只保证不再新增），需要显式 dedupe。
 - `tui` 等生产面只消费发布版本（tag/NPM），不走本地 link。
 
+[0.1.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kovey/dsh-memory/releases/tag/v0.1.0

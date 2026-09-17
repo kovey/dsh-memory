@@ -2,11 +2,14 @@
 
 DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / 全局记忆** + **任务前自动召回** + **任务后持续学习**。
 
+当前版本 **v0.1.0**（变更见 [`CHANGELOG.md`](CHANGELOG.md)）。
+
 设计文档（唯一决策存档）：[`docs/DESIGN.md`](docs/DESIGN.md) ｜
 发布与安装：[`docs/RELEASE.md`](docs/RELEASE.md) ｜
 代码审查记录：[`docs/REVIEW-2026-09-14.md`](docs/REVIEW-2026-09-14.md)
 
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
+- 运行环境：Node `^22.19 || >=24`（依赖内置 `node:sqlite`；构建需要 TypeScript）
 - 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
 - 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
 - 当前进度：**M0–M5 全部完成 + 语义检索 + 蒸馏后台运行器**（见设计文档 §11、§14）
@@ -309,8 +312,9 @@ tail -20 ~/.dsh/memory-plugin.log
 
 ```bash
 npm install           # peer @deepseek-ai/* 已在 devDependencies（干净 clone 也能构建）
-npm run build         # tsc → dist/
-npm test              # 构建后 node --test（Node 原生 TS 执行测试）
+npm run build         # tsc → dist/（dist/ 入库，github: 安装免构建）
+npm test              # 构建后 node --test（Node 原生 TS 执行测试；v0.1.0 为 176 例）
+npm run typecheck     # 只做类型检查
 ```
 
 测试全部在仓库内 `.tmp-tests/` 运行，并把全局记忆根重定向到临时目录，**不会触碰
@@ -355,6 +359,7 @@ memory: consolidation (first-run) on global — archived 0, decayed 0, conflicts
 | [`docs/DESIGN.md`](docs/DESIGN.md) | 设计存档：分层模型、双库隔离、钩子方案、里程碑与实机验证记录 |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | dev 链路 vs 发布链路、发布前检查、装进 profile 的步骤与回退 |
 | [`docs/REVIEW-2026-09-14.md`](docs/REVIEW-2026-09-14.md) | 一次全面代码审查：59 条发现、修复清单与验证方式 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更（Keep a Changelog 格式） |
 
 ## 日志
 

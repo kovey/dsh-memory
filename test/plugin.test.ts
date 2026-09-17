@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { apply, inject, name } from '../dist/index.js'
-import { fakeRepo, tempDir } from './helpers.ts'
+import { fakeRepo, lessonDoc, tempDir } from './helpers.ts'
 
 interface FakeToolDefinition {
     name: string
@@ -215,4 +215,55 @@ test('subagent sessions are refused by every write-class tool, including memory_
     // top-level session (it reaches the store instead of the refusal)
     const allowed = await run('memory_reindex', { rebuild: true }, topLevel)
     assert.doesNotMatch(allowed, /refused/)
+})
+
+test('a session cannot pull unbounded memory into its context', async () => {
+    // Every read tool is capped on its own; this is the bound on the *total* a
+    // model can accumulate by calling them in a loop.
+    const logFile = path.join(tempDir('plugin-budget-log'), 'memory-plugin.log')
+    const { ctx, tools } = fakeContext()
+    apply(ctx as never, {
+        logFile,
+        memoryHome: tempDir('plugin-budget-home'),
+        recall: { sessionToolBudgetTokens: 400, budgetTokens: 120, maxItems: 2 },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const repo = fakeRepo('plugin-budget-repo')
+    fs.mkdirSync(path.join(repo, '.dsh', 'memory', 'lessons'), { recursive: true })
+    for (let i = 0; i < 8; i += 1) {
+        fs.writeFileSync(
+            path.join(repo, '.dsh', 'memory', 'lessons', `budget-lesson-${i}.md`),
+            lessonDoc({ title: `budget lesson ${i}`, body: `触发场景：第 ${i} 条。正确做法：按预算取用。`, confidence: 0.9 }),
+        )
+    }
+    const agent = { session: { id: 'budget-session', header: { cwd: repo } } }
+    const call = async (name: string, args: unknown): Promise<string> => {
+        const definition = tools.get(name)
+        assert.ok(definition, `${name} must be registered`)
+        return String(await definition.execute(args, { agent }))
+    }
+    let refused = 0
+    let answers = 0
+    for (let i = 0; i < 12; i += 1) {
+        const output = await call('memory_search', { query: `budget lesson ${i}`, limit: 5 })
+        if (output.startsWith('refused:')) refused += 1
+        else answers += 1
+    }
+    assert.ok(answers > 0, 'the first calls are served normally')
+    assert.ok(refused > 0, 'the session eventually stops being served')
+    // keep reading until the remaining budget cannot cover one more record
+    let refusal: string | undefined
+    for (let i = 0; i < 24 && refusal === undefined; i += 1) {
+        const output = await call('memory_get', { id: `budget-lesson-${i % 8}` })
+        if (output.startsWith('refused:')) refusal = output
+    }
+    assert.ok(refusal !== undefined, 'a read is eventually refused')
+    assert.match(refusal as string, /refused: this session has already pulled/)
+    assert.match(refusal as string, /sessionToolBudgetTokens/, 'the refusal says how to change it')
+
+    // a different session starts with a fresh budget
+    const other = await tools
+        .get('memory_search')
+        ?.execute({ query: 'budget lesson 1', limit: 3 }, { agent: { session: { id: 'other-session', header: { cwd: repo } } } })
+    assert.doesNotMatch(String(other), /^refused:/, 'a new session is not charged for the previous one')
 })

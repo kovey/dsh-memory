@@ -37,6 +37,19 @@ export function recordRecalls(db: DatabaseSync, rows: readonly UsageRow[], at = 
  * weight, failure lowers it (the negative feedback of DESIGN §7).
  */
 /**
+ * Delete recall bookkeeping older than the retention window.
+ *
+ * The *aggregate* feedback (success/fail-after-recall counters) is already folded
+ * into the records, so an old row is audit trail, not state. Rows without an
+ * outcome are kept: those are the ones attribution can still resolve.
+ */
+export function pruneUsage(db: DatabaseSync, retentionDays: number, now = new Date()): number {
+    const cutoff = new Date(now.getTime() - retentionDays * 86_400_000).toISOString()
+    const result = db.prepare('DELETE FROM usage WHERE injected_at < ? AND outcome IS NOT NULL').run(cutoff)
+    return typeof result.changes === 'number' ? result.changes : 0
+}
+
+/**
  * Attribute an outcome and apply DESIGN §7's feedback to the records involved.
  *
  * A memory that keeps being recalled into failing turns must lose confidence —

@@ -13,6 +13,7 @@ export class SessionState {
     turns = new Map();
     startedAt = new Map();
     overrides = new Map();
+    toolTokens = new Map();
     order = [];
     constructor(maxSessions = 256) {
         this.maxSessions = maxSessions;
@@ -46,6 +47,27 @@ export class SessionState {
     }
     injectedCount(sessionId) {
         return this.injected.get(sessionId)?.size ?? 0;
+    }
+    /**
+     * Charge tool output against this session's cumulative budget.
+     *
+     * Each read tool is individually bounded, but a model can call them in a
+     * loop; without a session total it could fill its own context one capped
+     * answer at a time. Returns how much is left after this charge (never
+     * negative), and whether the charge fit.
+     */
+    chargeToolBudget(sessionId, tokens, budget) {
+        const used = this.toolTokens.get(sessionId) ?? 0;
+        this.touch(sessionId);
+        if (budget <= 0)
+            return { allowed: true, used, remaining: Number.POSITIVE_INFINITY };
+        if (used + tokens > budget)
+            return { allowed: false, used, remaining: Math.max(0, budget - used) };
+        this.toolTokens.set(sessionId, used + tokens);
+        return { allowed: true, used: used + tokens, remaining: Math.max(0, budget - used - tokens) };
+    }
+    toolTokensUsed(sessionId) {
+        return this.toolTokens.get(sessionId) ?? 0;
     }
     /** Session-scoped overrides set by `memory_config` (never persisted). */
     setOverride(sessionId, patch) {
@@ -102,6 +124,7 @@ export class SessionState {
         this.turns.delete(sessionId);
         this.startedAt.delete(sessionId);
         this.overrides.delete(sessionId);
+        this.toolTokens.delete(sessionId);
         const index = this.order.indexOf(sessionId);
         if (index !== -1)
             this.order.splice(index, 1);

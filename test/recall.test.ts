@@ -17,11 +17,11 @@ import { buildQuery, messageText, isMemoryMessage } from '../dist/recall/query.j
 import { assertDraftScope, ScopeViolationError } from '../dist/store/guard.js'
 import { applyDraft } from '../dist/learn/gate.js'
 import { SessionState } from '../dist/recall/session-state.js'
-import { recallStats } from '../dist/recall/usage.js'
+import { pruneUsage, recallStats } from '../dist/recall/usage.js'
 import { ScopeResolver } from '../dist/scope/resolver.js'
 import { countRecords } from '../dist/store/sqlite/records.js'
 import { loadSqliteModule } from '../dist/store/sqlite/db.js'
-import { materialize, upsertRecord } from '../dist/store/sqlite/records.js'
+import { listRecords, materialize, upsertRecord } from '../dist/store/sqlite/records.js'
 import { StoreRegistry } from '../dist/store/store.js'
 import { fakeRepo, lessonDoc, memoryFixture, useGlobalMemoryHome } from './helpers.ts'
 
@@ -372,4 +372,43 @@ test('ranking uses the recall history, and repetition, as separate signals', () 
     )
     assert.equal(scored[0]?.record.id, 'well-used', 'the recalled-and-surviving record ranks first')
     assert.equal(recallBoost(99), 1.25, 'the factor is capped (diminishing returns)')
+})
+
+test('session tool budget accounting is monotonic and per session', () => {
+    const state = new SessionState()
+    assert.deepEqual(state.chargeToolBudget('s1', 100, 250), { allowed: true, used: 100, remaining: 150 })
+    assert.deepEqual(state.chargeToolBudget('s1', 100, 250), { allowed: true, used: 200, remaining: 50 })
+    const refused = state.chargeToolBudget('s1', 100, 250)
+    assert.equal(refused.allowed, false)
+    assert.equal(refused.used, 200, 'a refused charge is not applied')
+    assert.equal(refused.remaining, 50)
+    assert.equal(state.toolTokensUsed('s1'), 200)
+    // another session is unaffected, and a zero budget means "no cap"
+    assert.deepEqual(state.chargeToolBudget('s2', 100, 250), { allowed: true, used: 100, remaining: 150 })
+    assert.equal(state.chargeToolBudget('s2', 10_000, 250).allowed, false, 'a single huge answer cannot fit either')
+    assert.equal(state.chargeToolBudget('s3', 1_000_000, 0).allowed, true, 'budget 0 means no cap')
+})
+
+test('usage retention drops settled rows and keeps unresolved ones', async (t) => {
+    const h = await harness(t)
+    const store = h.registry.open(h.resolver.resolve({ agent: h.agent }))
+    assert.ok(store)
+    const old = new Date(Date.now() - 400 * 86_400_000).toISOString()
+    const fresh = new Date().toISOString()
+    const insert = store.db.prepare(
+        'INSERT INTO usage (record_id, session_id, turn, step, score, injected_at, outcome) VALUES (?,?,?,?,?,?,?)',
+    )
+    const record = listRecords(store.db)[0]
+    assert.ok(record)
+    insert.run(record.id, 's-old', 1, 1, 0.9, old, 'success')
+    insert.run(record.id, 's-old', 2, 1, 0.9, old, null)
+    insert.run(record.id, 's-new', 1, 1, 0.9, fresh, 'failure')
+
+    assert.equal(pruneUsage(store.db, 180), 1, 'only the settled, expired row goes')
+    const left = store.db.prepare('SELECT session_id, outcome FROM usage ORDER BY session_id, turn').all()
+    assert.deepEqual(
+        left.map((row) => `${row['session_id']}:${String(row['outcome'])}`),
+        ['s-new:failure', 's-old:null'],
+        'an unattributed row is still needed for attribution',
+    )
 })

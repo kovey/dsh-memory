@@ -18,6 +18,14 @@ export declare function recordRecalls(db: DatabaseSync, rows: readonly UsageRow[
  * weight, failure lowers it (the negative feedback of DESIGN §7).
  */
 /**
+ * Delete recall bookkeeping older than the retention window.
+ *
+ * The *aggregate* feedback (success/fail-after-recall counters) is already folded
+ * into the records, so an old row is audit trail, not state. Rows without an
+ * outcome are kept: those are the ones attribution can still resolve.
+ */
+export declare function pruneUsage(db: DatabaseSync, retentionDays: number, now?: Date): number;
+/**
  * Attribute an outcome and apply DESIGN §7's feedback to the records involved.
  *
  * A memory that keeps being recalled into failing turns must lose confidence —

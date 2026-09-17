@@ -316,6 +316,38 @@ npm test              # 构建后 node --test（Node 原生 TS 执行测试）
 测试全部在仓库内 `.tmp-tests/` 运行，并把全局记忆根重定向到临时目录，**不会触碰
 真实的 `~/.dsh/memory`**。
 
+## 记忆会膨胀吗？
+
+**上下文不会——它是 O(1) 的；会增长的是存储，且有保留策略。**
+
+进上下文的三条路径都有硬上限，与库大小无关：
+
+| 路径 | 上限 | 说明 |
+|---|---|---|
+| ① 常驻段（每次装配） | 协议 240 + 索引 150 + L5 200 = **≤590 tok** | 索引只放条数与最多 12 条标题 |
+| ② 自动召回（每轮） | **600 tok / ≤5 条**，同会话幂等去重 | 不做"越多越全" |
+| ③ 工具按需 | 单次：`memory_recall` ≤4000 tok、`maxItems` ≤20；**会话累计 `recall.sessionToolBudgetTokens`（默认 20k）** | 防止模型循环调用把上下文一点点填满 |
+| L1 情节 / signals | **从不注入** | 只在工具显式读取时出现 |
+
+实测（真实日志 55 次注入）：最小 93 / 中位 234 / **最大 592 tok**。库从 27 条涨到 27,000 条，注入量不变。
+
+存储侧的增长与保留策略：
+
+| 增长项 | 策略 |
+|---|---|
+| `signals` + 情节文件 | 保留 90 天（`episodic.retentionDays`）；**未蒸馏的欠账不会被清**（14 天恢复窗口） |
+| `usage`（召回记账） | 保留 180 天（`consolidate.usageRetentionDays`）；聚合信号已折算进记录，未归因的行永不删 |
+| 旧 embedding 模型向量 | 换模型后保留 30 天宽限（`semantic.foreignModelGraceDays`），之后清除 |
+| 记录（lessons） | **只增不减**（归档≠删除，设计取舍）；速率有界：门控合并 + 衰减 + 蒸馏日预算 200k tok / 每会话 3 次 |
+| `tasks` / `distill` / `proposals` | 每会话或每次尝试一行，量级极小 |
+
+清理动作挂在**惰性巩固**里（每 7 天或每 5 个任务一次），日志会打印本次清理量：
+
+```
+memory: consolidation (first-run) on global — archived 0, decayed 0, conflicts 0, proposals 1,
+        pruned 0 episode file(s) / 0 signal / 0 usage / 0 vector row(s)
+```
+
 ## 文档
 
 | 文档 | 内容 |

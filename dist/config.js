@@ -12,6 +12,7 @@ export const DEFAULT_CONFIG = {
         maxItems: 5,
         minScore: 0.35,
         layers: ['project', 'global', 'profile'],
+        sessionToolBudgetTokens: 20_000,
     },
     learn: {
         collectSignals: true,
@@ -33,7 +34,7 @@ export const DEFAULT_CONFIG = {
         recoverBudgetMs: 20_000,
     },
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
-    consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true },
+    consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true, usageRetentionDays: 180 },
     git: { enabled: true, autoCommit: 'task-end', checkpointMinutes: 30, autoPush: false },
     sqlite: { journalMode: 'wal', busyTimeoutMs: 5_000, fallback: 'none', maxOpenRoots: 4 },
     semantic: {
@@ -46,6 +47,7 @@ export const DEFAULT_CONFIG = {
         apiKey: '',
         timeoutMs: 1_500,
         budgetMs: 8_000,
+        foreignModelGraceDays: 30,
         weight: 0.5,
         minLexicalHits: 3,
         maxRecordsPerRun: 200,
@@ -121,6 +123,7 @@ export function resolveConfig(raw) {
             budgetTokens: num(recall['budgetTokens'], d.recall.budgetTokens, 0, 20_000),
             maxItems: num(recall['maxItems'], d.recall.maxItems, 0, 100),
             minScore: num(recall['minScore'], d.recall.minScore, 0, 1),
+            sessionToolBudgetTokens: num(recall['sessionToolBudgetTokens'], d.recall.sessionToolBudgetTokens, 0, 1_000_000),
             layers: layers(recall['layers'], d.recall.layers),
         },
         learn: {
@@ -151,6 +154,7 @@ export function resolveConfig(raw) {
             everyNTasks: num(consolidate['everyNTasks'], d.consolidate.everyNTasks, 1, 1_000),
             everyDays: num(consolidate['everyDays'], d.consolidate.everyDays, 1, 365),
             archiveInsteadOfDelete: bool(consolidate['archiveInsteadOfDelete'], d.consolidate.archiveInsteadOfDelete),
+            usageRetentionDays: num(consolidate['usageRetentionDays'], d.consolidate.usageRetentionDays, 7, 3_650),
         },
         git: {
             enabled: bool(git['enabled'], d.git.enabled),
@@ -179,6 +183,7 @@ export function resolveConfig(raw) {
             minSimilarity: num(semantic['minSimilarity'], d.semantic.minSimilarity, 0, 1),
             maxAdditions: num(semantic['maxAdditions'], d.semantic.maxAdditions, 0, 50),
             budgetMs: num(semantic['budgetMs'], d.semantic.budgetMs, 200, 120_000),
+            foreignModelGraceDays: num(semantic['foreignModelGraceDays'], d.semantic.foreignModelGraceDays, 1, 3_650),
         },
     };
 }

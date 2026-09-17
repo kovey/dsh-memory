@@ -39,6 +39,13 @@ export interface MemoryConfig {
         maxItems: number;
         minScore: number;
         layers: Layer[];
+        /**
+         * Cumulative budget for memory *tool* output in one session.
+         *
+         * Every read tool is individually capped, but a model can call them in a
+         * loop and fill its own context one capped answer at a time.
+         */
+        sessionToolBudgetTokens: number;
     };
     learn: {
         collectSignals: boolean;
@@ -90,6 +97,8 @@ export interface MemoryConfig {
         captureUserText: 'redacted' | 'full' | 'none';
     };
     consolidate: {
+        /** Days of recall bookkeeping kept (aggregates already live on records). */
+        usageRetentionDays: number;
         enabled: boolean;
         everyNTasks: number;
         everyDays: number;
@@ -126,6 +135,8 @@ export interface MemoryConfig {
         timeoutMs: number;
         /** Wall-clock budget for one embedding run across all batches. */
         budgetMs: number;
+        /** Days a *previous* model's vectors are kept before being dropped. */
+        foreignModelGraceDays: number;
         /** Blend weight: 0 = lexical only, 1 = semantic only. */
         weight: number;
         /** Only embed the query when lexical recall returned fewer hits than this. */

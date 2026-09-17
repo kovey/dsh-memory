@@ -18,6 +18,7 @@ export declare class SessionState {
     private readonly turns;
     private readonly startedAt;
     private readonly overrides;
+    private readonly toolTokens;
     private readonly order;
     constructor(maxSessions?: number);
     private touch;
@@ -25,6 +26,20 @@ export declare class SessionState {
     hasInjected(sessionId: string, recordId: string): boolean;
     markInjected(sessionId: string, recordIds: readonly string[]): void;
     injectedCount(sessionId: string): number;
+    /**
+     * Charge tool output against this session's cumulative budget.
+     *
+     * Each read tool is individually bounded, but a model can call them in a
+     * loop; without a session total it could fill its own context one capped
+     * answer at a time. Returns how much is left after this charge (never
+     * negative), and whether the charge fit.
+     */
+    chargeToolBudget(sessionId: string, tokens: number, budget: number): {
+        allowed: boolean;
+        used: number;
+        remaining: number;
+    };
+    toolTokensUsed(sessionId: string): number;
     /** Session-scoped overrides set by `memory_config` (never persisted). */
     setOverride(sessionId: string, patch: {
         autoRecall?: boolean;

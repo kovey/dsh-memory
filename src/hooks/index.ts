@@ -14,6 +14,8 @@ import { AutoCommitter } from '../sync/autocommit.js'
 import { ensureRepo } from '../sync/git.js'
 import { consolidate } from '../learn/consolidate.js'
 import { pruneEpisodes, pruneSignals } from '../learn/episodic.js'
+import { pruneForeignModels, pruneVectors } from '../recall/semantic.js'
+import { pruneUsage } from '../recall/usage.js'
 import { buildLedgerRow, recordSessionMetric, sessionStats, withLearningCounters } from '../learn/task-metrics.js'
 import { consolidationDue } from '../learn/decay.js'
 import { TurnLedger } from '../learn/ledger.js'
@@ -218,9 +220,19 @@ function runLazyConsolidation(deps: HookDeps, scope: MemoryScope): void {
         // no caller).
         const prunedFiles = pruneEpisodes(store.scope, deps.config.episodic.retentionDays)
         const prunedRows = pruneSignals(store.db, deps.config.episodic.retentionDays)
+        // Derived / audit data that would otherwise grow forever.
+        const prunedUsage = pruneUsage(store.db, deps.config.consolidate.usageRetentionDays)
+        let prunedVectors = pruneVectors(store.db, deps.config.semantic.model)
+        if (deps.config.semantic.enabled && deps.config.semantic.model !== '') {
+            prunedVectors += pruneForeignModels(
+                store.db,
+                deps.config.semantic.model,
+                deps.config.semantic.foreignModelGraceDays,
+            )
+        }
         log(
             'info',
-            `memory: consolidation (${due.reason}) on ${report.scope} — archived ${report.archived}, decayed ${report.decayed}, conflicts ${report.conflictsFound}, proposals ${report.proposals.length}, pruned ${prunedFiles} episode file(s) / ${prunedRows} signal row(s)`,
+            `memory: consolidation (${due.reason}) on ${report.scope} — archived ${report.archived}, decayed ${report.decayed}, conflicts ${report.conflictsFound}, proposals ${report.proposals.length}, pruned ${prunedFiles} episode file(s) / ${prunedRows} signal / ${prunedUsage} usage / ${prunedVectors} vector row(s)`,
         )
     } catch (error) {
         log('warn', 'memory: lazy consolidation failed:', error)

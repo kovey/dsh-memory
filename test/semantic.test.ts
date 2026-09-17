@@ -24,6 +24,7 @@ import {
     ensureEmbeddings,
     indexStats,
     loadVectors,
+    pruneForeignModels,
     pruneVectors,
     recordHash,
     saveVectors,
@@ -519,4 +520,22 @@ test('maxAdditions caps the whole query, not each root', async (t) => {
         { agent: h.agent, terms: ['终端环境依赖'], text: '怎么在没有终端的环境装依赖', minScore: 0 },
     )
     assert.ok((outcome.semantic?.semanticOnly ?? 0) <= 1, `expected at most 1 addition across roots, got ${outcome.semantic?.semanticOnly}`)
+})
+
+test('vectors from a previous model are dropped after the grace window', async (t) => {
+    const h = await harness(t)
+    const now = new Date()
+    saveVectors(h.store.db, 'old-model', [{ recordId: 'a', vector: [1, 0], hash: 'h1' }], new Date(now.getTime() - 400 * 86_400_000).toISOString())
+    saveVectors(h.store.db, 'old-model', [{ recordId: 'b', vector: [1, 0], hash: 'h2' }], now.toISOString())
+    saveVectors(h.store.db, 'new-model', [{ recordId: 'a', vector: [1, 0, 0], hash: 'h3' }], now.toISOString())
+
+    assert.equal(pruneForeignModels(h.store.db, 'new-model', 30, now), 1, 'only the stale foreign row goes')
+    const left = h.store.db.prepare('SELECT model, record_id FROM embeddings ORDER BY model, record_id').all()
+    assert.deepEqual(
+        left.map((row) => `${row['model']}:${row['record_id']}`),
+        ['new-model:a', 'old-model:b'],
+        'the active model and the recent foreign row survive (switching back stays free)',
+    )
+    // an empty active model must not wipe everything
+    assert.equal(pruneForeignModels(h.store.db, '', 30, now), 0)
 })

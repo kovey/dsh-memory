@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { log } from '../log.js';
-import { rankRecords, normalizeRelevance } from '../recall/rank.js';
+import { estimateTokens, rankRecords, normalizeRelevance } from '../recall/rank.js';
 import { countRecords, extractTerms, getRecord, listRecords, rawSearch, upsertRecord } from '../store/sqlite/records.js';
 import { importLessons } from '../store/import.js';
 import { assertInsideScope } from '../store/guard.js';
@@ -53,6 +53,28 @@ export function registerTools(ctx, deps) {
     register(configTool(deps));
     register(importTool(deps));
     return { disposers, registered, failed };
+}
+/**
+ * Charge a read tool's output against the session's cumulative budget.
+ *
+ * Returns a refusal message when the budget is exhausted, or `undefined` when
+ * the output fits. Each tool is capped on its own, but a model can call them in
+ * a loop — this is the only bound on the *total* it can pull into its context.
+ */
+function chargeToolOutput(deps, agent, tool, text) {
+    const sessionId = sessionIdOf(agent);
+    if (sessionId === undefined)
+        return undefined;
+    const budget = deps.config.recall.sessionToolBudgetTokens;
+    const cost = estimateTokens(text);
+    const charge = deps.state.chargeToolBudget(sessionId, cost, budget);
+    if (charge.allowed)
+        return undefined;
+    log('info', `memory: ${tool} output refused — session tool budget exhausted (${charge.used}/${budget} tok, this answer would add ~${cost})`);
+    return [
+        `refused: this session has already pulled ${charge.used} of its ${budget} token budget for memory tool output (\`${tool}\` would add ~${cost}).`,
+        'The memory itself is fine — start a new session, or raise `recall.sessionToolBudgetTokens` in the profile patch if this is intentional.',
+    ].join('\n');
 }
 /** Which open stores a call should consult. */
 function targetStores(deps, agent, scope) {
@@ -114,7 +136,8 @@ function recallTool(deps) {
             if (outcome.hits.length === 0) {
                 return `no memory matched "${args.task}" (considered ${outcome.considered} record(s) in ${outcome.scopes.map((scope) => scope.kind).join(' + ') || 'no scope'})`;
             }
-            return renderRecallPack(outcome.hits, outcome.dropped);
+            const pack = renderRecallPack(outcome.hits, outcome.dropped);
+            return chargeToolOutput(deps, agent, 'memory_recall', pack) ?? pack;
         },
     });
 }
@@ -172,7 +195,8 @@ function searchTool(deps) {
             });
             lines.push('');
             lines.push('Use memory_get(id) for the full text. Records with confidence < 0.7 are hints, not instructions.');
-            return lines.join('\n');
+            const report = lines.join('\n');
+            return chargeToolOutput(deps, agent, 'memory_search', report) ?? report;
         },
     });
 }
@@ -196,7 +220,7 @@ function getTool(deps) {
                 const record = getRecord(store.db, args.id);
                 if (record === undefined)
                     continue;
-                return [
+                const report = [
                     `# ${record.title}`,
                     `id: ${record.id} · scope: ${store.scope.kind}${store.scope.repo !== undefined ? ` (${store.scope.repo})` : ''} · layer: ${record.layer}`,
                     `confidence: ${record.confidence.toFixed(2)} · seen: ${record.timesSeen} · recalled: ${record.timesRecalled} · expires: ${record.expiresAt ?? 'permanent'}`,
@@ -208,6 +232,7 @@ function getTool(deps) {
                 ]
                     .filter((line) => line !== '')
                     .join('\n');
+                return chargeToolOutput(deps, agent, 'memory_get', report) ?? report;
             }
             return `memory record "${args.id}" not found in ${stores.map((s) => `${s.scope.kind}(${s.scope.root})`).join(', ') || 'any open store'}`;
         },

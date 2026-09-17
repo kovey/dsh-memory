@@ -81,6 +81,14 @@ export interface IndexStats {
 export declare function indexStats(db: DatabaseSync, model: string): IndexStats;
 /** Drop vectors of records that no longer exist. */
 export declare function pruneVectors(db: DatabaseSync, model: string): number;
+/**
+ * Drop vectors that belong to a *different* embedding model than the active one.
+ *
+ * Vectors are derived data, but a model switch left the old rows behind forever:
+ * they are never read (lookups filter by model) and only cost space. Keeping a
+ * grace window means switching back within it costs nothing.
+ */
+export declare function pruneForeignModels(db: DatabaseSync, keepModel: string, olderThanDays?: number, now?: Date): number;
 /** Text fed to the embedding model for one record. */
 export declare function embeddingText(record: MemoryRecord): string;
 export interface EnsureOptions {

@@ -277,6 +277,20 @@ export function pruneVectors(db: DatabaseSync, model: string): number {
     return typeof result.changes === 'number' ? result.changes : 0
 }
 
+/**
+ * Drop vectors that belong to a *different* embedding model than the active one.
+ *
+ * Vectors are derived data, but a model switch left the old rows behind forever:
+ * they are never read (lookups filter by model) and only cost space. Keeping a
+ * grace window means switching back within it costs nothing.
+ */
+export function pruneForeignModels(db: DatabaseSync, keepModel: string, olderThanDays = 30, now = new Date()): number {
+    if (keepModel === '') return 0
+    const cutoff = new Date(now.getTime() - olderThanDays * 86_400_000).toISOString()
+    const result = db.prepare('DELETE FROM embeddings WHERE model <> ? AND at < ?').run(keepModel, cutoff)
+    return typeof result.changes === 'number' ? result.changes : 0
+}
+
 // ---- indexing and search ----------------------------------------------------
 
 /** Text fed to the embedding model for one record. */

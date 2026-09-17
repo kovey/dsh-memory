@@ -32,6 +32,9 @@
             budgetTokens: 150
             maxTitles: 12
         recall:
+        # 会话级工具输出累计预算：单次工具都有上限，但模型可循环调用一点点填满上下文；
+        # 累计到上限后 memory_recall/search/get 会明确拒绝并告知如何调整
+        sessionToolBudgetTokens: 20000
           autoInject: true
           budgetTokens: 600
           maxItems: 5
@@ -89,6 +92,8 @@
           autoPush: false
 
         sqlite:
+        # 同时保持打开的记忆根数量（LRU 释放，会话结束触发）
+        maxOpenRoots: 4
           journalMode: wal
           busyTimeoutMs: 5000
 
@@ -96,9 +101,10 @@
         # feature that can spend money outside the bounded distillation path.
         # When enabled it blends an OpenAI-compatible /embeddings endpoint into
         # the lexical ranking, and only for queries lexical recall found thin.
-        # 保留策略（惰性巩固时执行）：召回记账保留 180 天（聚合信号已折算进记录），
-      # 换 embedding 模型后旧向量保留 30 天宽限。
+        # 保留策略（惰性巩固时执行，日志会打印本次清理量）
       consolidate:
+        # 召回记账保留天数：聚合信号已折算进记录的 success/fail 计数，旧行只是审计痕迹；
+        # 未归因的行永不删（归因还需要它们）
         usageRetentionDays: 180
       semantic:
           enabled: false
@@ -115,3 +121,5 @@
           maxRecordsPerRun: 200  # incremental backfill per recall pass
           minSimilarity: 0.35    # floor for a semantic-only hit
           maxAdditions: 2        # 每次最多补几条"纯语义"命中（实测不设上限会让注入 token 翻倍）
+          # 换 embedding 模型后，旧模型的向量保留多少天（宽限期内换回旧模型仍免费）
+          foreignModelGraceDays: 30

@@ -9,13 +9,14 @@
  * Guarantees: threshold floor, token budget, per-session idempotence, and a
  * total try/catch (a recall failure must never disturb the step).
  */
+import '../message-source.js';
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { log } from '../log.js';
 import { ScopeResolver } from '../scope/resolver.js';
 import { sessionIdOf } from '../scope/resolver.js';
 import { recordRecalls } from '../recall/usage.js';
 import { recall, renderRecallPack } from '../recall/engine.js';
-import { buildQuery, isMemoryMessage, MEMORY_PLUGIN_ID } from '../recall/query.js';
+import { buildQuery, isMemoryMessage, MEMORY_SOURCE_KIND } from '../recall/query.js';
 import { detectCorrection } from '../learn/signals.js';
 /** Build the pre-step middleware. */
 export function createPreStepHook(deps) {
@@ -73,8 +74,7 @@ async function injectRecall(deps, payload, decision) {
     const message = createUserMessage({
         content: [{ type: 'text', text }],
         source: {
-            kind: 'plugin',
-            plugin: MEMORY_PLUGIN_ID,
+            kind: MEMORY_SOURCE_KIND,
             form: 'notice',
             summary: `记忆召回：${outcome.hits.length} 条`,
         },

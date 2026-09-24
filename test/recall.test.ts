@@ -91,12 +91,22 @@ test('buildQuery skips plugin-injected messages and extracts terms', () => {
     const query = buildQuery([
         { content: [{ type: 'text', text: 'pnpm install fails in the sandbox' }] },
         { content: [{ type: 'text', text: 'ignore me' }], source: { kind: 'plugin', plugin: 'dsh-memory' } },
+        { content: [{ type: 'text', text: 'ignore me too' }], source: { kind: 'dsh-memory' } },
     ])
     assert.equal(query.sources, 1)
     assert.ok(query.terms.includes('pnpm'))
     assert.ok(query.terms.includes('sandbox'))
     assert.ok(!query.terms.includes('ignore'))
-    assert.equal(isMemoryMessage({ source: { plugin: 'dsh-memory' } }), true)
+    assert.ok(!query.terms.includes('too'))
+    // The predicate must recognise BOTH producer shapes: the legacy
+    // `{kind:'plugin', plugin}` (sessions written before the 0.1.7 migration)
+    // and the current `{kind:'dsh-memory'}`. A shape-only-`plugin` record with
+    // no `kind` is NOT one of ours (nothing emits that), so it must be false.
+    assert.equal(isMemoryMessage({ source: { kind: 'dsh-memory' } }), true)
+    assert.equal(isMemoryMessage({ source: { kind: 'plugin', plugin: 'dsh-memory' } }), true)
+    assert.equal(isMemoryMessage({ source: { plugin: 'dsh-memory' } }), false)
+    assert.equal(isMemoryMessage({ source: { kind: 'plugin', plugin: 'someone-else' } }), false)
+    assert.equal(isMemoryMessage({ source: { kind: 'user' } }), false)
     assert.equal(messageText({ content: [{ type: 'text', text: 'a' }, { type: 'image' }] }), 'a')
 })
 

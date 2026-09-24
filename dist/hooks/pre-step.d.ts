@@ -1,3 +1,15 @@
+/**
+ * `agent/pre-step` recall hook (DESIGN §4, §6).
+ *
+ * Runs the zero-LLM half of the learning flywheel: on the first step of a turn
+ * it searches project + global memory for the incoming task and injects what it
+ * finds as a plugin-sourced user message — a *logged* channel, so what the model
+ * saw is exactly what the session log records.
+ *
+ * Guarantees: threshold floor, token budget, per-session idempotence, and a
+ * total try/catch (a recall failure must never disturb the step).
+ */
+import '../message-source.js';
 import type { UserMessage } from '@deepseek-ai/dsh-llm';
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent';
 import type { MemoryConfig } from '../config.js';

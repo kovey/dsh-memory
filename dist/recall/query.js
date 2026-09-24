@@ -7,9 +7,28 @@
  */
 import { extractTerms } from '../store/sqlite/records.js';
 export const MEMORY_PLUGIN_ID = 'dsh-memory';
-/** True when this message was injected by the memory plugin itself. */
+/**
+ * Producer-owned source kind for messages this plugin injects.
+ *
+ * dsh 0.1.7 removed the shared catch-all `plugin` kind: `MessageSourceMap` is a
+ * merge-extensible sum type and each producer declares its own kind, while the
+ * session format v4 REJECTS `kind: 'plugin'` outright ("refuses retired plugin
+ * wrappers"). The declaration lives in `src/message-source.ts`.
+ */
+export const MEMORY_SOURCE_KIND = MEMORY_PLUGIN_ID;
+/** True when this message was injected by the memory plugin itself.
+ *
+ * Reads BOTH shapes on purpose: sessions written before the 0.1.7 migration
+ * carry `{kind:'plugin', plugin:'dsh-memory'}`, newer ones `{kind:'dsh-memory'}`.
+ * Missing the legacy shape would let an old recall pack be re-ingested as query
+ * text (self-reinforcing store). */
 export function isMemoryMessage(message) {
-    return message?.source?.plugin === MEMORY_PLUGIN_ID;
+    const src = message?.source;
+    if (src === undefined || src === null)
+        return false;
+    if (src.kind === MEMORY_SOURCE_KIND)
+        return true;
+    return src.kind === 'plugin' && src.plugin === MEMORY_PLUGIN_ID;
 }
 /** Concatenate the text blocks of one message. */
 export function messageText(message) {

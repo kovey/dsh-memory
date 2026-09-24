@@ -3,6 +3,41 @@
 本文件记录 dsh-memory 的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] — 2026-09-24
+
+> **破坏性变更**：本版适配 **dsh 0.1.7-rc.1**，插件与宿主必须**一起**升级。
+> 若你暂时不想动宿主，请留在 **v0.1.1**。升级步骤见 [UPGRADE.md](UPGRADE.md)。
+
+### Changed
+
+- **peer 锚点由区间改为精确版本。** 0.1.5 时期是 `^0.1.5-rc.1`（rc 之间可互换），
+  0.1.7 的 peer 改为精确值（如 `"@deepseek-ai/dsh-agent": "0.1.7-rc.1"`，无 `^`）。
+  本插件随之精确锚定到 `0.1.7-rc.1`（含 `cordis ~4.0.4` 与 0.1.7 新增的 peer 集），
+  **不能再跨 rc 混用**。
+- **注入消息改用生产者自有 kind。** dsh 0.1.7 移除了共享的 catch-all `plugin` kind，且
+  **session 格式 v4 直接拒绝** `kind: 'plugin'`（源码注释：*refuses retired plugin
+  wrappers*）。旧实现在 0.1.7 上会导致 `SessionFormatError: format v4 message requires a
+  producer-owned source kind`，表现为**记忆召回静默失效**（消息无法落盘）。
+  现按官方范例（`dsh-tools` 的 `tool-registry`）在 `src/message-source.ts` 做
+  module augmentation 声明自有 kind `'dsh-memory'`，并交叉 `ContextFormed` 以保留
+  `form: 'notice'` + `summary`（渲染层靠这对字段把召回包折叠成一行 notice）。
+- `agent/created` 处理器显式标注返回 `undefined`：0.1.7 把该处理器的返回类型收窄为
+  `Promise<undefined> | undefined`，裸 `void` 不再通过类型检查。
+
+### Fixed
+
+- **`isMemoryMessage` 同时识别两代消息形状**（`{kind:'dsh-memory'}` 与旧
+  `{kind:'plugin', plugin:'dsh-memory'}`）。迁移前的会话日志里存的是旧形状，
+  只认新形状会把**旧召回包当成查询文本再次摄入**，使记忆库**自我强化**。
+  为该语义补了断言：新形状 ✓、旧形状 ✓、仅 `plugin` 无 `kind` ✗、他人 kind ✗。
+
+### Added
+
+- `UPGRADE.md`：跨宿主版本的升级指引与版本轴速查表，并随包发布
+  （`package.json` 的 `files` 已加入）。
+- `src/message-source.ts`：自有 source kind 的声明模块。
+- 测试：`buildQuery` 的跳过逻辑补一条**新形状**用例，确保两代形状都不会被当作查询文本。
+
 ## [0.1.1] — 2026-09-17
 
 ### Fixed

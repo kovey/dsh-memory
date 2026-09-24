@@ -71,7 +71,11 @@ export function registerHooks(ctx: Context, deps: HookDeps): HookHandle {
     // ① prompt sections: protocol (global) + index summary (per agent).
     disposers.push(...registerProtocolSection(ctx, deps))
 
-    ctx.on('agent/created', (payload: { agent?: AgentLike & { ctx?: Context } }) => {
+    // NOTE: dsh 0.1.7 narrows this handler's return to
+    // `Promise<undefined> | undefined`; a bare `void` no longer type-checks
+    // (nvim-tui is unaffected only because it does not subscribe to this
+    // event). Annotate `undefined` explicitly so both versions accept it.
+    ctx.on('agent/created', (payload: { agent?: AgentLike & { ctx?: Context } }): undefined => {
         try {
             const agent = payload?.agent
             if (agent === undefined) return

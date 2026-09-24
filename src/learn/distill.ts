@@ -11,6 +11,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { BlockAssembler, ReasoningEffortId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { GenerateOptions } from '@deepseek-ai/dsh-llm'
 import type { DatabaseSync } from 'node:sqlite'
+import { MEMORY_SOURCE_KIND } from '../recall/query.js'
 import type { MemoryConfig } from '../config.js'
 import { log } from '../log.js'
 import { estimateTokens } from '../recall/rank.js'
@@ -198,7 +199,7 @@ export async function distillTurn(deps: DistillDeps, request: DistillRequest): P
                 messages: [
                     createUserMessage({
                         content: [{ type: 'text', text: prompt }],
-                        source: { kind: 'plugin', plugin: 'dsh-memory', form: 'notice', summary: '记忆蒸馏输入' },
+                        source: { kind: MEMORY_SOURCE_KIND, form: 'notice', summary: '记忆蒸馏输入' },
                     }),
                 ],
                 system: SYSTEM_PROMPT,

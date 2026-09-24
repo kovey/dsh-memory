@@ -1,4 +1,5 @@
 import { BlockAssembler, ReasoningEffortId, createUserMessage } from '@deepseek-ai/dsh-llm';
+import { MEMORY_SOURCE_KIND } from '../recall/query.js';
 import { log } from '../log.js';
 import { estimateTokens } from '../recall/rank.js';
 import { ScopeResolver } from '../scope/resolver.js';
@@ -147,7 +148,7 @@ export async function distillTurn(deps, request) {
                 messages: [
                     createUserMessage({
                         content: [{ type: 'text', text: prompt }],
-                        source: { kind: 'plugin', plugin: 'dsh-memory', form: 'notice', summary: '记忆蒸馏输入' },
+                        source: { kind: MEMORY_SOURCE_KIND, form: 'notice', summary: '记忆蒸馏输入' },
                     }),
                 ],
                 system: SYSTEM_PROMPT,

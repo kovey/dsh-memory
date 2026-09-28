@@ -74,6 +74,20 @@ dsh plugin --profile tui add github:<owner>/dsh-memory#v0.1.0
       maxAdditions: 2
 ```
 
+## 默认模型（dsh 0.1.7-rc.2 起）
+
+rc.2 不再读取全局 `~/.dsh/settings.yaml`，默认模型改为**条目配置**（`agent-default-model`，
+持久化写进 profile patch）。内置目录默认是 `deepseek-flash`；若所用网关不提供该模型
+（如本机的网关只提供 `deepseek-v4-flash`），会话会在模型调用处报
+`No available channel for model deepseek-flash`。修复：在 profile patch 里覆盖该条目：
+
+```yaml
+- id: agent-default-model
+  config:
+    provider: 'deepseek-official'
+    model: 'deepseek-v4-flash'
+```
+
 ## 装完怎么确认（tui 是你的面，验证也由你决定）
 
 1. 启动 tui 后看 `~/.dsh/memory-plugin.log` 出现：

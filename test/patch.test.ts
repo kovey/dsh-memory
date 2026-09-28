@@ -82,3 +82,26 @@ test('every configured key exists in the resolved config (no typos shipped)', ()
     assert.equal(resolved.semantic.foreignModelGraceDays, 30, 'foreign-model grace is shipped')
     assert.equal(resolved.sqlite.maxOpenRoots, 4, 'store LRU bound is shipped')
 })
+
+test('peer anchors track the installed dsh runtime', async () => {
+    // rc.2 added a hard peer gate: a bundle whose peers do not match the running
+    // dsh is *skipped* at load time. Forgetting to bump these anchors after a dsh
+    // upgrade therefore takes the plugin offline — the failure this test prevents.
+    const runtime = JSON.parse(
+        fs.readFileSync(path.join(import.meta.dirname, '..', 'node_modules', '@deepseek-ai', 'dsh-tools', 'package.json'), 'utf8'),
+    ) as { version: string }
+    const dshPackages = Object.keys(pkg.peerDependencies).filter((name) => name.startsWith('@deepseek-ai/dsh-'))
+    assert.ok(dshPackages.length >= 4, 'the dsh peer set is declared')
+    for (const name of dshPackages) {
+        assert.equal(
+            (pkg.peerDependencies as Record<string, string>)[name],
+            runtime.version,
+            `${name} must be anchored to the installed dsh runtime (${runtime.version})`,
+        )
+    }
+    const dev = pkg.devDependencies as Record<string, string>
+    for (const name of dshPackages) {
+        assert.equal(dev[name], runtime.version, `${name} devDependency must match the runtime too`)
+    }
+    assert.equal(pkg.version, '0.2.1')
+})

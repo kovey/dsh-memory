@@ -10,6 +10,8 @@ DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / �
 
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
 - 运行环境：Node `^22.19 || >=24`（依赖内置 `node:sqlite`；构建需要 TypeScript）
+- **兼容性**：dsh `0.1.7-rc.2`（peerDependencies 精确锚定；dsh 升级后需同步升级锚定，
+  否则 rc.2 起加载器会跳过该 bundle 并提示 `dsh plugin allow-version` 可显式豁免）
 - 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
 - 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
 - 当前进度：**M0–M5 全部完成 + 语义检索 + 蒸馏后台运行器**（见设计文档 §11、§14）

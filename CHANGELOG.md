@@ -38,6 +38,35 @@
 - `src/message-source.ts`：自有 source kind 的声明模块。
 - 测试：`buildQuery` 的跳过逻辑补一条**新形状**用例，确保两代形状都不会被当作查询文本。
 
+## [0.2.1] — 2026-09-28
+
+### Changed
+
+- **适配 dsh `0.1.7-rc.2`**：peerDependencies / devDependencies 由 `0.1.7-rc.1` 精确锚定升级为
+  `0.1.7-rc.2`。
+
+### Verified
+
+- rc.1 → rc.2 的 API 面**逐包比对**（解包两个版本的 tarball 做差异）：`dsh-llm` 新增
+  `projectToolUpdates()` / `ProjectedToolUpdates`；`dsh-tools` 的工具定义新增可选 `displayReason`
+  （`PreToolDecision.ask` 的本地化审批文案，本插件不产出该决策，故不适用）；`dsh-session` 新增
+  `toolHistory()` 与 `ToolHistory` 投影；`dsh-system-prompt` / `dsh-agent` 无 API 变化。
+  **全部为新增，无破坏性变更**，本插件无需改代码。
+- `tsc` 对 rc.2 类型零错误；`npm test` 178 例全绿。
+- **真机验证**（宿主 dsh 0.1.7-rc.2，nvim-tui 官方 e2e 模式）：插件加载且**未被执行器跳过**，
+  91 条真实语料引导导入、自动召回注入（3–4 条 / 482–590 tok）、模型真实调用 `memory_search`
+  命中教训、轮次与会话收尾自动提交。
+
+### Notes
+
+- rc.2 新增 **peer 版本强制校验**：peer 与运行时版本不符的 bundle 会被加载器**跳过**并在启动时告警
+  （可用 `dsh plugin allow-version` 显式豁免）。本插件因本次锚定升级而正常加载；同 profile 中仍锚定
+  rc.1 的三个插件（`dsh-role-guard` / `dsh-spec-gate` / `dsh-test-design-gate`）在该版本下被跳过。
+  新增测试 `peer anchors track the installed dsh runtime` 用于在本地捕获"升级 dsh 后忘记改锚"。
+- rc.2 起默认模型改为条目配置（`agent-default-model`），不再读取全局 `settings.yaml`；
+  若网关不提供内置默认模型 `deepseek-flash`，需在 profile patch 里覆盖（本机配置见
+  `docs/RELEASE.md`「默认模型」一节）。
+
 ## [0.1.1] — 2026-09-17
 
 ### Fixed
@@ -142,5 +171,6 @@
 - 库中已存在的历史重复 id 不会自动删除（import 只保证不再新增），需要显式 dedupe。
 - `tui` 等生产面只消费发布版本（tag/NPM），不走本地 link。
 
+[0.2.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.1
 [0.1.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kovey/dsh-memory/releases/tag/v0.1.0

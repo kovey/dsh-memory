@@ -103,5 +103,6 @@ test('peer anchors track the installed dsh runtime', async () => {
     for (const name of dshPackages) {
         assert.equal(dev[name], runtime.version, `${name} devDependency must match the runtime too`)
     }
-    assert.equal(pkg.version, '0.2.1')
+    // version-agnostic: this file must not need an edit on every release
+    assert.match(pkg.version, /^\d+\.\d+\.\d+(?:-[a-z0-9.]+)?$/, 'the package carries a real version')
 })

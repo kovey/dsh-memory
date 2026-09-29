@@ -38,6 +38,34 @@
 - `src/message-source.ts`：自有 source kind 的声明模块。
 - 测试：`buildQuery` 的跳过逻辑补一条**新形状**用例，确保两代形状都不会被当作查询文本。
 
+## [0.2.2] — 2026-09-29
+
+### Changed
+
+- **适配 dsh `0.2.0-rc.1`**：peerDependencies / devDependencies 由 `0.1.7-rc.2` 精确锚定升级为
+  `0.2.0-rc.1`（rc.2 起的 peer 门禁会**跳过**锚定不符的 bundle，不升级即等于插件不加载）。
+  **无需改代码**：本版本只改锚定与文档。
+
+### Verified
+
+- `0.1.7-rc.2` → `0.2.0-rc.1` API 面逐包比对（解包 tarball 做差异）：
+  `dsh-llm` / `dsh-tools` / `dsh-system-prompt` / `dsh-agent` **只差 package.json 版本号**；
+  `dsh-session` 唯一实质变化是**新增导出** `ToolCallRecovery`（中断工具调用修复）与
+  `lib/index.js` 的相应接线。全部为新增，无破坏性变更。
+- `tsc` 对 0.2.0-rc.1 类型零错误；`npm test` 179 例全绿（含 peer 锚定守卫）。
+- **真机验证**（宿主 0.2.0-rc.1，nvim-tui e2e）：插件未被 peer 门禁跳过、93 条真实语料引导导入、
+  自动召回注入 4 条 / 583 tok、模型连续调用 `memory_search`（命中 8 条）与 `memory_stats`
+  （93 条 / active 38 / pending 55 / 门禁 verdict UNKNOWN）、会话指标落账。
+
+### Notes
+
+- 同 profile 的 `dsh-chat-interaction@0.1.6` 在该宿主下被门禁跳过（其 peer 声明为
+  `^0.1.5-rc.1 || ^0.1.7-rc.1`，未覆盖 0.2.x）。需要它的话要么升到声明 0.2.x 的版本，
+  要么 `dsh plugin allow-version` 显式豁免。
+- 观察（非本版本问题）：本机记忆库 93 条里 **pending 55 条**——蒸馏产物按设计进 pending（§7 仅提示），
+  但除"复现提升"外没有自动晋升通道，长期会让 pending 占比偏高。召回不受影响（active+pending 都可搜），
+  但值得后续做一次"复现 N 次后自动晋升"或把 pending 纳入巩固的晋升候选。
+
 ## [0.2.1] — 2026-09-28
 
 ### Changed
@@ -171,6 +199,7 @@
 - 库中已存在的历史重复 id 不会自动删除（import 只保证不再新增），需要显式 dedupe。
 - `tui` 等生产面只消费发布版本（tag/NPM），不走本地 link。
 
+[0.2.2]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.2
 [0.2.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.1
 [0.1.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.1.1
 [0.1.0]: https://github.com/kovey/dsh-memory/releases/tag/v0.1.0

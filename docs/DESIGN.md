@@ -541,7 +541,8 @@ config 无效，结论：**改插件配置就写 profile patch 的顶层 `- id: 
   `memory_save({ layer: 'profile', evidence: 'user-statement' })` 是唯一写入路径（只接受用户明说的偏好，
   同时写入 preference 行与一条 layer=profile 的记录）。
 - **L4 晋升落技能**：巩固时把晋升提案同时落成 `proposals/<id>.SKILL.md` 草稿（人类只需移动文件；
-  插件永不直接写 `~/.dsh/skills`，人审环节保留）。
+  插件**只在人审动作里**写 `~/.dsh/skills`：`memory_consolidate({ acceptProposal })` 才会把草稿安装过去
+  （覆盖需 `overwrite`、技能名限 `[a-z0-9-]`、安装失败则提案保持 open）；没有 accept 就不会有任何写入）。
 - **`memory_config`**：会话级降噪（`autoRecall: false`），不落盘。
 - **`memory_import`**：把外部 lesson 文件导入项目/全局库（破坏性子代理被拒）。
 - **门禁三态**：`pass | regression | unknown`，四项指标全无数据不再算通过。

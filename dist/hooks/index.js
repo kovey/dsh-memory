@@ -26,7 +26,10 @@ export function createHookDeps(config, registry, resolver, capabilities, semanti
         state: new SessionState(),
         signals: new SignalBuffer(),
         ledger: new TurnLedger(),
-        committer: new AutoCommitter(config),
+        // The commit path owns the cross-process lock, so the text-view export runs
+        // *inside* it: two hosts exporting and committing the same root used to
+        // interleave (SQLite serializes its own writes, the export did not).
+        committer: new AutoCommitter(config, { exportText: (scope) => registry.exportScope(scope) }),
         ...(semantic !== undefined ? { semantic } : {}),
     };
 }

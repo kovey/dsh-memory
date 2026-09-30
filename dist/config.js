@@ -43,6 +43,7 @@ export const DEFAULT_CONFIG = {
         autoFreezeBaseline: false,
         autoFreezeMinSuccessRate: 0.5,
         autoFreezeMaxRework: 3,
+        autoRepairUnhealthyBaseline: false,
         proposeFreezeAfterTasks: 5,
     },
     git: {
@@ -188,6 +189,7 @@ export function resolveConfig(raw) {
             autoFreezeBaseline: bool(rootEval['autoFreezeBaseline'], d.eval.autoFreezeBaseline),
             autoFreezeMinSuccessRate: num(rootEval['autoFreezeMinSuccessRate'], d.eval.autoFreezeMinSuccessRate, 0, 1),
             autoFreezeMaxRework: num(rootEval['autoFreezeMaxRework'], d.eval.autoFreezeMaxRework, 0, 100),
+            autoRepairUnhealthyBaseline: bool(rootEval['autoRepairUnhealthyBaseline'], d.eval.autoRepairUnhealthyBaseline),
             proposeFreezeAfterTasks: num(rootEval['proposeFreezeAfterTasks'], d.eval.proposeFreezeAfterTasks, 1, 1_000),
         },
         git: {

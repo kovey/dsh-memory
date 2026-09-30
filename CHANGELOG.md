@@ -113,6 +113,34 @@
   避免把原始输出推进 git）、以及多宿主并发下的会话级覆盖不持久（`memory_config` 仅当次进程有效）。
 - 已准备好但**未发布 tag**：v0.3.0 待明确指示后打标签。
 
+## [Unreleased]
+
+### Added
+
+- **坏基线的检测与可选自愈**（回应"如果有错误的基线，插件能不能自己修复？"）。
+  上一版给自动冻结加了质量门，但**只对"即将冻结的窗口"生效**：一条**已经**冻在表里的坏基线
+  （真机实测 `success_rate 0.122 / avg_rework 6.12`）既没有检测、也没有修复路径——幂等设计规定
+  "已有快照绝不重冻"，于是门禁永远拿它当基准，真实退化读成 PASS（橡皮图章）。现在分两层处理：
+  - **检测（始终生效，只报警）**：`memory_stats` 用**同一条质量门判据**（`eval.autoFreezeMinSuccessRate`
+    默认 0.5、`eval.autoFreezeMaxRework` 默认 3；**null 视为不达标**——"没有数据"不是"健康"的证据）
+    复核**已存在的快照**，不达标就打印 `⚠ the frozen baseline itself is UNHEALTHY`，列出实际值与阈值、
+    说明"门禁拿它比较，verdict 不可信"，并给出可复制的补救命令
+    `memory_stats({ setBaseline: true, baselineReason: "…" })` 与自动修复旋钮名。
+    快照**过旧**（早于 `eval.windowDays` 的 3 倍，`STALE_BASELINE_WINDOW_MULTIPLE`）另给一行提示，
+    与"不健康"分开：旧≠坏。
+  - **自愈（默认关闭）**：新增 `eval.autoRepairUnhealthyBaseline`（默认 `false`）。打开后，仅当
+    **①已有快照不健康 ②当前窗口通过同一条质量门 ③当前窗口任务指标数 ≥ `eval.proposeFreezeAfterTasks`**
+    三条同时成立，才**替换**该快照（`DELETE` 旧行 + 写入新快照，同一事务；`note` 写明
+    `auto-repair: replaced an unhealthy baseline (was success X / rework Y)`，并 `log('info')` 留痕）。
+    任一条件不满足则不动：当前窗口不健康时**明确拒绝**并把原因写进日志与报告（绝不用一个坏窗口
+    盖掉另一个坏窗口）；子代理调用 `memory_stats` 同样不会触发写入（沿用 `resolver.mayWrite` 守卫）。
+
+### Notes
+
+- 新增测试 8 例（红→绿）：坏基线+修复关只报警不改写、坏基线+修复开+当前窗口健康则替换且
+  `note`/日志可追溯、当前窗口不健康则拒绝且日志写明原因、好基线不被无谓替换、数据不足时不替换、
+  子代理零写入、过旧提示与不健康不混淆、以及 `assessBaselineHealth` 的 null 判据。
+
 ## [0.2.3] — 2026-09-30
 
 ### Changed
@@ -301,6 +329,7 @@
 - 库中已存在的历史重复 id 不会自动删除（import 只保证不再新增），需要显式 dedupe。
 - `tui` 等生产面只消费发布版本（tag/NPM），不走本地 link。
 
+[Unreleased]: https://github.com/kovey/dsh-memory/compare/v0.3.0...HEAD
 [0.3.0]: https://github.com/kovey/dsh-memory/releases/tag/v0.3.0
 [0.2.3]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.3
 [0.2.2]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.2

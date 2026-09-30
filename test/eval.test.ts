@@ -8,6 +8,7 @@ import path from 'node:path'
 import test from 'node:test'
 import { resolveConfig } from '../dist/config.js'
 import {
+    assessBaselineHealth,
     evaluateGate,
     freezeBaseline,
     healthDigest,
@@ -17,6 +18,7 @@ import {
     parseBaseline,
     readBaseline,
     renderEvaluation,
+    repairUnhealthyBaseline,
     snapshotMetrics,
     windowSummary,
 } from '../dist/eval/baseline.js'
@@ -609,4 +611,238 @@ test('the quality gate reads its thresholds from eval config', async (t) => {
     const lenient = { ...h.deps.config, eval: { ...h.deps.config.eval, autoFreezeMinSuccessRate: 0.5, autoFreezeMaxRework: 3 } }
     assert.ok(maybeFreezeBaseline(h.store.db, h.scope, lenient, new Date('2026-09-10T00:00:00.000Z')))
     assert.equal(snapshotCount(h), 1)
+})
+
+// ---- an unhealthy frozen baseline: detect always, repair only on request ------
+//
+// The quality gate above stops a *bad freeze* from happening. It cannot undo one
+// that already happened: the live store had `success_rate 0.122 / avg_rework 6.12`
+// frozen as the reference, and every later period was compared against it, so a
+// genuine regression read as PASS. The frozen row is human-owned data (DESIGN §11)
+// — detection therefore only reports, and replacement needs an explicit knob.
+
+/** The shape of the live accident: a bad period that somehow became the reference. */
+function insertBadWindow(
+    h: { store: { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } } },
+    count = 3,
+): void {
+    for (let index = 0; index < count; index += 1) {
+        insertTask(h.store.db, {
+            id: `bad${index}`,
+            date: `2026-09-0${index + 1}`,
+            outcome: 'failed',
+            duration: 300,
+            disturb: 4,
+            rework: 6,
+        })
+    }
+}
+
+/** A healthy period after the bad freeze: success 1, one rework round per task. */
+function insertGoodWindow(
+    h: { store: { db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } } } },
+    count = 3,
+): void {
+    for (let index = 0; index < count; index += 1) {
+        insertTask(h.store.db, {
+            id: `good${index}`,
+            date: `2026-09-1${index}`,
+            outcome: 'success',
+            duration: 60,
+            disturb: 0,
+            rework: 1,
+        })
+    }
+}
+
+/** Freeze the bad period the way the pre-gate auto-freeze did, then let the ledger recover. */
+function freezeBadSnapshot(h: Awaited<ReturnType<typeof harness>>, note = 'the bad freeze'): void {
+    insertBadWindow(h, 1)
+    freezeBaseline(h.store.db, 'project:demo', note, new Date('2026-09-02T00:00:00.000Z'))
+}
+
+test('an unhealthy frozen baseline is reported with a remedy and is never rewritten with the knob off', async (t) => {
+    const h = await harness(t, { eval: { autoRepairUnhealthyBaseline: false, proposeFreezeAfterTasks: 3 } })
+    freezeBadSnapshot(h)
+    insertGoodWindow(h, 3)
+    const before = latestBaseline(h.store.db)
+
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(report, /the frozen baseline itself is UNHEALTHY/, 'the reference is called out, not silently trusted')
+    assert.match(report, /baseline success 0 < eval\.autoFreezeMinSuccessRate 0\.5/, 'it names the value and its threshold')
+    assert.match(report, /baseline rework 6 > eval\.autoFreezeMaxRework 3/, 'and the rework side too')
+    assert.match(report, /the verdict above cannot be trusted/, 'a gate comparing against a bad reference judges nothing')
+    assert.match(
+        report,
+        /memory_stats\(\{ setBaseline: true, baselineReason: "<who asked and what was verified>" \}\)/,
+        'the human remedy is copyable',
+    )
+    assert.match(report, /eval\.autoRepairUnhealthyBaseline/, 'and the automatic knob is named as the alternative')
+
+    assert.deepEqual(latestBaseline(h.store.db), before, 'default is report-only: the human-owned reference stays')
+    assert.equal(latestBaseline(h.store.db)?.note, 'the bad freeze')
+    assert.equal(snapshotCount(h), 1)
+})
+
+test('autoRepairUnhealthyBaseline replaces the bad snapshot with a healthy window', async (t) => {
+    const h = await harness(t, { eval: { autoRepairUnhealthyBaseline: true, proposeFreezeAfterTasks: 3 } })
+    freezeBadSnapshot(h)
+    insertGoodWindow(h, 3)
+    assert.equal(latestBaseline(h.store.db)?.successRate, 0)
+    assert.equal(latestBaseline(h.store.db)?.avgRework, 6)
+
+    const logFile = path.join(tempDir('m5-repair-log'), 'memory.log')
+    setLogFile(logFile)
+    let report: string
+    try {
+        report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+        const logged = fs.readFileSync(logFile, 'utf8')
+        assert.match(logged, /\[info\][^\n]*baseline auto-repaired/, 'the replacement is auditable in the log')
+        assert.match(logged, /was success 0 \/ rework 6/, 'the log names what was retired')
+    } finally {
+        setLogFile(undefined)
+    }
+
+    assert.equal(snapshotCount(h), 1, 'the bad row is replaced, not appended to')
+    const repaired = latestBaseline(h.store.db)
+    assert.match(
+        repaired?.note ?? '',
+        /auto-repair: replaced an unhealthy baseline \(was success 0 \/ rework 6\)/,
+        'the note says this was a self-repair and why',
+    )
+    const current = snapshotMetrics(h.store.db)
+    assert.equal(repaired?.tasks, current.tasks)
+    assert.equal(repaired?.successRate, current.successRate, 'the new reference is the healthy window itself')
+    assert.equal(repaired?.successRate, 0.75)
+    assert.equal(repaired?.avgRework, current.avgRework)
+    assert.equal(repaired?.avgRework, 2.25)
+
+    assert.match(report, /baseline auto-repaired — auto-repair: replaced an unhealthy baseline/)
+    assert.doesNotMatch(report, /UNHEALTHY/, 'after the repair the reference is healthy again')
+    assert.match(report, /verdict: PASS/)
+})
+
+test('auto-repair refuses while the current window is unhealthy and logs the reason', async (t) => {
+    const h = await harness(t, { eval: { autoRepairUnhealthyBaseline: true, proposeFreezeAfterTasks: 3 } })
+    insertBadWindow(h, 3)
+    freezeBaseline(h.store.db, 'project:demo', 'the bad freeze', new Date('2026-09-02T00:00:00.000Z'))
+    const before = latestBaseline(h.store.db)
+
+    const logFile = path.join(tempDir('m5-repair-refuse-log'), 'memory.log')
+    setLogFile(logFile)
+    let report: string
+    try {
+        report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+        const logged = fs.readFileSync(logFile, 'utf8')
+        assert.match(logged, /\[info\][^\n]*baseline auto-repair refused/, 'the refusal is explained, not silent')
+        assert.match(logged, /current success 0 < eval\.autoFreezeMinSuccessRate 0\.5/)
+        assert.match(logged, /current rework 6 > eval\.autoFreezeMaxRework 3/)
+    } finally {
+        setLogFile(undefined)
+    }
+
+    assert.deepEqual(latestBaseline(h.store.db), before, 'a bad window must never be frozen as the new reference')
+    assert.equal(latestBaseline(h.store.db)?.note, 'the bad freeze')
+    assert.equal(snapshotCount(h), 1)
+    assert.match(report, /eval\.autoRepairUnhealthyBaseline is on but the reference was left untouched/)
+    assert.match(report, /does not pass the same quality gate/)
+})
+
+test('auto-repair waits until the current window has enough task metrics', async (t) => {
+    // A baseline is unhealthy on one side alone: success 0 is enough here, while
+    // rework 0 keeps the *current* window (success 0.5 / rework 0.5) healthy.
+    const h = await harness(t, { eval: { autoRepairUnhealthyBaseline: true, proposeFreezeAfterTasks: 5 } })
+    insertTask(h.store.db, { id: 'bad', date: '2026-09-01', outcome: 'failed', duration: 10, disturb: 1, rework: 0 })
+    freezeBaseline(h.store.db, 'project:demo', 'the bad freeze', new Date('2026-09-02T00:00:00.000Z'))
+    insertTask(h.store.db, { id: 'good', date: '2026-09-03', outcome: 'success', duration: 60, disturb: 0, rework: 1 })
+
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.equal(latestBaseline(h.store.db)?.note, 'the bad freeze', 'too little data: nothing is rewritten')
+    assert.equal(snapshotCount(h), 1)
+    assert.match(report, /eval\.autoRepairUnhealthyBaseline is on but the reference was left untouched/)
+    assert.match(report, /only 2 task metric\(s\) < eval\.proposeFreezeAfterTasks 5/)
+})
+
+test('auto-repair leaves a healthy baseline alone', async (t) => {
+    const h = await harness(t, { eval: { autoRepairUnhealthyBaseline: true, proposeFreezeAfterTasks: 2 } })
+    insertTask(h.store.db, { id: 'good', date: '2026-09-01', outcome: 'success', duration: 60, disturb: 0, rework: 1 })
+    freezeBaseline(h.store.db, 'project:demo', 'good week', new Date('2026-09-02T00:00:00.000Z'))
+    insertTask(h.store.db, { id: 'good2', date: '2026-09-03', outcome: 'success', duration: 60, disturb: 0, rework: 1 })
+
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.equal(latestBaseline(h.store.db)?.note, 'good week', 'a healthy reference is not churned')
+    assert.equal(snapshotCount(h), 1)
+    assert.doesNotMatch(report, /UNHEALTHY/)
+    assert.doesNotMatch(report, /auto-repaired/)
+
+    const declined = repairUnhealthyBaseline(h.store.db, h.scope, h.deps.config, new Date('2026-09-10T00:00:00.000Z'))
+    assert.equal(declined.replaced, false)
+    assert.match(declined.skipped ?? '', /baseline is healthy/)
+})
+
+test('a subagent reading memory_stats cannot trigger the auto-repair', async (t) => {
+    const h = await harness(t, { eval: { autoRepairUnhealthyBaseline: true, proposeFreezeAfterTasks: 3 } })
+    freezeBadSnapshot(h)
+    insertGoodWindow(h, 3)
+    const subagent = { session: { id: 'm5-sub', header: { cwd: h.repo, origin: 'subagent' } } }
+
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: subagent } as never))
+    assert.equal(latestBaseline(h.store.db)?.note, 'the bad freeze', 'a subagent must not rewrite the gate reference')
+    assert.equal(snapshotCount(h), 1)
+    assert.match(report, /the frozen baseline itself is UNHEALTHY/, 'the warning itself is read-only')
+    assert.match(report, /a subagent session never writes memory/)
+
+    // the same call from the top-level session repairs the very same snapshot
+    const fixed = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(fixed, /baseline auto-repaired/)
+    assert.equal(snapshotCount(h), 1)
+    assert.match(latestBaseline(h.store.db)?.note ?? '', /auto-repair: replaced an unhealthy baseline/)
+})
+
+test('a baseline with no metric data counts as unhealthy, not as unknown-but-fine', () => {
+    // The judge behind the warning. A `null` on the reference side means the gate
+    // cannot compare that metric at all, so "no success rate recorded" is not
+    // evidence of a healthy reference — it is the absence of evidence.
+    const config = resolveConfig({})
+    const empty = assessBaselineHealth(
+        { at: new Date().toISOString(), tasks: 2, successRate: null, avgDuration: null, avgDisturb: null, avgRework: null },
+        config,
+    )
+    assert.equal(empty.healthy, false)
+    assert.deepEqual(empty.failures, [
+        'baseline success n/a (eval.autoFreezeMinSuccessRate 0.5)',
+        'baseline rework n/a (eval.autoFreezeMaxRework 3)',
+    ])
+    assert.equal(empty.stale, false, 'a fresh snapshot is not stale, whatever its metrics say')
+
+    // One failing side is enough — that is the live accident's shape (0.122 / 6.12).
+    const badRate = assessBaselineHealth(
+        { at: new Date().toISOString(), tasks: 9, successRate: 0.122, avgDuration: 90, avgDisturb: 2, avgRework: 1 },
+        config,
+    )
+    assert.equal(badRate.healthy, false)
+    assert.deepEqual(badRate.failures, ['baseline success 0.122 < eval.autoFreezeMinSuccessRate 0.5'])
+
+    const healthy = assessBaselineHealth(
+        { at: new Date().toISOString(), tasks: 9, successRate: 0.75, avgDuration: 90, avgDisturb: 2, avgRework: 2.25 },
+        config,
+    )
+    assert.equal(healthy.healthy, true)
+    assert.deepEqual(healthy.failures, [])
+})
+
+test('a stale snapshot is flagged as old without being called unhealthy', async (t) => {
+    const h = await harness(t, { eval: { autoRepairUnhealthyBaseline: false, windowDays: 30, proposeFreezeAfterTasks: 5 } })
+    insertTask(h.store.db, { id: 'good', date: '2026-01-01', outcome: 'success', duration: 60, disturb: 0, rework: 1 })
+    freezeBaseline(
+        h.store.db,
+        'project:demo',
+        'frozen long ago',
+        new Date(Date.now() - 120 * 86_400_000 - 60_000),
+    )
+
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(report, /baseline snapshot is 120 day\(s\) old/, 'staleness gets its own line')
+    assert.match(report, /3× eval\.windowDays 30/)
+    assert.doesNotMatch(report, /UNHEALTHY/, 'old is not the same as bad')
 })

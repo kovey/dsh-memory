@@ -113,6 +113,7 @@ test('every knob the patch promises is actually read outside config.ts (no dead 
         'sessionToolBudgetTokens',
         'autoFreezeMinSuccessRate',
         'autoFreezeMaxRework',
+        'autoRepairUnhealthyBaseline',
     ]
     for (const knob of knobs) {
         const hits = readers.filter((file) => fs.readFileSync(file, 'utf8').includes(knob))

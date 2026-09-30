@@ -138,6 +138,19 @@ export interface MemoryConfig {
         autoFreezeMinSuccessRate: number;
         /** Ceiling on the average rework rounds per task for an automatic freeze. */
         autoFreezeMaxRework: number;
+        /**
+         * Replace an *already frozen* snapshot that fails that same quality gate,
+         * once the current window passes it.
+         *
+         * Off by default: the snapshot is the reference a human calibrated
+         * (DESIGN §11), so the plugin reports an unhealthy baseline and leaves the
+         * replacement to `memory_stats({ setBaseline: true })` unless the user
+         * asks for it. The knob exists because the opposite failure was real: a
+         * `success_rate 0.122 / avg_rework 6.12` period had been frozen as the
+         * reference, and no code path could undo it — every later period was
+         * compared against it, so a genuine regression read as PASS.
+         */
+        autoRepairUnhealthyBaseline: boolean;
         /** Tasks with metrics after which `memory_stats` proposes a human freeze. */
         proposeFreezeAfterTasks: number;
     };

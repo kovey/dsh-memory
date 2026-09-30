@@ -105,6 +105,11 @@
           # 因此还要求当前窗口同时满足下面两条，否则不落盘、只提示，冻结仍留给人工。
           autoFreezeMinSuccessRate: 0.5
           autoFreezeMaxRework: 3
+          # 已冻结的基线本身若不健康（同一条质量门判据，null 视为不达标），memory_stats 一定报警并给出
+          # 可复制的补救命令；true 才允许自动**替换**它（删除旧行 + 写入新快照，同一事务）。
+          # 替换仍要求当前窗口通过同一条质量门、且任务指标数 ≥ proposeFreezeAfterTasks，
+          # 否则拒绝并把原因写进日志与报告——绝不把坏窗口冻成新基准。默认 false：基准是人工校准物。
+          autoRepairUnhealthyBaseline: false
           proposeFreezeAfterTasks: 5    # 积累多少个任务指标后提示可以冻结
         # Git-ized text view of the memory store.
         git:

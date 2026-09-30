@@ -16,7 +16,7 @@ import path from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import type { MemoryConfig } from '../config.js'
 import { log } from '../log.js'
-import { rowInt, rowNum, rowStr } from '../store/sqlite/db.js'
+import { rowInt, rowNum, rowStr, transact } from '../store/sqlite/db.js'
 import { summarizeMetrics } from '../store/metrics.js'
 import type { MetricSummary } from '../store/metrics.js'
 import type { MemoryScope } from '../store/types.js'
@@ -138,6 +138,17 @@ export function snapshotMetrics(db: DatabaseSync, at = new Date(), note?: string
 /** Freeze the current metrics as the baseline to compare against. */
 export function freezeBaseline(db: DatabaseSync, scopeLabel: string, note?: string, at = new Date()): MetricSnapshot {
     const snapshot = snapshotMetrics(db, at, note)
+    insertSnapshot(db, scopeLabel, snapshot, note)
+    return snapshot
+}
+
+/**
+ * Write one snapshot row. Split out of `freezeBaseline` so the repair path can
+ * insert the *exact* snapshot it already put through the quality gate: a write
+ * that re-measured the ledger could land a different (unchecked) window in the
+ * reference position.
+ */
+function insertSnapshot(db: DatabaseSync, scopeLabel: string, snapshot: MetricSnapshot, note?: string): void {
     db.prepare(
         'INSERT INTO baseline_snapshots (at, scope, tasks, success_rate, avg_duration, avg_disturb, avg_rework, note) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     ).run(
@@ -150,7 +161,6 @@ export function freezeBaseline(db: DatabaseSync, scopeLabel: string, note?: stri
         snapshot.avgRework,
         note ?? null,
     )
-    return snapshot
 }
 
 /** Most recent snapshot, or undefined when the gate has no reference yet. */
@@ -203,22 +213,34 @@ export function metricTaskCount(db: DatabaseSync): number {
  * is not evidence of a healthy window, it is the absence of evidence.
  */
 export function qualityGateFailure(snapshot: MetricSnapshot, config: MemoryConfig): string | undefined {
+    const failures = gateFailures(snapshot, config, 'current')
+    // Every failing side is named: a log that only reports the first one sends the
+    // reader back for a second run to learn the other half.
+    return failures.length > 0 ? failures.join(' and ') : undefined
+}
+
+/**
+ * The same quality gate, applied to whatever snapshot is passed in.
+ *
+ * `subject` labels the values in the message (`current` for the window about to
+ * be frozen, `baseline` for a snapshot already in the table), so the two callers
+ * can share one judgement without sharing one sentence.
+ */
+function gateFailures(snapshot: MetricSnapshot, config: MemoryConfig, subject: string): string[] {
     const minSuccess = config.eval.autoFreezeMinSuccessRate
     const maxRework = config.eval.autoFreezeMaxRework
     const failures: string[] = []
     if (snapshot.successRate === null) {
-        failures.push(`current success n/a (eval.autoFreezeMinSuccessRate ${minSuccess})`)
+        failures.push(`${subject} success n/a (eval.autoFreezeMinSuccessRate ${minSuccess})`)
     } else if (snapshot.successRate < minSuccess) {
-        failures.push(`current success ${snapshot.successRate} < eval.autoFreezeMinSuccessRate ${minSuccess}`)
+        failures.push(`${subject} success ${snapshot.successRate} < eval.autoFreezeMinSuccessRate ${minSuccess}`)
     }
     if (snapshot.avgRework === null) {
-        failures.push(`current rework n/a (eval.autoFreezeMaxRework ${maxRework})`)
+        failures.push(`${subject} rework n/a (eval.autoFreezeMaxRework ${maxRework})`)
     } else if (snapshot.avgRework > maxRework) {
-        failures.push(`current rework ${snapshot.avgRework} > eval.autoFreezeMaxRework ${maxRework}`)
+        failures.push(`${subject} rework ${snapshot.avgRework} > eval.autoFreezeMaxRework ${maxRework}`)
     }
-    // Every failing side is named: a log that only reports the first one sends the
-    // reader back for a second run to learn the other half.
-    return failures.length > 0 ? failures.join(' and ') : undefined
+    return failures
 }
 
 /**
@@ -252,7 +274,7 @@ export function maybeFreezeBaseline(
     const threshold = Math.max(1, Math.floor(config.eval.proposeFreezeAfterTasks))
     if (metricTasks < threshold) return undefined
 
-    const label = scope.kind === 'project' ? `project:${scope.repo ?? scope.root}` : 'global'
+    const label = baselineScopeLabel(scope)
     const windowDays = config.eval.windowDays
     // The same snapshot `freezeBaseline` is about to write, taken *before* the
     // gate: no write may happen between the two reads.
@@ -279,6 +301,195 @@ export function maybeFreezeBaseline(
         `memory: baseline auto-frozen for ${label} — ${metricTasks} task metric(s) with outcome/cost data in the task ledger (threshold ${threshold}, gate window ${windowDays}d, success ${snapshot.successRate} / rework ${snapshot.avgRework})`,
     )
     return snapshot
+}
+
+/** Scope label written into a snapshot row (same shape as the human freeze path). */
+function baselineScopeLabel(scope: MemoryScope): string {
+    return scope.kind === 'project' ? `project:${scope.repo ?? scope.root}` : 'global'
+}
+
+function showMetric(value: number | null): string {
+    return value === null ? 'n/a' : String(value)
+}
+
+/**
+ * How old a snapshot may get before the report calls it stale, as a multiple of
+ * `eval.windowDays`. Three windows is the point where the reference describes a
+ * system that no longer exists rather than a period that was measured.
+ */
+export const STALE_BASELINE_WINDOW_MULTIPLE = 3
+
+export interface BaselineHealthReport {
+    /** Whether the *frozen snapshot itself* would pass the freeze quality gate. */
+    healthy: boolean
+    /** Gate violations of that snapshot, worded like the freeze gate's own refusal. */
+    failures: string[]
+    /** Age of the snapshot in whole days; `null` when its timestamp is unreadable. */
+    ageDays: number | null
+    /** Older than `eval.windowDays` × `STALE_BASELINE_WINDOW_MULTIPLE`. */
+    stale: boolean
+    staleAfterDays: number
+    windowDays: number
+    /** `eval.autoRepairUnhealthyBaseline` — whether a replacement may happen at all. */
+    autoRepair: boolean
+    /**
+     * Set when auto-repair is on but this call left the snapshot in place: the
+     * reason travels into the report, so "nothing happened" is never silent.
+     */
+    autoRepairBlocked?: string
+}
+
+/**
+ * Judge the snapshot the gate is comparing against.
+ *
+ * This is the gap the quality gate left open: it only ever looked at the window
+ * *about to be frozen*. A snapshot that was already in the table — frozen before
+ * the gate existed, or by hand — was never re-examined, so a period with a 12%
+ * success rate could sit in the reference position forever and turn every later
+ * comparison into a rubber stamp. Detection is read-only; replacing it is
+ * `repairUnhealthyBaseline` and needs `eval.autoRepairUnhealthyBaseline`.
+ *
+ * A metric that carries no data does not pass here either: `null` on the
+ * reference side means the gate cannot compare that metric at all.
+ */
+export function assessBaselineHealth(
+    baseline: MetricSnapshot,
+    config: MemoryConfig,
+    now: Date = new Date(),
+): BaselineHealthReport {
+    const failures = gateFailures(baseline, config, 'baseline')
+    const staleAfterDays = Math.max(1, Math.floor(config.eval.windowDays)) * STALE_BASELINE_WINDOW_MULTIPLE
+    const parsed = Date.parse(baseline.at)
+    const ageDays = Number.isNaN(parsed) ? null : Math.round((now.getTime() - parsed) / 86_400_000)
+    return {
+        healthy: failures.length === 0,
+        failures,
+        ageDays,
+        stale: ageDays !== null && ageDays > staleAfterDays,
+        staleAfterDays,
+        windowDays: config.eval.windowDays,
+        autoRepair: config.eval.autoRepairUnhealthyBaseline === true,
+    }
+}
+
+export interface BaselineRepairReport {
+    replaced: boolean
+    /** The unhealthy snapshot that was retired, when there was one. */
+    previous?: MetricSnapshot
+    /** The healthy snapshot that now holds the reference position. */
+    snapshot?: MetricSnapshot
+    /** Why the reference was left alone; always set when `replaced` is false. */
+    skipped?: string
+    /** Task-ledger rows carrying a gate metric, when the threshold was consulted. */
+    metricTasks?: number
+}
+
+/**
+ * Replace a snapshot that fails the quality gate, when the user asked for it
+ * (`eval.autoRepairUnhealthyBaseline`) *and* the current window is healthy.
+ *
+ * `maybeFreezeBaseline` is idempotent by design — an existing snapshot is never
+ * replaced, because refreezing is how a regression signal gets erased. That left
+ * the opposite hole: a snapshot frozen from a bad period (the live store had
+ * `success_rate 0.122 / avg_rework 6.12`) had no detection and no repair path, so
+ * the gate kept comparing against it and a genuine regression read as PASS.
+ *
+ * Three conditions, all required, in this order:
+ *
+ *   1. the snapshot in the table fails the same quality gate;
+ *   2. the *current* window passes it — a repair must never freeze a bad window
+ *      in place of a bad snapshot (that would just launder the same mistake);
+ *   3. the ledger has at least `eval.proposeFreezeAfterTasks` task metrics, so the
+ *      replacement is not a snapshot of noise either.
+ *
+ * Atomicity and concurrency: the retiring `DELETE` and the new `INSERT` run in one
+ * `transact` block. `node:sqlite`'s `DatabaseSync` is synchronous, so no other
+ * statement of this process can interleave; other processes are serialized by
+ * SQLite's write lock (WAL + `busy_timeout`), and a failing `BEGIN`/`COMMIT`
+ * leaves the old row exactly as it was. Every row is deleted rather than only the
+ * newest one: `latestBaseline` reads the newest row, so leaving an older row
+ * behind would silently promote an even staler snapshot into the reference
+ * position. The retired values stay auditable — they are quoted in the new row's
+ * `note` and in the log line.
+ *
+ * A write error is caught and reported as a skip: a stats read must not fail
+ * because the audit trail could not be updated.
+ */
+export function repairUnhealthyBaseline(
+    db: DatabaseSync,
+    scope: MemoryScope,
+    config: MemoryConfig,
+    now: Date = new Date(),
+): BaselineRepairReport {
+    const previous = latestBaseline(db)
+    if (previous === undefined) return { replaced: false, skipped: 'no baseline snapshot to repair' }
+    const failures = gateFailures(previous, config, 'baseline')
+    if (failures.length === 0) {
+        return {
+            replaced: false,
+            previous,
+            skipped: `the baseline is healthy (success ${showMetric(previous.successRate)} / rework ${showMetric(previous.avgRework)})`,
+        }
+    }
+    if (config.eval.autoRepairUnhealthyBaseline !== true) {
+        return {
+            replaced: false,
+            previous,
+            skipped:
+                'eval.autoRepairUnhealthyBaseline is off — replacing the gate reference stays a human decision ' +
+                '(memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" }))',
+        }
+    }
+
+    const label = baselineScopeLabel(scope)
+    const metricTasks = metricTaskCount(db)
+    const threshold = Math.max(1, Math.floor(config.eval.proposeFreezeAfterTasks))
+    // The same snapshot the repair is about to write, taken *before* the gate: no
+    // write may happen between the two reads.
+    const current = snapshotMetrics(db, now)
+    const failure = qualityGateFailure(current, config)
+    if (failure !== undefined) {
+        log(
+            'info',
+            `memory: baseline auto-repair refused for ${label} — the current window does not pass the same quality gate (${failure}); ` +
+                `the unhealthy baseline (${failures.join(' and ')}) is left in place, because replacing it now would freeze another bad period. ` +
+                `A human freeze is still possible: memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })`,
+        )
+        return {
+            replaced: false,
+            previous,
+            metricTasks,
+            skipped: `the current window does not pass the same quality gate (${failure})`,
+        }
+    }
+    if (metricTasks < threshold) {
+        return {
+            replaced: false,
+            previous,
+            metricTasks,
+            skipped: `only ${metricTasks} task metric(s) < eval.proposeFreezeAfterTasks ${threshold}`,
+        }
+    }
+
+    const note =
+        `auto-repair: replaced an unhealthy baseline (was success ${showMetric(previous.successRate)} / rework ${showMetric(previous.avgRework)}) — ` +
+        `failed the gate with ${failures.join(' and ')}; new window: ${metricTasks} task metric(s), ` +
+        `success ${showMetric(current.successRate)} / rework ${showMetric(current.avgRework)}, gate window ${config.eval.windowDays}d`
+    try {
+        transact(db, () => {
+            db.prepare('DELETE FROM baseline_snapshots').run()
+            insertSnapshot(db, label, current, note)
+        })
+    } catch (error) {
+        log('warn', `memory: baseline auto-repair failed for ${label} — the unhealthy snapshot is unchanged:`, error)
+        return { replaced: false, previous, metricTasks, skipped: `the write failed (${String(error)})` }
+    }
+    const snapshot: MetricSnapshot = { ...current, note }
+    log(
+        'info',
+        `memory: baseline auto-repaired for ${label} — ${note}`,
+    )
+    return { replaced: true, previous, snapshot, metricTasks }
 }
 
 export type MetricVerdict = 'better' | 'same' | 'worse' | 'unknown'
@@ -506,6 +717,7 @@ export function renderEvaluation(
     trend: { current: TrendWindow; previous: TrendWindow },
     baselineTasks: readonly BaselineTask[],
     progress?: BaselineProgress,
+    baselineHealth?: BaselineHealthReport,
 ): string[] {
     const lines: string[] = []
     lines.push('evaluation gate:')
@@ -556,6 +768,39 @@ export function renderEvaluation(
             lines.push(`    ${item.verdict === 'worse' ? '✗' : item.verdict === 'better' ? '✓' : '·'} ${item.label}: ${base} → ${now} (${item.verdict})`)
         }
         if (gate.regressed.length > 0) lines.push(`  regressed: ${gate.regressed.join(', ')} — replay the baseline tasks before trusting the change`)
+    }
+    // A verdict is only as good as the reference it was computed against, so the
+    // state of the snapshot is reported whether or not the gate could use it: a
+    // row whose four metrics are all `null` leaves the gate permanently UNKNOWN
+    // while wearing the appearance of a calibrated reference.
+    if (baselineHealth !== undefined && !baselineHealth.healthy) {
+        lines.push(
+            '  ⚠ the frozen baseline itself is UNHEALTHY — the gate compares every period against it, so the verdict above cannot be trusted:',
+        )
+        for (const failure of baselineHealth.failures) lines.push(`      ${failure}`)
+        lines.push(
+            // Deliberately not spelled "PASS": the report must never carry the
+            // verdict token for a period the gate could not actually judge
+            // (see `the gate is three-state: no comparable data is UNKNOWN, never PASS`).
+            '      a baseline frozen from a bad period turns the gate into a rubber stamp: a real regression then reads as a pass',
+        )
+        lines.push(
+            '      re-freeze it after a healthy window: memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })',
+        )
+        lines.push(
+            !baselineHealth.autoRepair
+                ? '      or turn on automatic repair: eval.autoRepairUnhealthyBaseline: true — it replaces the snapshot only when the current window passes the same quality gate'
+                : baselineHealth.autoRepairBlocked !== undefined
+                  ? `      eval.autoRepairUnhealthyBaseline is on but the reference was left untouched — ${baselineHealth.autoRepairBlocked}`
+                  : '      eval.autoRepairUnhealthyBaseline is on but the snapshot is still the old one — check the log for the refusal reason',
+        )
+    }
+    // Staleness is not badness: an old reference may still be the right one, it
+    // just describes a system that has moved on.
+    if (baselineHealth?.stale === true) {
+        lines.push(
+            `  note: baseline snapshot is ${baselineHealth.ageDays} day(s) old (> ${baselineHealth.staleAfterDays}d = ${STALE_BASELINE_WINDOW_MULTIPLE}× eval.windowDays ${baselineHealth.windowDays}) — it may no longer represent the current system; re-freeze after a good period if so`,
+        )
     }
     lines.push(
         `  trend: last ${trend.current.days}d ${trend.current.summary.tasks} task(s) (success ${trend.current.summary.success}) vs previous ${trend.previous.summary.tasks} task(s) (success ${trend.previous.summary.success})`,

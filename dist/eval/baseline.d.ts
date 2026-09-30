@@ -84,6 +84,88 @@ export declare function qualityGateFailure(snapshot: MetricSnapshot, config: Mem
  * Returns the frozen snapshot, or undefined when nothing was frozen.
  */
 export declare function maybeFreezeBaseline(db: DatabaseSync, scope: MemoryScope, config: MemoryConfig, now?: Date): MetricSnapshot | undefined;
+/**
+ * How old a snapshot may get before the report calls it stale, as a multiple of
+ * `eval.windowDays`. Three windows is the point where the reference describes a
+ * system that no longer exists rather than a period that was measured.
+ */
+export declare const STALE_BASELINE_WINDOW_MULTIPLE = 3;
+export interface BaselineHealthReport {
+    /** Whether the *frozen snapshot itself* would pass the freeze quality gate. */
+    healthy: boolean;
+    /** Gate violations of that snapshot, worded like the freeze gate's own refusal. */
+    failures: string[];
+    /** Age of the snapshot in whole days; `null` when its timestamp is unreadable. */
+    ageDays: number | null;
+    /** Older than `eval.windowDays` × `STALE_BASELINE_WINDOW_MULTIPLE`. */
+    stale: boolean;
+    staleAfterDays: number;
+    windowDays: number;
+    /** `eval.autoRepairUnhealthyBaseline` — whether a replacement may happen at all. */
+    autoRepair: boolean;
+    /**
+     * Set when auto-repair is on but this call left the snapshot in place: the
+     * reason travels into the report, so "nothing happened" is never silent.
+     */
+    autoRepairBlocked?: string;
+}
+/**
+ * Judge the snapshot the gate is comparing against.
+ *
+ * This is the gap the quality gate left open: it only ever looked at the window
+ * *about to be frozen*. A snapshot that was already in the table — frozen before
+ * the gate existed, or by hand — was never re-examined, so a period with a 12%
+ * success rate could sit in the reference position forever and turn every later
+ * comparison into a rubber stamp. Detection is read-only; replacing it is
+ * `repairUnhealthyBaseline` and needs `eval.autoRepairUnhealthyBaseline`.
+ *
+ * A metric that carries no data does not pass here either: `null` on the
+ * reference side means the gate cannot compare that metric at all.
+ */
+export declare function assessBaselineHealth(baseline: MetricSnapshot, config: MemoryConfig, now?: Date): BaselineHealthReport;
+export interface BaselineRepairReport {
+    replaced: boolean;
+    /** The unhealthy snapshot that was retired, when there was one. */
+    previous?: MetricSnapshot;
+    /** The healthy snapshot that now holds the reference position. */
+    snapshot?: MetricSnapshot;
+    /** Why the reference was left alone; always set when `replaced` is false. */
+    skipped?: string;
+    /** Task-ledger rows carrying a gate metric, when the threshold was consulted. */
+    metricTasks?: number;
+}
+/**
+ * Replace a snapshot that fails the quality gate, when the user asked for it
+ * (`eval.autoRepairUnhealthyBaseline`) *and* the current window is healthy.
+ *
+ * `maybeFreezeBaseline` is idempotent by design — an existing snapshot is never
+ * replaced, because refreezing is how a regression signal gets erased. That left
+ * the opposite hole: a snapshot frozen from a bad period (the live store had
+ * `success_rate 0.122 / avg_rework 6.12`) had no detection and no repair path, so
+ * the gate kept comparing against it and a genuine regression read as PASS.
+ *
+ * Three conditions, all required, in this order:
+ *
+ *   1. the snapshot in the table fails the same quality gate;
+ *   2. the *current* window passes it — a repair must never freeze a bad window
+ *      in place of a bad snapshot (that would just launder the same mistake);
+ *   3. the ledger has at least `eval.proposeFreezeAfterTasks` task metrics, so the
+ *      replacement is not a snapshot of noise either.
+ *
+ * Atomicity and concurrency: the retiring `DELETE` and the new `INSERT` run in one
+ * `transact` block. `node:sqlite`'s `DatabaseSync` is synchronous, so no other
+ * statement of this process can interleave; other processes are serialized by
+ * SQLite's write lock (WAL + `busy_timeout`), and a failing `BEGIN`/`COMMIT`
+ * leaves the old row exactly as it was. Every row is deleted rather than only the
+ * newest one: `latestBaseline` reads the newest row, so leaving an older row
+ * behind would silently promote an even staler snapshot into the reference
+ * position. The retired values stay auditable — they are quoted in the new row's
+ * `note` and in the log line.
+ *
+ * A write error is caught and reported as a skip: a stats read must not fail
+ * because the audit trail could not be updated.
+ */
+export declare function repairUnhealthyBaseline(db: DatabaseSync, scope: MemoryScope, config: MemoryConfig, now?: Date): BaselineRepairReport;
 export type MetricVerdict = 'better' | 'same' | 'worse' | 'unknown';
 /**
  * Three-state gate. `unknown` is the *absence* of a judgement, not a pass:
@@ -181,5 +263,5 @@ export interface BaselineProgress {
 export declare function renderEvaluation(gate: GateReport, health: HealthDigest, trend: {
     current: TrendWindow;
     previous: TrendWindow;
-}, baselineTasks: readonly BaselineTask[], progress?: BaselineProgress): string[];
+}, baselineTasks: readonly BaselineTask[], progress?: BaselineProgress, baselineHealth?: BaselineHealthReport): string[];
 //# sourceMappingURL=baseline.d.ts.map

@@ -584,6 +584,30 @@ config 无效，结论：**改插件配置就写 profile patch 的顶层 `- id: 
      avg_rework 6.12 的糟糕时期冻成了基准 → 门禁变橡皮图章。现在不达标则不落盘、只 `log('info')` 说明，
      `memory_stats` 也据此不再承诺"下一次调用会自动冻结"。 -->
 
+#### 坏基线的检测与自愈（2026-09-30 追加）
+
+质量门只管住了"**即将**冻结的窗口"。上一条真机事故里那条 `0.122 / 6.12` 的快照是**已经躺在
+`baseline_snapshots` 表里**的，而幂等设计规定"已有快照绝不重冻"——于是**没有任何代码路径能发现它、
+更没有任何路径能修它**：门禁永远拿它当基准，真实退化读成 PASS。补齐分两层，原则不变——
+**冻结是人工校准步骤（§11），插件默认只报警、不擅自改写人类拥有的基准**：
+
+- **检测（始终生效，只报警）**：`assessBaselineHealth(baseline, config, now)` 用**同一条质量门判据**
+  复核**已存在的快照**（null 视为不达标：没有数据不是健康的证据），`memory_stats` 渲染
+  `⚠ the frozen baseline itself is UNHEALTHY`，列出实际值与阈值、说明"门禁拿它比较 → verdict 不可信"、
+  并给出可复制的人工补救命令与自动修复旋钮名。快照**过旧**（`> eval.windowDays × 3`，
+  `STALE_BASELINE_WINDOW_MULTIPLE`）另起一行提示"可能不再代表当前系统"，与"不健康"分开：旧≠坏。
+- **自愈（`eval.autoRepairUnhealthyBaseline`，默认 `false`）**：`repairUnhealthyBaseline(db, scope, config)`，
+  由 `memory_stats` 调用（子代理受 `resolver.mayWrite` 守卫，与自动冻结同一条规则）。**三条判据全中**才替换：
+  ①已有快照不健康；②**当前窗口通过同一条质量门**；③当前窗口任务指标数 ≥ `proposeFreezeAfterTasks`。
+  任一不满足则不动——尤其当前窗口不健康时**拒绝**（用坏窗口盖掉坏窗口等于漂白同一个错误），
+  拒绝原因进日志与渲染。替换 = 单事务内 `DELETE` 全部旧行 + 写入**通过门禁的那个快照**
+  （`note` 记 `auto-repair: replaced an unhealthy baseline (was success X / rework Y)` + 触发它的门禁失败项，
+  `log('info')` 留痕），并删除全部旧行而不只是最新一行：`latestBaseline` 只读最新行，留下更旧的行会把它
+  静默顶到基准位。
+  <!-- 调用点只放在工具路径：惰性巩固（hooks/index.ts）只有 `cwd` 解析出的 scope，拿不到 `agent`，
+       也就无法执行 `resolver.mayWrite` 守卫——在那个路径上写"删除基准行"会让子代理会话也能改基准。
+       自动冻结在那个路径上属于既有实现，本次不动它。 -->
+
 **晋升闭环被消费**：`memory_consolidate({ acceptProposal })` 真正把技能草稿落到 `~/.dsh/skills/<name>/SKILL.md`
 （人工审批环节保留：只有显式 accept 才写；覆盖需 `overwrite`；skill 名限 `[a-z0-9-]` 防穿越）。
 **安全与运维**：脱敏补 JWT 与高熵长串启发式（保留 git SHA 与普通标识符）；批量遗忘（默认 dry-run）；

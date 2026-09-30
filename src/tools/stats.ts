@@ -8,6 +8,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { MemoryConfig } from '../config.js'
 import {
+    assessBaselineHealth,
     evaluateGate,
     freezeBaseline,
     healthDigest,
@@ -17,6 +18,7 @@ import {
     qualityGateFailure,
     readBaseline,
     renderEvaluation,
+    repairUnhealthyBaseline,
     snapshotMetrics,
     windowSummary,
 } from '../eval/baseline.js'
@@ -48,7 +50,7 @@ export function statsTool(deps: StatsToolDeps) {
     return defineTool({
         name: 'memory_stats',
         description:
-            'Report memory-store health and the evaluation gate: record counts, recall hit rate, learning cost, open conflicts/proposals, task-metric trends, and whether the current period regressed against the frozen baseline. Freezing a new baseline is a human-review step: setBaseline=true is refused unless the user explicitly asked for it and a non-empty baselineReason is passed. With eval.autoFreezeBaseline the plugin freezes the first baseline by itself once eval.proposeFreezeAfterTasks task metrics exist; the report always states whether there is enough data to freeze.',
+            'Report memory-store health and the evaluation gate: record counts, recall hit rate, learning cost, open conflicts/proposals, task-metric trends, and whether the current period regressed against the frozen baseline. Freezing a new baseline is a human-review step: setBaseline=true is refused unless the user explicitly asked for it and a non-empty baselineReason is passed. With eval.autoFreezeBaseline the plugin freezes the first baseline by itself once eval.proposeFreezeAfterTasks task metrics exist; the report always states whether there is enough data to freeze. A snapshot that itself fails the freeze quality gate (eval.autoFreezeMinSuccessRate / eval.autoFreezeMaxRework) is always reported as UNHEALTHY with a copyable remedy, because every verdict computed against it is untrustworthy; with eval.autoRepairUnhealthyBaseline (default off) such a snapshot is replaced automatically, but only when the current window passes that same gate and carries enough task metrics.',
         parameters: {
             scope: { type: 'string', enum: ['auto', 'all'], description: 'auto = this session\'s scope; all = also the global store.' },
             setBaseline: {
@@ -138,15 +140,28 @@ export function statsTool(deps: StatsToolDeps) {
                 // no baseline the gate can only answer UNKNOWN, and a user who
                 // turned the knob on asked for that to stop being permanent.
                 // Subagents never trigger it — same rule as setBaseline.
-                const autoFrozen = deps.resolver.mayWrite(agent)
+                const mayWrite = deps.resolver.mayWrite(agent)
+                const autoFrozen = mayWrite
                     ? maybeFreezeBaseline(store.db, store.scope, deps.config)
                     : undefined
                 if (autoFrozen !== undefined) {
                     lines.push(`  baseline auto-frozen — ${autoFrozen.note ?? ''}`)
                 }
 
+                // The escape hatch from a baseline that was frozen while bad: the
+                // idempotent freeze path above never replaces an existing snapshot,
+                // so without this the gate keeps comparing against a reference that
+                // reads every regression as a pass. Off by default
+                // (`eval.autoRepairUnhealthyBaseline`) and guarded exactly like the
+                // freeze: a subagent must not rewrite the reference either.
+                const repair = mayWrite ? repairUnhealthyBaseline(store.db, store.scope, deps.config) : undefined
+                if (repair?.replaced === true) {
+                    lines.push(`  baseline auto-repaired — ${repair.snapshot?.note ?? ''}`)
+                }
+
                 const current = snapshotMetrics(store.db)
-                const gate = evaluateGate(current, latestBaseline(store.db))
+                const baseline = latestBaseline(store.db)
+                const gate = evaluateGate(current, baseline)
                 const trend = {
                     current: windowSummary(store.db, windowDays, 0),
                     previous: windowSummary(store.db, windowDays, windowDays),
@@ -167,14 +182,41 @@ export function statsTool(deps: StatsToolDeps) {
                 // The same gate `maybeFreezeBaseline` applies, so the report never
                 // promises a freeze that the freeze path would refuse.
                 const autoFreezeBlocked = qualityGateFailure(current, deps.config)
+                // …and the same gate applied to the snapshot already in the table: a
+                // reference frozen *before* that gate existed is the failure mode it
+                // cannot detect by looking only at the current window. When a repair
+                // was attempted but declined, the reason travels into the report —
+                // "nothing happened" must never be silent.
+                const baselineHealth =
+                    baseline === undefined
+                        ? undefined
+                        : {
+                              ...assessBaselineHealth(baseline, deps.config),
+                              ...(repair?.replaced === true
+                                  ? {}
+                                  : {
+                                        autoRepairBlocked:
+                                            repair?.skipped ??
+                                            (mayWrite
+                                                ? 'the repair path did not run'
+                                                : 'a subagent session never writes memory (routing.subagentWrite)'),
+                                    }),
+                          }
                 lines.push(
-                    ...renderEvaluation(gate, healthDigest(store.db, windowDays), trend, baselineDoc?.tasks ?? [], {
-                        metricTasks: metricTaskCount(store.db),
-                        threshold: deps.config.eval.proposeFreezeAfterTasks,
-                        windowDays,
-                        autoFreeze: deps.config.eval.autoFreezeBaseline,
-                        ...(autoFreezeBlocked !== undefined ? { autoFreezeBlocked } : {}),
-                    }),
+                    ...renderEvaluation(
+                        gate,
+                        healthDigest(store.db, windowDays),
+                        trend,
+                        baselineDoc?.tasks ?? [],
+                        {
+                            metricTasks: metricTaskCount(store.db),
+                            threshold: deps.config.eval.proposeFreezeAfterTasks,
+                            windowDays,
+                            autoFreeze: deps.config.eval.autoFreezeBaseline,
+                            ...(autoFreezeBlocked !== undefined ? { autoFreezeBlocked } : {}),
+                        },
+                        baselineHealth,
+                    ),
                 )
             }
             return lines.join('\n')

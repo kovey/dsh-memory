@@ -1,12 +1,14 @@
 ---
 title: edit 报 old_string and new_string must differ：说明改动已生效或写错了，先 Read 再决定是否重试
-confidence: 0.6
+confidence: 0.56
 expires: permanent
 times_seen: 1
 updated: 2026-09-30
 tags: edit, old_string, 重复编辑, Read
 status: pending
 origin: distilled
+times_recalled: 1
+fail_after_recall: 1
 created: 2026-09-30
 evidence: rework×1, test-failure×1, tool-failure×3
 ---

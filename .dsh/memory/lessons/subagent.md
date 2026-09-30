@@ -1,12 +1,14 @@
 ---
 title: 后台 subagent 完成通知到达且用户已示意停止时，不要基于其结果继续追加动作
-confidence: 0.6
+confidence: 0.56
 expires: permanent
 times_seen: 1
 updated: 2026-09-30
 tags: background-subagent, user-correction, stop, 任务收尾
 status: pending
 origin: distilled
+times_recalled: 1
+fail_after_recall: 1
 created: 2026-09-30
 evidence: user-correction×1
 ---

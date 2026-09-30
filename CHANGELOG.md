@@ -38,6 +38,54 @@
 - `src/message-source.ts`：自有 source kind 的声明模块。
 - 测试：`buildQuery` 的跳过逻辑补一条**新形状**用例，确保两代形状都不会被当作查询文本。
 
+## [0.3.0] — 2026-09-30
+
+一轮针对"自评 17 项劣势"的全面优化。三大主题：学习质量、门禁可用性、安全与运维。
+
+### Added
+
+- **pending 按「被使用」晋升**（`promoteByUse`）：蒸馏候选进 pending 是设计（§7 未审核不当事实），
+  但此前没有出口——本机实测淤积到 55/94。现在：`times_recalled ≥ learn.promoteAfterRecalls`（默认 3）
+  且 `成功/(成功+失败) ≥ learn.promoteMinSuccessRatio`（默认 0.5）→ 升为 active，由惰性巩固执行并报告。
+  **真实语料实测：pending 38 → 33、active 56 → 61**（晋升的 5 条均有明确使用证据）。
+- **门禁可用性**：`eval.autoFreezeBaseline`（默认 false）+ `eval.proposeFreezeAfterTasks`（默认 5）。
+  未冻结基线时，`memory_stats` 明确给出可复制的冻结命令与"还差多少任务指标"（此前只能输出 UNKNOWN）。
+- **晋升闭环被消费**：`memory_consolidate({ acceptProposal })` 真正把技能草稿落到
+  `~/.dsh/skills/<name>/SKILL.md`（人工审批保留；覆盖需 `overwrite`；技能名限 `[a-z0-9-]`）。
+- **批量遗忘**：`memory_forget` 支持 `query` / `layer` / `olderThanDays`，**默认 dry-run**（先列清单再执行）。
+- **跨进程协调**：导出+提交加文件锁（`git.lockTimeoutMs`，陈旧锁可抢占），解决 nvim-tui 与 web
+  同时写同一记忆根的隐患。
+- **版本化诊断**：仓库忽略 `.dsh/` 时明确告警"记忆未纳入 git（无克隆重建、无归档恢复）"——
+  该承诺此前是静默失效的。
+- **健康度行**：每个记忆根每进程一次，输出记录分布与 pending 占比（≥50% 给出处置提示）。
+- **CI**：GitHub Actions（Node 22.19 / 24 矩阵跑 `typecheck` + 全量测试）。
+- **L5 写入通道**：`memory_save({ layer: 'profile', profileFile })` 可写 `conventions.md` 等命名文件。
+
+### Changed
+
+- **归因按时序定位**（`applyOutcome(..., { maxStep })`）：过去"本轮失败"会把该轮所有注入记为失败，
+  包括失败之后才注入、模型根本没看到的记忆；现在以最早失败信号的 step 为高水位。
+- **召回查询改为最新优先**：此前按到达顺序取前 2000 字符，长回合会被最早说的话主导。
+- 脱敏补 **JWT** 与**高熵长串**启发式（保留 git SHA 与普通标识符）。
+- 每个配置旋钮都写进随包发布的 `cordis.patch.yml` 注释；`.gitignore` 排除其它插件的运行数据。
+
+### Verified
+
+- `npm test` **211 例全绿**（本轮新增 27 例）；`tsc` 零错误。
+- **真机验证**（宿主 dsh 0.2.0-rc.2，nvim-tui e2e，人为构造一个忽略 `.dsh/` 的仓库）：
+  ```
+  memory: /private/tmp/…/.dsh/memory is git-ignored in this repository — project memory is machine-local …
+  memory: global store — 94 records (39 active / 55 pending), 59% pending — mostly unvetted candidates: …
+  memory: injected 4 record(s) (~598 tok) …  → 模型据 memory_stats 回答"积累 5 个任务指标后可冻结基线"
+  ```
+- 真实语料上的晋升演练（复制真实库）：dry-run 零改动，正式巩固只晋升 5 条"被用过"的记录。
+
+### Notes
+
+- 仍未做的事：ANN 索引（数万条规模才需要）、文本视图只存证据的"类型×次数"而非细节（刻意取舍，
+  避免把原始输出推进 git）、以及多宿主并发下的会话级覆盖不持久（`memory_config` 仅当次进程有效）。
+- 已准备好但**未发布 tag**：v0.3.0 待明确指示后打标签。
+
 ## [0.2.3] — 2026-09-30
 
 ### Changed
@@ -226,6 +274,7 @@
 - 库中已存在的历史重复 id 不会自动删除（import 只保证不再新增），需要显式 dedupe。
 - `tui` 等生产面只消费发布版本（tag/NPM），不走本地 link。
 
+[0.3.0]: https://github.com/kovey/dsh-memory/releases/tag/v0.3.0
 [0.2.3]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.3
 [0.2.2]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.2
 [0.2.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.1

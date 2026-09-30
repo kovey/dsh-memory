@@ -286,8 +286,7 @@ export class AutoCommitter {
      * Exactly one process (and one call inside this process) is inside at a time.
      */
     commit(scope, reason, now) {
-        const held = inProcessHeld.get(scope.root);
-        if (held !== undefined) {
+        if (inProcessHeld.has(scope.root)) {
             // Re-entrant call (an export hook that commits, two hosts sharing a
             // root): waiting would deadlock on our own lock file.
             log('debug', `memory: commit skipped for ${scope.root}: this process is already committing it (${reason})`);

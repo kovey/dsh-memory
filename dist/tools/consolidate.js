@@ -340,8 +340,15 @@ async function bulkForget(deps, targets, options) {
         let archived = 0;
         for (const item of selected) {
             try {
-                store.db.prepare("UPDATE records SET status = 'archived', updated_at = ? WHERE id = ?").run(at, item.id);
-                archived += 1;
+                const result = store.db
+                    .prepare("UPDATE records SET status = 'archived', updated_at = ? WHERE id = ?")
+                    .run(at, item.id);
+                // Count what the database actually changed: a record that
+                // disappeared between the listing and the write is not archived.
+                if (Number(result.changes ?? 0) > 0)
+                    archived += 1;
+                else
+                    failures.push(`${item.id}: nothing to archive (record no longer present)`);
             }
             catch (error) {
                 failures.push(`${item.id}: ${error instanceof Error ? error.message : String(error)}`);

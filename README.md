@@ -49,7 +49,10 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 | 11 个工具（含 `memory_config` 会话级降噪、`memory_import` 外部导入） | ✅ |
 | 子代理写保护（写类工具统一拒绝，可由 `routing.subagentWrite` 打开） | ✅ |
 | 门禁三态 `pass / regression / **unknown**`（无数据不再算通过） | ✅ |
-| L4 晋升草稿 `proposals/<id>.SKILL.md`（人审后移动即可，插件不写 `~/.dsh/skills`） | ✅ |
+| L4 晋升：草稿 + `memory_consolidate({acceptProposal})` 落地到 `~/.dsh/skills`（人工审批） | ✅ |
+| pending 按「被使用」晋升（recalled ≥3 且成功率 ≥50%） | ✅ |
+| 门禁可用性：未冻结基线时给出冻结命令与数据缺口；可选 `autoFreezeBaseline` | ✅ |
+| 跨进程导出/提交锁、批量遗忘（dry-run 默认）、版本化诊断、健康度行、CI | ✅ |
 | `agent/pre-step` 自动召回（阈值 0.35 / 预算 600 tok / 会话内幂等） | ✅ |
 | 召回记账 `usage`（注入次数、召回后成败归因） | ✅ |
 | 工具 `memory_search` / `memory_get` / `memory_recall` / `memory_stats` / `memory_reindex` | ✅ |

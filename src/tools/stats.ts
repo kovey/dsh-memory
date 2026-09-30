@@ -141,9 +141,7 @@ export function statsTool(deps: StatsToolDeps) {
                     ? maybeFreezeBaseline(store.db, store.scope, deps.config)
                     : undefined
                 if (autoFrozen !== undefined) {
-                    lines.push(
-                        `  baseline auto-frozen (eval.autoFreezeBaseline): ${autoFrozen.tasks} task(s) in the ledger — ${autoFrozen.note ?? ''}`,
-                    )
+                    lines.push(`  baseline auto-frozen — ${autoFrozen.note ?? ''}`)
                 }
 
                 const current = snapshotMetrics(store.db)

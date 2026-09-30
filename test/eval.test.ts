@@ -463,7 +463,7 @@ test('a stats call freezes the first baseline by itself when the knob is on', as
     insertTask(h.store.db, { id: 't2', date: '2026-09-02', outcome: 'success' })
 
     const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
-    assert.match(report, /baseline auto-frozen \(eval\.autoFreezeBaseline\): 2 task\(s\)/)
+    assert.match(report, /baseline auto-frozen — auto-freeze \(eval\.autoFreezeBaseline\): 2 task metric\(s\), gate window 30d/)
     assert.match(report, /verdict: PASS/)
     assert.equal(snapshotCount(h), 1)
 })

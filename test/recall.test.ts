@@ -13,7 +13,7 @@ import { indexSummaryText, protocolText, registerProtocolSection } from '../dist
 import { clearRepoCache } from '../dist/paths.js'
 import { packTokens, recall, renderRecallPack } from '../dist/recall/engine.js'
 import { normalizeRelevance, frequencyBoost, recallBoost, rankRecords } from '../dist/recall/rank.js'
-import { buildQuery, messageText, isMemoryMessage } from '../dist/recall/query.js'
+import { buildQuery, isMemoryMessage, isTaskBearing, messageText } from '../dist/recall/query.js'
 import { assertDraftScope, ScopeViolationError } from '../dist/store/guard.js'
 import { applyDraft } from '../dist/learn/gate.js'
 import { SessionState } from '../dist/recall/session-state.js'
@@ -103,6 +103,16 @@ test('buildQuery skips plugin-injected messages and extracts terms', () => {
     // and the current `{kind:'dsh-memory'}`. A shape-only-`plugin` record with
     // no `kind` is NOT one of ours (nothing emits that), so it must be false.
     assert.equal(isMemoryMessage({ source: { kind: 'dsh-memory' } }), true)
+    // dsh 0.2.0-rc.2 added `user-question-reply` (the answer to a question tool):
+    // a structured outcome whose text is a choice token, not a task statement.
+    const reply = { content: [{ type: 'text', text: 'B' }], source: { kind: 'user-question-reply' } }
+    assert.equal(isTaskBearing(reply), false)
+    const task = { content: [{ type: 'text', text: '把沙箱策略改成 workspace-write' }], source: { kind: 'user-rpc' } }
+    assert.equal(isTaskBearing(task), true)
+    const mixed = buildQuery([reply, task])
+    assert.equal(mixed.sources, 1, 'only the task statement feeds recall')
+    assert.doesNotMatch(mixed.text, /^B$/m)
+    assert.match(mixed.text, /沙箱策略/)
     assert.equal(isMemoryMessage({ source: { kind: 'plugin', plugin: 'dsh-memory' } }), true)
     assert.equal(isMemoryMessage({ source: { plugin: 'dsh-memory' } }), false)
     assert.equal(isMemoryMessage({ source: { kind: 'plugin', plugin: 'someone-else' } }), false)

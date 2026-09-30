@@ -46,5 +46,17 @@ export interface BuildQueryOptions {
  * user-authored text is used: older messages are already covered by earlier
  * recall passes in the same session.
  */
+/**
+ * Source kinds that carry *mechanical* text rather than the user's own task
+ * statement, so they must not steer recall.
+ *
+ * `user-question-reply` arrived with dsh 0.2.0-rc.2 (the answer to a question
+ * tool): its payload is a structured outcome (`callId` + `outcome`), and the
+ * text it may carry is a choice token — searching memory for it would let a bare
+ * "B" dilute the query that the actual task produced.
+ */
+export declare const NON_TASK_SOURCES: readonly string[];
+/** True when a message represents what the user is asking for (not plugin or tool plumbing). */
+export declare function isTaskBearing(message: MessageLike | undefined): boolean;
 export declare function buildQuery(messages: readonly MessageLike[], options?: BuildQueryOptions): RecallQuery;
 //# sourceMappingURL=query.d.ts.map

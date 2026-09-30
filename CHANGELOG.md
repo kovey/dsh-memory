@@ -38,6 +38,33 @@
 - `src/message-source.ts`：自有 source kind 的声明模块。
 - 测试：`buildQuery` 的跳过逻辑补一条**新形状**用例，确保两代形状都不会被当作查询文本。
 
+## [0.2.3] — 2026-09-30
+
+### Changed
+
+- **适配 dsh `0.2.0-rc.2`**：peerDependencies / devDependencies 精确锚定 `0.2.0-rc.1` → `0.2.0-rc.2`。
+- **新增来源类型的刻意处理**：rc.2 给 `MessageSourceMap` 增加了 `user-question-reply`
+  （问题工具的作答，载荷是 `callId` + `outcome` 的结构化结果）。其文本是"选项 token"而非用户的
+  任务陈述，因此**不再参与召回查询**（`NON_TASK_SOURCES` / `isTaskBearing`）：否则一个光秃秃的
+  `B` 会稀释由真实任务文本构造的查询。消息内容本身不受影响，仍完整落在会话里。
+
+### Verified
+
+- `0.2.0-rc.1` → `0.2.0-rc.2` API 面逐包比对：五个直接依赖**只差 package.json 版本号**；
+  `dsh-llm/lib/typert.host.js` 的 2 行差异即上面那个新增来源类型（生成的类型注册表）。
+  → 除该来源类型外**无 API 变化**。
+- **真机验证**（宿主 0.2.0-rc.2，nvim-tui e2e）：插件未被 peer 门禁跳过、
+  `memory: ready`、94 条真实语料引导导入、**自动召回注入 4 条 / 572 tok**（即 rc.2 的会话格式
+  仍接受本插件自定义的 `source.kind = 'dsh-memory'`）、模型调用 `memory_search` 命中 7 条、
+  会话指标落账。
+- `npm test` 179 例全绿（召回查询用例新增"结构化来源不参与查询"的断言）。
+
+### Notes
+
+- 同 profile 的 `dsh-chat-interaction@0.1.8` 仍被门禁跳过：它声明的是
+  `^0.1.5-rc.1 || ^0.1.7-rc.1 || ^0.1.7-rc.2`，未覆盖 `0.2.x`。
+- 未打 tag（按约定：版本发布等待明确指示）。
+
 ## [0.2.2] — 2026-09-29
 
 ### Changed
@@ -199,6 +226,7 @@
 - 库中已存在的历史重复 id 不会自动删除（import 只保证不再新增），需要显式 dedupe。
 - `tui` 等生产面只消费发布版本（tag/NPM），不走本地 link。
 
+[0.2.3]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.3
 [0.2.2]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.2
 [0.2.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.1
 [0.1.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.1.1

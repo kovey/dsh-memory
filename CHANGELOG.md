@@ -113,7 +113,7 @@
   避免把原始输出推进 git）、以及多宿主并发下的会话级覆盖不持久（`memory_config` 仅当次进程有效）。
 - 已准备好但**未发布 tag**：v0.3.0 待明确指示后打标签。
 
-## [Unreleased]
+## [0.3.1] — 2026-09-30
 
 ### Added
 
@@ -329,7 +329,7 @@
 - 库中已存在的历史重复 id 不会自动删除（import 只保证不再新增），需要显式 dedupe。
 - `tui` 等生产面只消费发布版本（tag/NPM），不走本地 link。
 
-[Unreleased]: https://github.com/kovey/dsh-memory/compare/v0.3.0...HEAD
+[0.3.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.3.1
 [0.3.0]: https://github.com/kovey/dsh-memory/releases/tag/v0.3.0
 [0.2.3]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.3
 [0.2.2]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.2

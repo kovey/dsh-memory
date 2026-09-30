@@ -1,2 +1,3 @@
 {"task_id":"s-2026-09-28-bc388ef3","date":"2026-09-28","project":"session","summary":"auto: 31 turn(s), 32 tool call(s), 0 signal(s)","outcome":"success","duration_min":5480,"disturb_count":0,"rework_rounds":0,"lessons":0,"tokens":0}
 {"task_id":"s-2026-09-30-bc388ef3","date":"2026-09-30","project":"session","summary":"auto: 36 turn(s), 0 tool call(s), 0 signal(s)","outcome":"partial","duration_min":1499,"disturb_count":0,"rework_rounds":0,"lessons":0,"tokens":0}
+{"task_id":"s-2026-09-30-faa166dd","date":"2026-09-30","project":"session","summary":"auto: 1 turn(s), 0 tool call(s), 0 signal(s)","outcome":"partial","duration_min":0,"disturb_count":0,"rework_rounds":0,"lessons":0,"tokens":0}

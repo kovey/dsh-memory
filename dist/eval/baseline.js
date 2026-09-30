@@ -13,6 +13,7 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import { log } from '../log.js';
 import { rowInt, rowNum, rowStr } from '../store/sqlite/db.js';
 import { summarizeMetrics } from '../store/metrics.js';
 /** Parse `baseline.md` (task list + metric table). Tolerant by design. */
@@ -123,6 +124,53 @@ export function latestBaseline(db) {
         avgRework: rowNum(row, 'avg_rework') ?? null,
         ...(note !== undefined ? { note } : {}),
     };
+}
+/**
+ * Task-ledger rows that actually carry one of the four gate metrics.
+ *
+ * A row with only `task_id`/`date`/`summary` and no outcome, duration, disturb
+ * or rework value cannot be compared by the gate, so it must not count towards
+ * the "enough data to freeze" threshold: freezing on such rows would only
+ * produce a snapshot whose four metrics are `null`, i.e. a permanently UNKNOWN
+ * gate wearing the appearance of a calibrated one.
+ */
+export function metricTaskCount(db) {
+    const row = db
+        .prepare(`SELECT COUNT(*) AS n FROM tasks
+             WHERE outcome IN ('success', 'partial', 'failed')
+                OR duration_min IS NOT NULL OR disturb_count IS NOT NULL OR rework_rounds IS NOT NULL`)
+        .get();
+    return rowInt(row, 'n');
+}
+/**
+ * Freeze the first baseline automatically, when the user asked for it
+ * (`eval.autoFreezeBaseline`) and the ledger has enough comparable rows.
+ *
+ * This is the escape hatch from the gate's permanent-UNKNOWN state: with no
+ * snapshot the gate can only ever answer UNKNOWN, which is exactly the state the
+ * live store was in. Both guards matter:
+ *
+ *   - an existing snapshot is never replaced (idempotent) — refreezing is how a
+ *     regression signal gets erased, and `setBaseline` already requires a human
+ *     reason for that reason;
+ *   - no data means no freeze, so the gate never pretends to have a reference.
+ *
+ * Returns the frozen snapshot, or undefined when nothing was frozen.
+ */
+export function maybeFreezeBaseline(db, scope, config, now = new Date()) {
+    if (config.eval.autoFreezeBaseline !== true)
+        return undefined;
+    if (latestBaseline(db) !== undefined)
+        return undefined;
+    const metricTasks = metricTaskCount(db);
+    const threshold = Math.max(1, Math.floor(config.eval.proposeFreezeAfterTasks));
+    if (metricTasks < threshold)
+        return undefined;
+    const label = scope.kind === 'project' ? `project:${scope.repo ?? scope.root}` : 'global';
+    const windowDays = config.eval.windowDays;
+    const snapshot = freezeBaseline(db, label, `auto-freeze (eval.autoFreezeBaseline): ${metricTasks} task metric(s), gate window ${windowDays}d`, now);
+    log('info', `memory: baseline auto-frozen for ${label} — ${metricTasks} task metric(s) with outcome/cost data in the task ledger (threshold ${threshold}, gate window ${windowDays}d)`);
+    return snapshot;
 }
 /** Tolerance so noise in a small ledger does not read as a regression. */
 export const TOLERANCE = { successRate: 0.05, duration: 0.15, disturb: 0.5, rework: 0.5 };
@@ -244,12 +292,26 @@ export function windowSummary(db, days, offsetDays = 0, now = new Date()) {
     };
 }
 /** Render the gate + health report for `memory_stats`. */
-export function renderEvaluation(gate, health, trend, baselineTasks) {
+export function renderEvaluation(gate, health, trend, baselineTasks, progress) {
     const lines = [];
     lines.push('evaluation gate:');
     const noBaseline = gate.verdict === 'unknown' && (gate.baseline === undefined || gate.unknownReason === 'no-baseline');
     if (noBaseline) {
         lines.push(`  verdict: UNKNOWN — no baseline snapshot yet (tasks so far: ${gate.current.tasks})`);
+        if (progress !== undefined) {
+            const { metricTasks, threshold, windowDays, autoFreeze } = progress;
+            const remaining = Math.max(0, threshold - metricTasks);
+            if (metricTasks >= threshold) {
+                lines.push(`  ${metricTasks} task metric(s) accumulated (threshold ${threshold}, gate window ${windowDays}d) — enough to freeze a baseline`);
+                lines.push('  freeze it: memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })');
+                lines.push(autoFreeze
+                    ? '  eval.autoFreezeBaseline is on: the next memory_stats call freezes it without asking'
+                    : '  eval.autoFreezeBaseline is off, so nothing is frozen automatically — this stays a human decision');
+            }
+            else {
+                lines.push(`  not enough task metrics yet: ${metricTasks} of ${threshold} required (eval.proposeFreezeAfterTasks) — ${remaining} more task(s) with an outcome/duration/disturb/rework value needed`);
+            }
+        }
         lines.push('  freeze one only after a good period and an explicit user request: memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })');
     }
     else {

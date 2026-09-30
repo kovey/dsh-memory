@@ -5,6 +5,8 @@ import { AutoCommitter } from '../sync/autocommit.js';
 import { ensureRepo } from '../sync/git.js';
 import { consolidate } from '../learn/consolidate.js';
 import { pruneEpisodes, pruneSignals } from '../learn/episodic.js';
+import { maybeFreezeBaseline } from '../eval/baseline.js';
+import { countRecords } from '../store/sqlite/records.js';
 import { pruneForeignModels, pruneVectors } from '../recall/semantic.js';
 import { pruneUsage } from '../recall/usage.js';
 import { buildLedgerRow, recordSessionMetric, sessionStats, withLearningCounters } from '../learn/task-metrics.js';
@@ -194,6 +196,11 @@ function runLazyConsolidation(deps, scope) {
         const prunedRows = pruneSignals(store.db, deps.config.episodic.retentionDays);
         // Derived / audit data that would otherwise grow forever.
         const prunedUsage = pruneUsage(store.db, deps.config.consolidate.usageRetentionDays);
+        // Optional (off by default): freeze the gate's baseline once a healthy
+        // window exists. Without a snapshot the gate can only ever answer UNKNOWN.
+        const frozen = maybeFreezeBaseline(store.db, store.scope, deps.config);
+        if (frozen !== undefined)
+            log('info', `memory: baseline auto-frozen at ${frozen.at} over ${frozen.tasks} task(s)`);
         let prunedVectors = pruneVectors(store.db, deps.config.semantic.model);
         if (deps.config.semantic.enabled && deps.config.semantic.model !== '') {
             prunedVectors += pruneForeignModels(store.db, deps.config.semantic.model, deps.config.semantic.foreignModelGraceDays);

@@ -95,7 +95,14 @@ export function buildQuery(messages: readonly MessageLike[], options: BuildQuery
     const maxTerms = options.maxTerms ?? 12
     const maxChars = options.maxChars ?? 2_000
     const texts: string[] = []
-    for (const message of messages) {
+    // Newest text first, then the character budget is applied.
+    //
+    // The budget is small (2k chars) and a turn can carry many messages: taking
+    // them in arrival order meant a long turn's query was dominated by whatever
+    // was said first, so recall answered yesterday's question. What the user is
+    // asking *now* has to win the budget.
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+        const message = messages[index]
         if (!isTaskBearing(message)) continue
         const text = messageText(message).trim()
         if (text === '') continue

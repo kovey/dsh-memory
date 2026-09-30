@@ -233,11 +233,12 @@ function attributeAcrossRoots(
     sessionId: string,
     outcome: 'success' | 'failure',
     turn: number,
+    options: { maxStep?: number } = {},
 ): number {
     let attributed = 0
     for (const candidate of deps.registry.listOpen()) {
         try {
-            attributed += applyOutcome(candidate.db, sessionId, outcome, turn)
+            attributed += applyOutcome(candidate.db, sessionId, outcome, turn, options)
         } catch (error) {
             log('debug', 'memory: outcome attribution failed for a root:', error)
         }
@@ -314,7 +315,14 @@ async function handleTurnEnd(deps: LearnDeps, payload: { agent?: AgentLike; turn
         captureUserText: deps.config.episodic.captureUserText,
     })
     try {
-        attributeAcrossRoots(deps, sessionId, 'failure', turn)
+        // Only memories the model had already seen when things went wrong can be
+        // blamed: use the earliest failure signal's step as the high-water mark.
+        const failureSteps = collected.signals
+            .map((signal) => signal.step)
+            .filter((step): step is number => typeof step === 'number')
+        attributeAcrossRoots(deps, sessionId, 'failure', turn, {
+            ...(failureSteps.length > 0 ? { maxStep: Math.min(...failureSteps) } : {}),
+        })
     } catch (error) {
         log('debug', 'memory: failure attribution failed:', error)
     }

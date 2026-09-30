@@ -62,8 +62,9 @@ export function applyOutcome(
     sessionId: string,
     outcome: 'success' | 'failure',
     turn?: number,
+    options: { maxStep?: number } = {},
 ): number {
-    const attributed = attributeOutcome(db, sessionId, outcome, turn)
+    const attributed = attributeOutcome(db, sessionId, outcome, turn, options)
     // Success only needs the counter (already bumped) to affect later maths.
     if (attributed === 0 || outcome === 'success') return attributed
     const rows = turn === undefined
@@ -95,12 +96,23 @@ export function attributeOutcome(
     sessionId: string,
     outcome: 'success' | 'failure',
     turn?: number,
+    options: { maxStep?: number } = {},
 ): number {
+    // A failure observed at step k cannot have been caused by a memory injected
+    // at step k+1: attributing by turn alone blamed every injection in the turn,
+    // including ones the model had not even seen when things went wrong.
+    const maxStep = options.maxStep
+    const stepClause = maxStep !== undefined ? ' AND (step IS NULL OR step <= ?)' : ''
+    const stepArgs = maxStep !== undefined ? [maxStep] : []
     const rows = turn === undefined
-        ? db.prepare('SELECT id, record_id FROM usage WHERE session_id = ? AND outcome IS NULL').all(sessionId)
+        ? db
+              .prepare(`SELECT id, record_id FROM usage WHERE session_id = ? AND outcome IS NULL${stepClause}`)
+              .all(sessionId, ...stepArgs)
         : db
-              .prepare('SELECT id, record_id FROM usage WHERE session_id = ? AND outcome IS NULL AND turn = ?')
-              .all(sessionId, turn)
+              .prepare(
+                  `SELECT id, record_id FROM usage WHERE session_id = ? AND outcome IS NULL AND turn = ?${stepClause}`,
+              )
+              .all(sessionId, turn, ...stepArgs)
     if (rows.length === 0) return 0
     transact(db, () => {
         const setOutcome = db.prepare('UPDATE usage SET outcome = ? WHERE id = ?')

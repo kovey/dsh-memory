@@ -1,4 +1,5 @@
 import type { DatabaseSync } from 'node:sqlite';
+import type { MemoryConfig } from '../config.js';
 import type { MetricSummary } from '../store/metrics.js';
 import type { MemoryScope } from '../store/types.js';
 /** One entry of the "基线任务集" section of baseline.md. */
@@ -39,6 +40,32 @@ export declare function snapshotMetrics(db: DatabaseSync, at?: Date, note?: stri
 export declare function freezeBaseline(db: DatabaseSync, scopeLabel: string, note?: string, at?: Date): MetricSnapshot;
 /** Most recent snapshot, or undefined when the gate has no reference yet. */
 export declare function latestBaseline(db: DatabaseSync): MetricSnapshot | undefined;
+/**
+ * Task-ledger rows that actually carry one of the four gate metrics.
+ *
+ * A row with only `task_id`/`date`/`summary` and no outcome, duration, disturb
+ * or rework value cannot be compared by the gate, so it must not count towards
+ * the "enough data to freeze" threshold: freezing on such rows would only
+ * produce a snapshot whose four metrics are `null`, i.e. a permanently UNKNOWN
+ * gate wearing the appearance of a calibrated one.
+ */
+export declare function metricTaskCount(db: DatabaseSync): number;
+/**
+ * Freeze the first baseline automatically, when the user asked for it
+ * (`eval.autoFreezeBaseline`) and the ledger has enough comparable rows.
+ *
+ * This is the escape hatch from the gate's permanent-UNKNOWN state: with no
+ * snapshot the gate can only ever answer UNKNOWN, which is exactly the state the
+ * live store was in. Both guards matter:
+ *
+ *   - an existing snapshot is never replaced (idempotent) — refreezing is how a
+ *     regression signal gets erased, and `setBaseline` already requires a human
+ *     reason for that reason;
+ *   - no data means no freeze, so the gate never pretends to have a reference.
+ *
+ * Returns the frozen snapshot, or undefined when nothing was frozen.
+ */
+export declare function maybeFreezeBaseline(db: DatabaseSync, scope: MemoryScope, config: MemoryConfig, now?: Date): MetricSnapshot | undefined;
 export type MetricVerdict = 'better' | 'same' | 'worse' | 'unknown';
 /**
  * Three-state gate. `unknown` is the *absence* of a judgement, not a pass:
@@ -109,9 +136,24 @@ export interface TrendWindow {
     summary: MetricSummary;
 }
 export declare function windowSummary(db: DatabaseSync, days: number, offsetDays?: number, now?: Date): TrendWindow;
+/**
+ * How close the task ledger is to a freezable baseline. Rendered next to the
+ * UNKNOWN verdict so a model reading `memory_stats` can tell "no data yet"
+ * (keep working) from "enough data, nobody froze it" (ask the user).
+ */
+export interface BaselineProgress {
+    /** Task-ledger rows carrying at least one gate metric (see `metricTaskCount`). */
+    metricTasks: number;
+    /** `eval.proposeFreezeAfterTasks` — the floor below which a baseline is noise. */
+    threshold: number;
+    /** `eval.windowDays` — the window the gate compares over. */
+    windowDays: number;
+    /** `eval.autoFreezeBaseline` — says whether anyone will freeze it automatically. */
+    autoFreeze: boolean;
+}
 /** Render the gate + health report for `memory_stats`. */
 export declare function renderEvaluation(gate: GateReport, health: HealthDigest, trend: {
     current: TrendWindow;
     previous: TrendWindow;
-}, baselineTasks: readonly BaselineTask[]): string[];
+}, baselineTasks: readonly BaselineTask[], progress?: BaselineProgress): string[];
 //# sourceMappingURL=baseline.d.ts.map

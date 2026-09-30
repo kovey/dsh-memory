@@ -6,11 +6,15 @@
  * exercised end to end (prompt → stream → parse → gate → store → audit).
  */
 import assert from 'node:assert/strict'
+import { execFileSync, spawn } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveConfig } from '../dist/config.js'
+import { setLogFile } from '../dist/log.js'
+import { acquireCommitLock, AutoCommitter, LOCK_FILE_NAME, releaseCommitLock, STALE_LOCK_MS } from '../dist/sync/autocommit.js'
+import type { CommitLock, CommitOutcome } from '../dist/sync/autocommit.js'
 import { recoverPendingDistillations, registerLearnHooks } from '../dist/hooks/learn.js'
 import { materialize, upsertRecord } from '../dist/store/sqlite/records.js'
 import { recall } from '../dist/recall/engine.js'
@@ -33,7 +37,7 @@ import { loadSqliteModule } from '../dist/store/sqlite/db.js'
 import { StoreRegistry } from '../dist/store/store.js'
 import type { ScopeStore } from '../dist/store/store.js'
 import type { Evidence } from '../dist/store/types.js'
-import { fakeRepo, lessonDoc, memoryFixture, useGlobalMemoryHome } from './helpers.ts'
+import { fakeRepo, lessonDoc, memoryFixture, repoRoot, tempDir, useGlobalMemoryHome } from './helpers.ts'
 
 const LESSON_JSON = JSON.stringify([
     {
@@ -173,6 +177,58 @@ test('redaction leaves ordinary words, paths and header names alone', () => {
     assert.equal(redact('the glpat- prefix is reserved for GitLab'), 'the glpat- prefix is reserved for GitLab')
     assert.equal(redact('ASIA-Pacific is a region name'), 'ASIA-Pacific is a region name')
     assert.equal(redact('AIza is not a word'), 'AIza is not a word')
+})
+
+// A format nobody enumerated yet must not reach L1 episodes, the distillation
+// prompt or the git-tracked text view unmasked — a commit makes it permanent.
+test('redaction masks JWTs whole, whatever their segment shape', () => {
+    const jwt =
+        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'
+    assert.equal(redact(`auth ${jwt} ok`), 'auth [redacted:jwt] ok')
+    assert.doesNotMatch(redact(`auth ${jwt} ok`), /eyJ/, 'no segment survives')
+    // base64url body charset (including `-`/`_`) and long segments still match
+    assert.equal(redact(`t ${jwt.replace('SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c', 'a'.repeat(70))}`), 't [redacted:jwt]')
+
+    // negative: a two-segment `eyJ…` value is not a JWT (≥2 dots required)
+    assert.equal(
+        redact('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0'),
+        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0',
+    )
+    // negative: below the 60-char floor the older prefix rule stays the fallback
+    assert.equal(redact('eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig1234567890'), 'jwt.***')
+    // negative: `eyJ…` inside an ordinary word (no word boundary) is not a token
+    assert.equal(redact('the word eyJobs is not a token'), 'the word eyJobs is not a token')
+})
+
+// "Rather miss than over-mask" (§7/D5): the point of the rule is to catch what
+// the prefix list never saw, not to redact every long string.
+test('the high-entropy rule spares SHAs, identifiers and prose', () => {
+    const token = 'AbCdEf12GhIjKl34MnOpQr56StUvWx78YzAbCd90EfGhIj12KlMnOp'
+    assert.equal(token.length, 54)
+    assert.equal(redact(`sess ${token} ok`), 'sess [redacted:high-entropy] ok')
+
+    // git SHA (7-40 hex) and any longer pure-hex digest are not credentials
+    assert.equal(redact('commit 4f3a9c1b7e2d8f0a6c5b4d3e2f1a0b9c8d7e6f5a'), 'commit 4f3a9c1b7e2d8f0a6c5b4d3e2f1a0b9c8d7e6f5a')
+    assert.equal(
+        redact('digest 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08'),
+        'digest 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
+    )
+    // 48+ lowercase chars read as a sentence-like run, not as a secret
+    const sentence = 'thisisaverylonglowercaseenglishsentencewithoutanyspaces1'
+    assert.equal(sentence.length, 56)
+    assert.equal(redact(sentence), sentence)
+    // one char below the floor: left alone (the floor is the cheap guard)
+    const short = token.slice(0, 47)
+    assert.equal(redact(`sess ${short} ok`), `sess ${short} ok`)
+    // ordinary camelCase identifiers carry no digit and stay readable
+    assert.equal(
+        redact('getUserProfileFromTheDatabaseByAccountIdentifierX failed'),
+        'getUserProfileFromTheDatabaseByAccountIdentifierX failed',
+    )
+    // the policy parameter still governs the heuristics: `none` discards the
+    // text entirely, `full` is the operator's explicit "keep it as-is" switch
+    assert.equal(redact(`sess ${token}`, 'none'), '')
+    assert.equal(redact(`sess ${token}`, 'full'), `sess ${token}`)
 })
 
 // ---- gate -------------------------------------------------------------------
@@ -1211,4 +1267,253 @@ test('already-injected records do not consume pack slots', async (t) => {
     const second = await recall({ config: h.resolved, registry: h.registry, resolver: h.resolver }, request)
     assert.equal(second.hits.length, 1, 'the next best record must still be injected')
     assert.notEqual(second.hits[0]!.record.id, injected[0])
+})
+
+// ---- cross-process commit lock (DESIGN §5.3, D6) ----------------------------
+//
+// Two hosts (nvim-tui + web) export and commit the same memory root. These live
+// here rather than in test/sync.test.ts because that file is owned by another
+// workstream right now; the subject matter is the same.
+
+function gitIn(cwd: string, ...args: string[]): string {
+    return execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+}
+
+/** A real repository: the lock exists to protect a real git commit. */
+function commitRepo(label: string): string {
+    const root = tempDir(label)
+    gitIn(root, 'init', '--quiet', '-b', 'main')
+    gitIn(root, 'config', 'user.email', 'test@example.com')
+    gitIn(root, 'config', 'user.name', 'dsh-memory test')
+    gitIn(root, 'config', 'commit.gpgsign', 'false')
+    return root
+}
+
+function writeLesson(root: string, name: string, body: string): void {
+    fs.mkdirSync(path.join(root, 'lessons'), { recursive: true })
+    fs.writeFileSync(path.join(root, 'lessons', name), body)
+}
+
+function commitScope(root: string): { kind: 'global'; root: string; reason: 'no-project-context' } {
+    return { kind: 'global', root, reason: 'no-project-context' }
+}
+
+/** Run `body` with the file logger pointed at a fresh file, then restore it. */
+function withLogFile(label: string, body: (logFile: string) => void): void {
+    const logFile = path.join(tempDir(label), 'memory.log')
+    setLogFile(logFile)
+    try {
+        body(logFile)
+    } finally {
+        setLogFile(undefined)
+    }
+}
+
+/**
+ * A real second host: a child Node process that appends its own lesson through
+ * an export hook and commits the shared root. It prints `{"phase":"started"}`
+ * before entering `commitNow`, so the test can release a lock deterministically
+ * instead of guessing at process startup time.
+ */
+const CHILD_COMMIT_SCRIPT = `
+const root = process.env.DSH_TEST_ROOT
+const lesson = process.env.DSH_TEST_LESSON
+const { AutoCommitter } = await import(${JSON.stringify(path.join(repoRoot, 'dist/sync/autocommit.js'))})
+const { resolveConfig } = await import(${JSON.stringify(path.join(repoRoot, 'dist/config.js'))})
+const fs = await import('node:fs')
+const path = await import('node:path')
+console.log(JSON.stringify({ phase: 'started', pid: process.pid }))
+const committer = new AutoCommitter(resolveConfig({ git: { autoCommit: 'immediate', lockTimeoutMs: 8000 } }), {
+    exportText: () => {
+        fs.mkdirSync(path.join(root, 'lessons'), { recursive: true })
+        fs.writeFileSync(path.join(root, 'lessons', lesson), 'child lesson\\n')
+    },
+})
+const at = Date.now()
+const outcome = committer.commitNow({ kind: 'global', root, reason: 'no-project-context' }, 'child host')
+console.log(JSON.stringify({ phase: 'done', committed: outcome.committed, skipped: outcome.skipped ?? null, waitedMs: Date.now() - at }))
+`
+
+interface ChildCommitRun {
+    started: Promise<void>
+    done: Promise<{ code: number | null; out: string }>
+}
+
+function spawnChildCommit(root: string, lesson: string): ChildCommitRun {
+    let markStarted: () => void = () => undefined
+    const started = new Promise<void>((resolve) => {
+        markStarted = resolve
+    })
+    const done = new Promise<{ code: number | null; out: string }>((resolve) => {
+        const child = spawn(process.execPath, ['--input-type=module', '-e', CHILD_COMMIT_SCRIPT], {
+            env: { ...process.env, DSH_TEST_ROOT: root, DSH_TEST_LESSON: lesson },
+            stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        let out = ''
+        child.stdout.on('data', (chunk: Buffer) => {
+            out += String(chunk)
+            if (out.includes('"phase":"started"')) markStarted()
+        })
+        child.on('close', (code) => resolve({ code, out }))
+    })
+    return { started, done }
+}
+
+function childOutcome(out: string): { committed: boolean; skipped: string | null; waitedMs: number } {
+    const line = out.split('\n').find((candidate) => candidate.includes('"phase":"done"'))
+    assert.ok(line !== undefined, `child printed no outcome: ${out}`)
+    return JSON.parse(line) as { committed: boolean; skipped: string | null; waitedMs: number }
+}
+
+test('two hosts committing one root both keep their content (in-process queue)', async () => {
+    const root = commitRepo('m4-lock-race')
+    const config = resolveConfig({ git: { autoCommit: 'immediate' } })
+    const hostA = new AutoCommitter(config, { exportText: () => writeLesson(root, 'from-a.md', 'A\n') })
+    const hostB = new AutoCommitter(config, { exportText: () => writeLesson(root, 'from-b.md', 'B\n') })
+
+    const [first, second] = await Promise.all([
+        hostA.commitAsync(commitScope(root), 'host a'),
+        hostB.commitAsync(commitScope(root), 'host b'),
+    ])
+    assert.equal(first.committed, true, first.detail)
+    assert.equal(second.committed, true, second.detail)
+    assert.equal(gitIn(root, 'rev-list', '--count', 'HEAD').trim(), '2', 'one commit per host, none interleaved')
+    const tracked = gitIn(root, 'ls-files')
+    assert.match(tracked, /lessons\/from-a\.md/, 'host A content is in the history')
+    assert.match(tracked, /lessons\/from-b\.md/, 'host B content is in the history')
+    assert.doesNotMatch(tracked, /dsh-memory-commit\.lock/, 'the lock file is never versioned')
+    assert.equal(gitIn(root, 'status', '--porcelain').trim(), '', 'no work left uncommitted')
+    assert.equal(fs.existsSync(path.join(root, LOCK_FILE_NAME)), false, 'the lock is released')
+})
+
+// The real thing: two OS processes, one root, released lock in between. The
+// in-process queue cannot help here — only the lock file can.
+test('two OS processes racing on one root both commit, and neither hangs', async () => {
+    const root = commitRepo('m4-lock-xproc')
+    const held = acquireCommitLock(root, 0)
+    assert.ok('file' in held, 'the parent process takes the lock first')
+    // the lock lives in the memory root (never in `.git/`) and names its holder
+    const lockFile = path.join(root, LOCK_FILE_NAME)
+    assert.equal((held as CommitLock).file, lockFile)
+    const raw = fs.readFileSync(lockFile, 'utf8')
+    assert.match(raw, new RegExp(`"pid":${process.pid}`), 'pid is recorded')
+    assert.match(raw, /"at":"\d{4}-\d{2}-\d{2}T[\d:.]+Z"/, 'timestamp is recorded')
+
+    const a = spawnChildCommit(root, 'child-a.md')
+    const b = spawnChildCommit(root, 'child-b.md')
+    await Promise.all([a.started, b.started])
+    // both children are inside `commitNow` now; keep the lock a moment longer so
+    // the wait is real, then release it like a finishing host would
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    releaseCommitLock(held as CommitLock)
+
+    const [ra, rb] = await Promise.all([a.done, b.done])
+    assert.equal(ra.code, 0, ra.out)
+    assert.equal(rb.code, 0, rb.out)
+    const [oa, ob] = [childOutcome(ra.out), childOutcome(rb.out)]
+    assert.equal(oa.committed, true, ra.out)
+    assert.equal(ob.committed, true, rb.out)
+    assert.ok(Math.min(oa.waitedMs, ob.waitedMs) >= 100, `both children waited for the lock (${oa.waitedMs}/${ob.waitedMs}ms)`)
+
+    const tracked = gitIn(root, 'ls-files')
+    assert.match(tracked, /lessons\/child-a\.md/)
+    assert.match(tracked, /lessons\/child-b\.md/)
+    assert.equal(gitIn(root, 'status', '--porcelain').trim(), '', 'the interleaved export left nothing behind')
+    assert.equal(fs.existsSync(path.join(root, LOCK_FILE_NAME)), false, 'the last child released the lock')
+})
+
+test('a lock held elsewhere skips the commit inside the timeout, naming the holder', () => {
+    const root = commitRepo('m4-lock-busy')
+    writeLesson(root, 'busy.md', 'busy\n')
+    const lockFile = path.join(root, LOCK_FILE_NAME)
+    fs.writeFileSync(
+        lockFile,
+        JSON.stringify({ pid: 999_999, host: 'other-host', at: '2026-01-01T00:00:00.000Z', token: 'foreign' }),
+    )
+
+    withLogFile('m4-lock-busy-log', (logFile) => {
+        const committer = new AutoCommitter(resolveConfig({ git: { autoCommit: 'immediate', lockTimeoutMs: 250 } }))
+        const started = Date.now()
+        const outcome = committer.commitNow(commitScope(root), 'busy root')
+        const elapsed = Date.now() - started
+
+        assert.equal(outcome.committed, false)
+        assert.equal(outcome.skipped, 'lock-timeout', 'a held lock is a skip, not a failure')
+        assert.match(outcome.detail, /999999/, 'the skip names who holds the lock')
+        assert.ok(elapsed >= 200, `the wait respects lockTimeoutMs (${elapsed}ms)`)
+        assert.ok(elapsed < 5_000, `the wait is bounded, never a hang (${elapsed}ms)`)
+        // someone else's lock is never released by us
+        assert.equal(fs.existsSync(lockFile), true)
+        assert.match(fs.readFileSync(lockFile, 'utf8'), /foreign/)
+
+        const logged = fs.readFileSync(logFile, 'utf8')
+        assert.match(logged, /\[info\][^\n]*commit lock[^\n]*held by pid 999999/, 'the skip is visible in the log')
+        // nothing was committed while the lock was held
+        assert.throws(() => gitIn(root, 'rev-parse', '--verify', 'HEAD'))
+    })
+})
+
+test('a lock older than two minutes is preempted, not waited on', () => {
+    const root = commitRepo('m4-lock-stale')
+    writeLesson(root, 'stale.md', 'stale\n')
+    const lockFile = path.join(root, LOCK_FILE_NAME)
+    fs.writeFileSync(
+        lockFile,
+        JSON.stringify({ pid: 4242, host: 'crashed-host', at: '2026-01-01T00:00:00.000Z', token: 'dead' }),
+    )
+    const old = new Date(Date.now() - STALE_LOCK_MS - 60_000)
+    fs.utimesSync(lockFile, old, old)
+
+    withLogFile('m4-lock-stale-log', (logFile) => {
+        // timeout 0: only the stale-preemption path can make this commit work
+        const committer = new AutoCommitter(resolveConfig({ git: { autoCommit: 'immediate', lockTimeoutMs: 0 } }))
+        const outcome = committer.commitNow(commitScope(root), 'stale root')
+        assert.equal(outcome.committed, true, outcome.detail)
+
+        const logged = fs.readFileSync(logFile, 'utf8')
+        assert.match(logged, /\[warn\][^\n]*preempted a stale commit lock/, 'the takeover is a warning')
+        assert.match(logged, /pid 4242/, 'the warning names the dead holder')
+        assert.equal(fs.existsSync(lockFile), false, 'the fresh lock is released after the commit')
+        assert.doesNotMatch(gitIn(root, 'ls-files'), /dsh-memory-commit\.lock/, 'a lock never enters the text view')
+        assert.match(fs.readFileSync(path.join(root, '.gitignore'), 'utf8'), /^\.dsh-memory-commit\.lock$/m)
+    })
+})
+
+test('a re-entrant commit in one process skips instead of deadlocking on its own lock', () => {
+    const root = commitRepo('m4-lock-reentrant')
+    writeLesson(root, 'outer.md', 'outer\n')
+    let nested: CommitOutcome | undefined
+    const committer = new AutoCommitter(resolveConfig({ git: { autoCommit: 'immediate' } }), {
+        exportText: () => {
+            nested = committer.commitNow(commitScope(root), 'nested')
+        },
+    })
+    const outer = committer.commitNow(commitScope(root), 'outer')
+    assert.equal(outer.committed, true, outer.detail)
+    assert.equal(nested?.skipped, 'in-process')
+    assert.equal(nested?.committed, false)
+    assert.equal(fs.existsSync(path.join(root, LOCK_FILE_NAME)), false, 'the outer commit released the lock')
+})
+
+test('an exception inside the critical section still releases the lock', () => {
+    const root = commitRepo('m4-lock-throw')
+    writeLesson(root, 'after.md', 'after\n')
+    withLogFile('m4-lock-throw-log', (logFile) => {
+        const boom = new AutoCommitter(resolveConfig({ git: { autoCommit: 'immediate' } }), {
+            exportText: () => {
+                throw new Error('export exploded')
+            },
+        })
+        const failed = boom.commitNow(commitScope(root), 'throwing export')
+        assert.equal(failed.committed, false)
+        assert.match(failed.detail, /export exploded/)
+        assert.match(fs.readFileSync(logFile, 'utf8'), /commit failed/)
+        assert.equal(fs.existsSync(path.join(root, LOCK_FILE_NAME)), false, 'finally must release the lock')
+
+        const ok = new AutoCommitter(resolveConfig({ git: { autoCommit: 'immediate' } })).commitNow(
+            commitScope(root),
+            'after the failure',
+        )
+        assert.equal(ok.committed, true, ok.detail)
+    })
 })

@@ -82,6 +82,18 @@ export interface MemoryConfig {
          * cancelled with its agent) and survives crashes mid-distillation.
          */
         maxRecoverPerSession: number
+        /**
+         * Recall count at which a `pending` record is promoted to `active`.
+         *
+         * Model-distilled candidates enter pending (DESIGN §7), but without a way
+         * out the store drifts to mostly-pending: 55 of 94 records in the live
+         * store. Promotion needs evidence of *use*, not just existence.
+         */
+        promoteAfterRecalls: number
+        /** Net-positive recall record (successes > failures) required to promote. */
+        promoteMinSuccessRatio: number
+        /** Cap for one bulk-forget call. */
+        bulkForgetLimit: number
         /** Wall-clock budget for one recovery pass (never stalls turn closure). */
         recoverBudgetMs: number
     }
@@ -98,12 +110,28 @@ export interface MemoryConfig {
         everyDays: number
         archiveInsteadOfDelete: boolean
     }
+    eval: {
+        /** Trend/comparison window in days. */
+        windowDays: number
+        /**
+         * Freeze a baseline automatically once a healthy window exists.
+         *
+         * Off by default: freezing is the human-reviewed gate-calibration step
+         * (DESIGN §11). With no baseline the gate can only ever answer UNKNOWN —
+         * which is exactly the state the live store was in.
+         */
+        autoFreezeBaseline: boolean
+        /** Tasks with metrics after which `memory_stats` proposes a human freeze. */
+        proposeFreezeAfterTasks: number
+    }
     git: {
         enabled: boolean
         autoCommit: 'off' | 'task-end' | 'immediate'
         checkpointMinutes: number
         /** Never automatic: pushing requires an explicit user instruction. */
         autoPush: false
+        /** Milliseconds to wait for a cross-process export/commit lock. */
+        lockTimeoutMs: number
     }
     sqlite: {
         journalMode: 'wal' | 'delete'
@@ -182,10 +210,27 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         exitCodeSignals: 'strong',
         maxRecoverPerSession: 2,
         recoverBudgetMs: 20_000,
+        promoteAfterRecalls: 3,
+        promoteMinSuccessRatio: 0.5,
+        bulkForgetLimit: 50,
     },
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
     consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true, usageRetentionDays: 180 },
-    git: { enabled: true, autoCommit: 'task-end', checkpointMinutes: 30, autoPush: false },
+    eval: { windowDays: 30, autoFreezeBaseline: false, proposeFreezeAfterTasks: 5 },
+    git: {
+        enabled: true,
+        autoCommit: 'task-end',
+        checkpointMinutes: 30,
+        autoPush: false,
+        /**
+         * Milliseconds to wait for a cross-process export/commit lock.
+         *
+         * Two hosts (nvim-tui + web) can export and commit the same memory root;
+         * SQLite serializes its own writes, but the text-view export and the git
+         * commit had no cross-process coordination at all.
+         */
+        lockTimeoutMs: 10_000,
+    },
     sqlite: { journalMode: 'wal', busyTimeoutMs: 5_000, fallback: 'none', maxOpenRoots: 4 },
     semantic: {
         enabled: false,
@@ -249,6 +294,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
     const distillModel = obj(learn['distillModel'])
     const episodic = obj(root['episodic'])
     const consolidate = obj(root['consolidate'])
+    const rootEval = obj(root['eval'])
     const git = obj(root['git'])
     const sqlite = obj(root['sqlite'])
     const semantic = obj(root['semantic'])
@@ -311,6 +357,9 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             ),
             maxRecoverPerSession: num(learn['maxRecoverPerSession'], d.learn.maxRecoverPerSession, 0, 20),
             recoverBudgetMs: num(learn['recoverBudgetMs'], d.learn.recoverBudgetMs, 1_000, 120_000),
+            promoteAfterRecalls: num(learn['promoteAfterRecalls'], d.learn.promoteAfterRecalls, 1, 100),
+            promoteMinSuccessRatio: num(learn['promoteMinSuccessRatio'], d.learn.promoteMinSuccessRatio, 0, 1),
+            bulkForgetLimit: num(learn['bulkForgetLimit'], d.learn.bulkForgetLimit, 1, 1_000),
         },
         episodic: {
             enabled: bool(episodic['enabled'], d.episodic.enabled),
@@ -328,11 +377,22 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             archiveInsteadOfDelete: bool(consolidate['archiveInsteadOfDelete'], d.consolidate.archiveInsteadOfDelete),
             usageRetentionDays: num(consolidate['usageRetentionDays'], d.consolidate.usageRetentionDays, 7, 3_650),
         },
+        eval: {
+            windowDays: num(rootEval['windowDays'], d.eval.windowDays, 1, 365),
+            autoFreezeBaseline: bool(rootEval['autoFreezeBaseline'], d.eval.autoFreezeBaseline),
+            proposeFreezeAfterTasks: num(
+                rootEval['proposeFreezeAfterTasks'],
+                d.eval.proposeFreezeAfterTasks,
+                1,
+                1_000,
+            ),
+        },
         git: {
             enabled: bool(git['enabled'], d.git.enabled),
             autoCommit: oneOf(git['autoCommit'], ['off', 'task-end', 'immediate'] as const, d.git.autoCommit),
             checkpointMinutes: num(git['checkpointMinutes'], d.git.checkpointMinutes, 1, 1_440),
             autoPush: false,
+            lockTimeoutMs: num(git['lockTimeoutMs'], d.git.lockTimeoutMs, 0, 300_000),
         },
         sqlite: {
             journalMode: oneOf(sqlite['journalMode'], ['wal', 'delete'] as const, d.sqlite.journalMode),

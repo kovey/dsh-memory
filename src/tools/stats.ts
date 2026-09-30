@@ -12,6 +12,8 @@ import {
     freezeBaseline,
     healthDigest,
     latestBaseline,
+    maybeFreezeBaseline,
+    metricTaskCount,
     readBaseline,
     renderEvaluation,
     snapshotMetrics,
@@ -45,7 +47,7 @@ export function statsTool(deps: StatsToolDeps) {
     return defineTool({
         name: 'memory_stats',
         description:
-            'Report memory-store health and the evaluation gate: record counts, recall hit rate, learning cost, open conflicts/proposals, task-metric trends, and whether the current period regressed against the frozen baseline. Freezing a new baseline is a human-review step: setBaseline=true is refused unless the user explicitly asked for it and a non-empty baselineReason is passed.',
+            'Report memory-store health and the evaluation gate: record counts, recall hit rate, learning cost, open conflicts/proposals, task-metric trends, and whether the current period regressed against the frozen baseline. Freezing a new baseline is a human-review step: setBaseline=true is refused unless the user explicitly asked for it and a non-empty baselineReason is passed. With eval.autoFreezeBaseline the plugin freezes the first baseline by itself once eval.proposeFreezeAfterTasks task metrics exist; the report always states whether there is enough data to freeze.',
         parameters: {
             scope: { type: 'string', enum: ['auto', 'all'], description: 'auto = this session\'s scope; all = also the global store.' },
             setBaseline: {
@@ -58,7 +60,7 @@ export function statsTool(deps: StatsToolDeps) {
                 description:
                     'Required with setBaseline=true: why the baseline is being frozen now (what the user asked, what was verified). Recorded in the log with the calling session id.',
             },
-            windowDays: { type: 'number', description: 'Trend window in days (default 30).' },
+            windowDays: { type: 'number', description: 'Trend window in days (default eval.windowDays, 30).' },
             note: { type: 'string', description: 'Optional note stored with a frozen baseline snapshot.' },
         },
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
@@ -84,7 +86,10 @@ export function statsTool(deps: StatsToolDeps) {
             const stores = targetStores(deps, agent, args.scope === 'all')
             if (stores.length === 0) return 'memory store unavailable (SQLite driver missing or memory root unwritable)'
 
-            const windowDays = Math.max(1, Math.min(365, Math.floor(args.windowDays ?? 30)))
+            const windowDays = Math.max(
+                1,
+                Math.min(365, Math.floor(args.windowDays ?? deps.config.eval.windowDays)),
+            )
             const lines: string[] = ['memory store status:']
             const capabilities = deps.registry.capabilities
             lines.push(
@@ -127,6 +132,20 @@ export function statsTool(deps: StatsToolDeps) {
                     )
                 }
 
+                // `eval.autoFreezeBaseline` is the only automatic write on this
+                // path, and it happens before the gate reads the snapshot: with
+                // no baseline the gate can only answer UNKNOWN, and a user who
+                // turned the knob on asked for that to stop being permanent.
+                // Subagents never trigger it — same rule as setBaseline.
+                const autoFrozen = deps.resolver.mayWrite(agent)
+                    ? maybeFreezeBaseline(store.db, store.scope, deps.config)
+                    : undefined
+                if (autoFrozen !== undefined) {
+                    lines.push(
+                        `  baseline auto-frozen (eval.autoFreezeBaseline): ${autoFrozen.tasks} task(s) in the ledger — ${autoFrozen.note ?? ''}`,
+                    )
+                }
+
                 const current = snapshotMetrics(store.db)
                 const gate = evaluateGate(current, latestBaseline(store.db))
                 const trend = {
@@ -146,7 +165,14 @@ export function statsTool(deps: StatsToolDeps) {
                     )
                 }
                 const baselineDoc = readBaseline(store.scope)
-                lines.push(...renderEvaluation(gate, healthDigest(store.db, windowDays), trend, baselineDoc?.tasks ?? []))
+                lines.push(
+                    ...renderEvaluation(gate, healthDigest(store.db, windowDays), trend, baselineDoc?.tasks ?? [], {
+                        metricTasks: metricTaskCount(store.db),
+                        threshold: deps.config.eval.proposeFreezeAfterTasks,
+                        windowDays,
+                        autoFreeze: deps.config.eval.autoFreezeBaseline,
+                    }),
+                )
             }
             return lines.join('\n')
         },

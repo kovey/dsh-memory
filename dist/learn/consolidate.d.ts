@@ -20,6 +20,10 @@ export interface ConsolidateOptions {
     promotionMinSeen?: number;
     /** Promotion floor: confidence required (DESIGN §8: >= 0.9). */
     promotionMinConfidence?: number;
+    /** Recalls needed before a `pending` record is promoted by use. */
+    promotionMinRecalls?: number;
+    /** Net-positive recall ratio needed for that promotion. */
+    promotionMinSuccessRatio?: number;
 }
 export interface ProposalDraft {
     kind: 'promote-skill';
@@ -41,10 +45,29 @@ export interface ConsolidateReport {
     proposals: ProposalDraft[];
     /** Files written for the promotion proposals (empty in a dry run). */
     skillDrafts: string[];
+    /** `pending` records promoted to `active` because they were recalled and survived. */
+    promotedByUse: string[];
     errors: string[];
 }
 /** Lessons that have proven themselves often enough to become a skill. */
 export declare function promotionCandidates(db: DatabaseSync, options?: ConsolidateOptions): MemoryRecord[];
+/**
+ * Promote `pending` records that have proven themselves *in use*.
+ *
+ * DESIGN §7 puts model-distilled candidates in pending so unreviewed output is
+ * never injected as fact — but it provided no way out, and the live store drifted
+ * to 55 pending of 94 records. The missing half is evidence of use: a candidate
+ * that keeps being recalled into turns that end well has earned `active`.
+ *
+ * Deliberately needs *recalls* (not just age or repetition): existence is not
+ * evidence, being retrieved and surviving is.
+ */
+export declare function promoteByUse(db: DatabaseSync, options?: {
+    minRecalls?: number;
+    minSuccessRatio?: number;
+    now?: Date;
+    dryRun?: boolean;
+}): MemoryRecord[];
 /** Record promotion proposals (idempotent: one open proposal per record). */
 export declare function recordProposals(db: DatabaseSync, proposals: readonly ProposalDraft[], now?: Date): number;
 export interface OpenProposal {

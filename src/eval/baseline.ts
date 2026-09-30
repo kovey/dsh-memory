@@ -14,6 +14,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
+import type { MemoryConfig } from '../config.js'
+import { log } from '../log.js'
 import { rowInt, rowNum, rowStr } from '../store/sqlite/db.js'
 import { summarizeMetrics } from '../store/metrics.js'
 import type { MetricSummary } from '../store/metrics.js'
@@ -165,6 +167,68 @@ export function latestBaseline(db: DatabaseSync): MetricSnapshot | undefined {
         avgRework: rowNum(row, 'avg_rework') ?? null,
         ...(note !== undefined ? { note } : {}),
     }
+}
+
+/**
+ * Task-ledger rows that actually carry one of the four gate metrics.
+ *
+ * A row with only `task_id`/`date`/`summary` and no outcome, duration, disturb
+ * or rework value cannot be compared by the gate, so it must not count towards
+ * the "enough data to freeze" threshold: freezing on such rows would only
+ * produce a snapshot whose four metrics are `null`, i.e. a permanently UNKNOWN
+ * gate wearing the appearance of a calibrated one.
+ */
+export function metricTaskCount(db: DatabaseSync): number {
+    const row = db
+        .prepare(
+            `SELECT COUNT(*) AS n FROM tasks
+             WHERE outcome IN ('success', 'partial', 'failed')
+                OR duration_min IS NOT NULL OR disturb_count IS NOT NULL OR rework_rounds IS NOT NULL`,
+        )
+        .get()
+    return rowInt(row, 'n')
+}
+
+/**
+ * Freeze the first baseline automatically, when the user asked for it
+ * (`eval.autoFreezeBaseline`) and the ledger has enough comparable rows.
+ *
+ * This is the escape hatch from the gate's permanent-UNKNOWN state: with no
+ * snapshot the gate can only ever answer UNKNOWN, which is exactly the state the
+ * live store was in. Both guards matter:
+ *
+ *   - an existing snapshot is never replaced (idempotent) — refreezing is how a
+ *     regression signal gets erased, and `setBaseline` already requires a human
+ *     reason for that reason;
+ *   - no data means no freeze, so the gate never pretends to have a reference.
+ *
+ * Returns the frozen snapshot, or undefined when nothing was frozen.
+ */
+export function maybeFreezeBaseline(
+    db: DatabaseSync,
+    scope: MemoryScope,
+    config: MemoryConfig,
+    now: Date = new Date(),
+): MetricSnapshot | undefined {
+    if (config.eval.autoFreezeBaseline !== true) return undefined
+    if (latestBaseline(db) !== undefined) return undefined
+    const metricTasks = metricTaskCount(db)
+    const threshold = Math.max(1, Math.floor(config.eval.proposeFreezeAfterTasks))
+    if (metricTasks < threshold) return undefined
+
+    const label = scope.kind === 'project' ? `project:${scope.repo ?? scope.root}` : 'global'
+    const windowDays = config.eval.windowDays
+    const snapshot = freezeBaseline(
+        db,
+        label,
+        `auto-freeze (eval.autoFreezeBaseline): ${metricTasks} task metric(s), gate window ${windowDays}d`,
+        now,
+    )
+    log(
+        'info',
+        `memory: baseline auto-frozen for ${label} — ${metricTasks} task metric(s) with outcome/cost data in the task ledger (threshold ${threshold}, gate window ${windowDays}d)`,
+    )
+    return snapshot
 }
 
 export type MetricVerdict = 'better' | 'same' | 'worse' | 'unknown'
@@ -361,12 +425,29 @@ export function windowSummary(db: DatabaseSync, days: number, offsetDays = 0, no
     }
 }
 
+/**
+ * How close the task ledger is to a freezable baseline. Rendered next to the
+ * UNKNOWN verdict so a model reading `memory_stats` can tell "no data yet"
+ * (keep working) from "enough data, nobody froze it" (ask the user).
+ */
+export interface BaselineProgress {
+    /** Task-ledger rows carrying at least one gate metric (see `metricTaskCount`). */
+    metricTasks: number
+    /** `eval.proposeFreezeAfterTasks` — the floor below which a baseline is noise. */
+    threshold: number
+    /** `eval.windowDays` — the window the gate compares over. */
+    windowDays: number
+    /** `eval.autoFreezeBaseline` — says whether anyone will freeze it automatically. */
+    autoFreeze: boolean
+}
+
 /** Render the gate + health report for `memory_stats`. */
 export function renderEvaluation(
     gate: GateReport,
     health: HealthDigest,
     trend: { current: TrendWindow; previous: TrendWindow },
     baselineTasks: readonly BaselineTask[],
+    progress?: BaselineProgress,
 ): string[] {
     const lines: string[] = []
     lines.push('evaluation gate:')
@@ -375,6 +456,27 @@ export function renderEvaluation(
         lines.push(
             `  verdict: UNKNOWN — no baseline snapshot yet (tasks so far: ${gate.current.tasks})`,
         )
+        if (progress !== undefined) {
+            const { metricTasks, threshold, windowDays, autoFreeze } = progress
+            const remaining = Math.max(0, threshold - metricTasks)
+            if (metricTasks >= threshold) {
+                lines.push(
+                    `  ${metricTasks} task metric(s) accumulated (threshold ${threshold}, gate window ${windowDays}d) — enough to freeze a baseline`,
+                )
+                lines.push(
+                    '  freeze it: memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })',
+                )
+                lines.push(
+                    autoFreeze
+                        ? '  eval.autoFreezeBaseline is on: the next memory_stats call freezes it without asking'
+                        : '  eval.autoFreezeBaseline is off, so nothing is frozen automatically — this stays a human decision',
+                )
+            } else {
+                lines.push(
+                    `  not enough task metrics yet: ${metricTasks} of ${threshold} required (eval.proposeFreezeAfterTasks) — ${remaining} more task(s) with an outcome/duration/disturb/rework value needed`,
+                )
+            }
+        }
         lines.push(
             '  freeze one only after a good period and an explicit user request: memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })',
         )

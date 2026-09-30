@@ -32,10 +32,27 @@ export const DEFAULT_CONFIG = {
         exitCodeSignals: 'strong',
         maxRecoverPerSession: 2,
         recoverBudgetMs: 20_000,
+        promoteAfterRecalls: 3,
+        promoteMinSuccessRatio: 0.5,
+        bulkForgetLimit: 50,
     },
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
     consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true, usageRetentionDays: 180 },
-    git: { enabled: true, autoCommit: 'task-end', checkpointMinutes: 30, autoPush: false },
+    eval: { windowDays: 30, autoFreezeBaseline: false, proposeFreezeAfterTasks: 5 },
+    git: {
+        enabled: true,
+        autoCommit: 'task-end',
+        checkpointMinutes: 30,
+        autoPush: false,
+        /**
+         * Milliseconds to wait for a cross-process export/commit lock.
+         *
+         * Two hosts (nvim-tui + web) can export and commit the same memory root;
+         * SQLite serializes its own writes, but the text-view export and the git
+         * commit had no cross-process coordination at all.
+         */
+        lockTimeoutMs: 10_000,
+    },
     sqlite: { journalMode: 'wal', busyTimeoutMs: 5_000, fallback: 'none', maxOpenRoots: 4 },
     semantic: {
         enabled: false,
@@ -91,6 +108,7 @@ export function resolveConfig(raw) {
     const distillModel = obj(learn['distillModel']);
     const episodic = obj(root['episodic']);
     const consolidate = obj(root['consolidate']);
+    const rootEval = obj(root['eval']);
     const git = obj(root['git']);
     const sqlite = obj(root['sqlite']);
     const semantic = obj(root['semantic']);
@@ -143,6 +161,9 @@ export function resolveConfig(raw) {
             exitCodeSignals: oneOf(learn['exitCodeSignals'], ['strong', 'all', 'off'], d.learn.exitCodeSignals),
             maxRecoverPerSession: num(learn['maxRecoverPerSession'], d.learn.maxRecoverPerSession, 0, 20),
             recoverBudgetMs: num(learn['recoverBudgetMs'], d.learn.recoverBudgetMs, 1_000, 120_000),
+            promoteAfterRecalls: num(learn['promoteAfterRecalls'], d.learn.promoteAfterRecalls, 1, 100),
+            promoteMinSuccessRatio: num(learn['promoteMinSuccessRatio'], d.learn.promoteMinSuccessRatio, 0, 1),
+            bulkForgetLimit: num(learn['bulkForgetLimit'], d.learn.bulkForgetLimit, 1, 1_000),
         },
         episodic: {
             enabled: bool(episodic['enabled'], d.episodic.enabled),
@@ -156,11 +177,17 @@ export function resolveConfig(raw) {
             archiveInsteadOfDelete: bool(consolidate['archiveInsteadOfDelete'], d.consolidate.archiveInsteadOfDelete),
             usageRetentionDays: num(consolidate['usageRetentionDays'], d.consolidate.usageRetentionDays, 7, 3_650),
         },
+        eval: {
+            windowDays: num(rootEval['windowDays'], d.eval.windowDays, 1, 365),
+            autoFreezeBaseline: bool(rootEval['autoFreezeBaseline'], d.eval.autoFreezeBaseline),
+            proposeFreezeAfterTasks: num(rootEval['proposeFreezeAfterTasks'], d.eval.proposeFreezeAfterTasks, 1, 1_000),
+        },
         git: {
             enabled: bool(git['enabled'], d.git.enabled),
             autoCommit: oneOf(git['autoCommit'], ['off', 'task-end', 'immediate'], d.git.autoCommit),
             checkpointMinutes: num(git['checkpointMinutes'], d.git.checkpointMinutes, 1, 1_440),
             autoPush: false,
+            lockTimeoutMs: num(git['lockTimeoutMs'], d.git.lockTimeoutMs, 0, 300_000),
         },
         sqlite: {
             journalMode: oneOf(sqlite['journalMode'], ['wal', 'delete'], d.sqlite.journalMode),

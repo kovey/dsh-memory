@@ -17,11 +17,11 @@ import { buildQuery, isMemoryMessage, isTaskBearing, messageText } from '../dist
 import { assertDraftScope, ScopeViolationError } from '../dist/store/guard.js'
 import { applyDraft } from '../dist/learn/gate.js'
 import { SessionState } from '../dist/recall/session-state.js'
-import { pruneUsage, recallStats } from '../dist/recall/usage.js'
+import { applyOutcome, pruneUsage, recallStats } from '../dist/recall/usage.js'
 import { ScopeResolver } from '../dist/scope/resolver.js'
 import { countRecords } from '../dist/store/sqlite/records.js'
 import { loadSqliteModule } from '../dist/store/sqlite/db.js'
-import { listRecords, materialize, upsertRecord } from '../dist/store/sqlite/records.js'
+import { getRecord, listRecords, materialize, upsertRecord } from '../dist/store/sqlite/records.js'
 import { StoreRegistry } from '../dist/store/store.js'
 import { fakeRepo, lessonDoc, memoryFixture, useGlobalMemoryHome } from './helpers.ts'
 
@@ -431,4 +431,32 @@ test('usage retention drops settled rows and keeps unresolved ones', async (t) =
         ['s-new:failure', 's-old:null'],
         'an unattributed row is still needed for attribution',
     )
+})
+
+test('a failure only blames memories the model had already seen', async (t) => {
+    // Turn-level attribution marked *every* injection as failed, including
+    // memories injected after the failure — which cannot have caused it.
+    const h = await harness(t)
+    const store = h.registry.open(h.resolver.resolve({ agent: h.agent }))
+    assert.ok(store)
+    const record = listRecords(store.db)[0]
+    assert.ok(record)
+    const at = new Date().toISOString()
+    const insert = store.db.prepare(
+        'INSERT INTO usage (record_id, session_id, turn, step, score, injected_at, outcome) VALUES (?,?,?,?,?,?,NULL)',
+    )
+    insert.run(record.id, 'sess-late', 1, 3, 0.9, at)
+    assert.equal(applyOutcome(store.db, 'sess-late', 'failure', 1, { maxStep: 1 }), 0, 'step 3 is after the failure')
+    assert.equal(getRecord(store.db, record.id)?.failAfterRecall, 0)
+    assert.equal(applyOutcome(store.db, 'sess-late', 'failure', 1, { maxStep: 5 }), 1, 'step 3 is before a step-5 failure')
+    assert.equal(getRecord(store.db, record.id)?.failAfterRecall, 1)
+})
+
+test('the recall query prefers the newest text when the budget is tight', () => {
+    const old = { content: [{ type: 'text', text: '早先的旧任务：重构部署脚本' }], source: { kind: 'user-rpc' } }
+    const recent = { content: [{ type: 'text', text: '现在的任务：修复飞书卡片按钮回调' }], source: { kind: 'user-rpc' } }
+    const query = buildQuery([old, recent], { maxChars: 24 })
+    assert.match(query.text, /飞书卡片/, 'the current intent wins the budget')
+    assert.doesNotMatch(query.text, /重构部署脚本/)
+    assert.equal(query.sources, 2, 'both messages still count as sources')
 })

@@ -556,6 +556,27 @@ config 无效，结论：**改插件配置就写 profile patch 的顶层 `- id: 
 - **存储侧有保留期**：signals 与情节 90 天（欠账不清）、usage 180 天（未归因行不删）、
   旧 embedding 模型向量 30 天宽限、记录只增不减（归档≠删除）但速率由门控/衰减/日预算约束。
 
+### 14.13 全面优化轮（2026-09-30）：从"能用"到"可信"
+
+针对一轮自评出的 17 项劣势，按"学习质量 → 门禁可用性 → 运维与安全"三类优化。**学习质量三项（本轮核心）**：
+
+1. **pending 有了出路**（`promoteByUse`）：蒸馏候选进 pending 是设计（§7 未审核不当事实），但此前**没有任何出口**，
+   本机实测淤积到 55/94。现在按"**被使用**"晋升：`times_recalled ≥ learn.promoteAfterRecalls`（默认 3）且
+   `成功/(成功+失败) ≥ learn.promoteMinSuccessRatio`（默认 0.5）→ 升为 active，并在惰性巩固里执行、报告 `promotedByUse`。
+   真机语料实测：pending 38 → 33、active 56 → 61（晋升的 5 条均有明确使用证据）。
+2. **归因按时序定位**（`applyOutcome(..., { maxStep })`）：过去"本轮失败"会把该轮**所有**注入记为失败，
+   包括失败之后才注入、模型根本没看到的记忆。现在以最早的失败信号 step 为高水位，只归因 step ≤ 它的注入。
+3. **召回查询取最新文本**：此前按到达顺序取前 2000 字符，长回合会被"最早说的话"主导；现改为**最新优先**再截断。
+
+**门禁可用性**：`eval.autoFreezeBaseline`（默认 false，可选自动冻结）+ `eval.proposeFreezeAfterTasks`（默认 5）——
+未冻结基线时渲染明确给出可复制的冻结命令与还差多少数据（此前永远只能输出 UNKNOWN）。
+**晋升闭环被消费**：`memory_consolidate({ acceptProposal })` 真正把技能草稿落到 `~/.dsh/skills/<name>/SKILL.md`
+（人工审批环节保留：只有显式 accept 才写；覆盖需 `overwrite`；skill 名限 `[a-z0-9-]` 防穿越）。
+**安全与运维**：脱敏补 JWT 与高熵长串启发式（保留 git SHA 与普通标识符）；批量遗忘（默认 dry-run）；
+跨进程导出+提交锁（`git.lockTimeoutMs`，陈旧锁可抢占）；L5 支持写入 `conventions.md` 等命名文件；
+**版本化诊断**（哪�些仓库忽略 `.dsh/` → 明说"记忆未纳入 git"）；启动时输出一行健康度（pending 占比）；
+CI（GitHub Actions，Node 22.19/24 矩阵跑 typecheck + 全量测试）。
+
 ### 14.6 未实现 / 后续可做
 
 - **语义召回的真机链路未验证**：不是管道问题，而是**端点不存在**——实测当前网关

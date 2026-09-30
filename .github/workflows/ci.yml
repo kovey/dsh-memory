@@ -1,0 +1,25 @@
+name: CI
+
+# The suite is the project's regression net: 183 tests including the shipped
+# patch-file validation and the dsh peer-anchor guard. Running it on every push
+# is what keeps "tests are green" from being a claim made by hand.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['22.19', '24']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npm test

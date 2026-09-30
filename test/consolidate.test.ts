@@ -10,15 +10,16 @@ import { resolveConfig } from '../dist/config.js'
 import { applyConflicts, detectConflicts, directivePolarity, pickWinner } from '../dist/learn/conflicts.js'
 import { consolidate, openProposals, promotionCandidates, recordProposals, resolveProposal } from '../dist/learn/consolidate.js'
 import { applyDecay, consolidationDue, lastConsolidateAt, markConsolidated, planDecay } from '../dist/learn/decay.js'
+import { installSkillDraft, isSafeSkillName, skillDraftName } from '../dist/learn/promote.js'
 import { clearRepoCache } from '../dist/paths.js'
 import { ScopeResolver } from '../dist/scope/resolver.js'
 import { getMeta, setMeta } from '../dist/store/sqlite/db.js'
 import { loadSqliteModule } from '../dist/store/sqlite/db.js'
 import { countRecords, getRecord, listRecords, materialize, upsertRecord } from '../dist/store/sqlite/records.js'
 import { StoreRegistry } from '../dist/store/store.js'
-import { forgetTool } from '../dist/tools/consolidate.js'
+import { consolidateTool, forgetTool, selectForgetTargets } from '../dist/tools/consolidate.js'
 import type { MemoryRecord } from '../dist/store/types.js'
-import { fakeRepo, memoryFixture, useGlobalMemoryHome } from './helpers.ts'
+import { fakeRepo, memoryFixture, tempDir, useGlobalMemoryHome } from './helpers.ts'
 
 function record(overrides: Partial<MemoryRecord> & { id: string; title: string; body: string }): MemoryRecord {
     const base = materialize({
@@ -317,4 +318,284 @@ test('a promotion candidate gets a reviewable skill draft', async (t) => {
         false,
         'drafts without an open proposal are pruned',
     )
+})
+
+// ---- promotion: accepting a proposal installs the skill ----------------------
+
+const STABLE_BODY = '触发场景：无 TTY 下 pnpm install 中止。正确做法：设置 CI=true 后重试安装命令。'
+
+function stableRecord(): MemoryRecord {
+    return record({ id: 'stable-lesson', title: 'stable lesson', body: STABLE_BODY, confidence: 0.95, timesSeen: 4 })
+}
+
+test('accepting a promotion installs the reviewed draft as a host skill', async (t) => {
+    const home = tempDir('m3-dsh-home')
+    const h = await harness(t, { memoryHome: home })
+    upsertRecord(h.store.db, stableRecord())
+    const pass = consolidate(h.store.db, h.scope, h.store.fts5, { dryRun: false })
+    assert.equal(pass.skillDrafts.length, 1, 'the proposal comes with a reviewable draft')
+
+    const tool = consolidateTool({ config: h.resolved, registry: h.registry, resolver: h.resolver })
+    const output = String(await tool.execute({ acceptProposal: 'stable-lesson' } as never, { agent: h.agent } as never))
+    const file = path.join(home, 'skills', 'mem-stable-lesson', 'SKILL.md')
+    assert.ok(fs.existsSync(file), `expected the skill at ${file}; got: ${output}`)
+    const installed = fs.readFileSync(file, 'utf8')
+    assert.match(installed, /^name: mem-stable-lesson$/m, 'installed under the name the draft declares')
+    assert.match(installed, /CI=true 后重试/, 'the lesson body travels into the skill')
+    assert.equal(installed, fs.readFileSync(pass.skillDrafts[0] as string, 'utf8'), 'the reviewed file is the one installed')
+
+    assert.match(output, /accepted proposal for stable-lesson/)
+    assert.match(output, /restart/, 'the caller must learn that a restart loads it')
+    assert.equal(
+        h.store.db.prepare("SELECT status FROM proposals WHERE record_id = 'stable-lesson'").get()?.['status'],
+        'accepted',
+    )
+})
+
+test('accepting twice is idempotent, and a differing skill file is refused unless overwrite is passed', async (t) => {
+    const home = tempDir('m3-dsh-home')
+    const h = await harness(t, { memoryHome: home })
+    upsertRecord(h.store.db, stableRecord())
+    consolidate(h.store.db, h.scope, h.store.fts5, { dryRun: false })
+    const tool = consolidateTool({ config: h.resolved, registry: h.registry, resolver: h.resolver })
+    const file = path.join(home, 'skills', 'mem-stable-lesson', 'SKILL.md')
+
+    const first = String(await tool.execute({ acceptProposal: 'stable-lesson' } as never, { agent: h.agent } as never))
+    assert.match(first, /installed:/)
+    const installed = fs.readFileSync(file, 'utf8')
+
+    const again = String(await tool.execute({ acceptProposal: 'stable-lesson' } as never, { agent: h.agent } as never))
+    assert.match(again, /already installed and identical/)
+    assert.equal(fs.readFileSync(file, 'utf8'), installed, 'a repeated accept rewrites nothing')
+
+    // A skill somebody wrote by hand must never be clobbered silently.
+    const handWritten = '---\nname: mem-stable-lesson\n---\n\nhand-written skill\n'
+    fs.writeFileSync(file, handWritten)
+    const refused = String(await tool.execute({ acceptProposal: 'stable-lesson' } as never, { agent: h.agent } as never))
+    assert.match(refused, /already exists with different content/)
+    assert.match(refused, /overwrite: true/)
+    assert.equal(fs.readFileSync(file, 'utf8'), handWritten, 'the refusal wrote nothing')
+
+    const forced = String(
+        await tool.execute({ acceptProposal: 'stable-lesson', overwrite: true } as never, { agent: h.agent } as never),
+    )
+    assert.match(forced, /replaced \(overwrite\)/)
+    assert.equal(fs.readFileSync(file, 'utf8'), installed)
+})
+
+test('rejecting a promotion removes its draft file', async (t) => {
+    const home = tempDir('m3-dsh-home')
+    const h = await harness(t, { memoryHome: home })
+    upsertRecord(h.store.db, stableRecord())
+    consolidate(h.store.db, h.scope, h.store.fts5, { dryRun: false })
+    const draft = path.join(h.scope.root, 'proposals', 'stable-lesson.SKILL.md')
+    assert.ok(fs.existsSync(draft))
+
+    const tool = consolidateTool({ config: h.resolved, registry: h.registry, resolver: h.resolver })
+    const output = String(await tool.execute({ rejectProposal: 'stable-lesson' } as never, { agent: h.agent } as never))
+    assert.match(output, /rejected proposal for stable-lesson/)
+    assert.match(output, /removed 1 draft/)
+    assert.equal(fs.existsSync(draft), false, 'a rejected promotion leaves no draft behind')
+    assert.equal(fs.existsSync(path.join(home, 'skills')), false, 'rejecting installs nothing')
+    assert.equal(
+        h.store.db.prepare("SELECT status FROM proposals WHERE record_id = 'stable-lesson'").get()?.['status'],
+        'rejected',
+    )
+})
+
+test('a skill name that is not one safe path segment is refused', () => {
+    const home = tempDir('m3-skill-guard')
+    const traversal = ['---', 'name: ../../evil', 'user-invocable: false', '---', '', 'body', ''].join('\n')
+    const result = installSkillDraft(home, traversal)
+    assert.equal(result.action, 'invalid-name')
+    assert.match(result.message, /one path segment/)
+    assert.equal(fs.existsSync(path.join(home, 'skills')), false, 'nothing was created at all')
+
+    assert.equal(installSkillDraft(home, 'no frontmatter here').action, 'invalid-name')
+    assert.equal(isSafeSkillName('mem-stable-lesson-2'), true)
+    assert.equal(isSafeSkillName('Mem-Upper'), false)
+    assert.equal(isSafeSkillName('a/b'), false)
+    assert.equal(isSafeSkillName('..'), false)
+    assert.equal(isSafeSkillName(''), false)
+    // The tool surface cannot even produce such a name: ids are slugified.
+    assert.equal(skillDraftName({ ...stableRecord(), id: '../../evil' }), 'mem-evil')
+})
+
+test('a subagent can neither install a promoted skill nor run a bulk forget', async (t) => {
+    const home = tempDir('m3-dsh-home')
+    const h = await harness(t, { memoryHome: home })
+    upsertRecord(h.store.db, stableRecord())
+    upsertRecord(h.store.db, record({ id: 'wrong-one', title: 'wrong one', body: '触发场景：x。正确做法：y。' }))
+    consolidate(h.store.db, h.scope, h.store.fts5, { dryRun: false })
+    const subagent = { session: { id: 'm3-sub', header: { cwd: h.repo, origin: 'subagent' } } }
+    const tool = consolidateTool({ config: h.resolved, registry: h.registry, resolver: h.resolver })
+    const forget = forgetTool(h.deps)
+
+    const accepted = String(await tool.execute({ acceptProposal: 'stable-lesson' } as never, { agent: subagent } as never))
+    assert.match(accepted, /refused/)
+    assert.equal(fs.existsSync(path.join(home, 'skills')), false, 'a subagent installs nothing')
+
+    const forgotten = String(await forget.execute({ query: 'wrong' } as never, { agent: subagent } as never))
+    assert.match(forgotten, /refused/)
+    const applied = String(
+        await forget.execute({ query: 'wrong', dryRun: false } as never, { agent: subagent } as never),
+    )
+    assert.match(applied, /refused/)
+    assert.equal(getRecord(h.store.db, 'wrong-one')?.status, 'active')
+})
+
+// ---- bulk forget -------------------------------------------------------------
+
+test('memory_forget lists a bulk selection before archiving anything', async (t) => {
+    const h = await harness(t)
+    upsertRecord(h.store.db, record({ id: 'title-match', title: 'wrong pnpm flag', body: '触发场景：CI=true。正确做法：保留。' }))
+    upsertRecord(h.store.db, record({ id: 'body-match', title: 'pnpm 安装参数', body: '触发场景：这条结论是 wrong 的。正确做法：不要这样做。' }))
+    upsertRecord(h.store.db, record({ id: 'keeper', title: 'keeper lesson', body: '触发场景：正常。正确做法：照做。' }))
+
+    const tool = forgetTool(h.deps)
+    const listed = String(await tool.execute({ query: 'wrong' } as never, { agent: h.agent } as never))
+    assert.match(listed, /dry-run \(nothing archived\)/)
+    assert.match(listed, /2 record\(s\) match \[query "wrong"\]/)
+    assert.match(listed, /· title-match — wrong pnpm flag — query "wrong" matches the title/)
+    assert.match(listed, /· body-match — pnpm 安装参数 — query "wrong" matches the body/)
+    assert.doesNotMatch(listed, /keeper/)
+    assert.match(listed, /re-run with dryRun: false to archive these 2 record\(s\)/)
+
+    assert.equal(getRecord(h.store.db, 'title-match')?.status, 'active', 'a dry run changes nothing')
+    assert.equal(getRecord(h.store.db, 'body-match')?.status, 'active')
+    assert.equal(getRecord(h.store.db, 'keeper')?.status, 'active')
+})
+
+test('a bulk forget archives the listed records, keeps their files and audit-logs the pass', async (t) => {
+    const h = await harness(t)
+    upsertRecord(h.store.db, record({ id: 'title-match', title: 'wrong pnpm flag', body: '触发场景：x。正确做法：y。' }))
+    upsertRecord(h.store.db, record({ id: 'body-match', title: 'pnpm 安装参数', body: '触发场景：这条结论是 wrong 的。正确做法：不要这样做。' }))
+    upsertRecord(h.store.db, record({ id: 'keeper', title: 'keeper lesson', body: '触发场景：正常。正确做法：照做。' }))
+    h.registry.exportScope(h.scope)
+
+    const tool = forgetTool(h.deps)
+    const applied = String(
+        await tool.execute(
+            { query: 'wrong', dryRun: false, reason: 'two lessons were disproved' } as never,
+            { agent: h.agent } as never,
+        ),
+    )
+    assert.match(applied, /bulk forget — project:/)
+    assert.match(applied, /archived 2 of 2 selected record\(s\)/)
+
+    assert.equal(getRecord(h.store.db, 'title-match')?.status, 'archived')
+    assert.equal(getRecord(h.store.db, 'body-match')?.status, 'archived')
+    assert.equal(getRecord(h.store.db, 'keeper')?.status, 'active')
+    // archived ≠ deleted: the lesson files moved instead of disappearing
+    assert.ok(fs.existsSync(path.join(h.scope.root, 'archive', 'lessons', 'title-match.md')))
+    assert.ok(fs.existsSync(path.join(h.scope.root, 'archive', 'lessons', 'body-match.md')))
+    assert.ok(fs.existsSync(path.join(h.scope.root, 'lessons', 'keeper.md')))
+
+    const audit = h.store.db
+        .prepare("SELECT archived, note FROM consolidate_runs WHERE note LIKE 'bulk forget%'")
+        .get()
+    assert.equal(audit?.['archived'], 2)
+    assert.match(String(audit?.['note']), /query "wrong".*two lessons were disproved/)
+})
+
+test('olderThanDays and layer narrow a bulk selection', async (t) => {
+    const h = await harness(t)
+    upsertRecord(h.store.db, record({ id: 'old-project', title: 'old project lesson', body: '触发场景：旧。正确做法：归档。', updatedAt: '2026-05-01T00:00:00.000Z' }))
+    upsertRecord(h.store.db, record({ id: 'fresh-project', title: 'fresh project lesson', body: '触发场景：新。正确做法：保留。', updatedAt: '2026-09-10T00:00:00.000Z' }))
+    upsertRecord(h.store.db, {
+        ...record({ id: 'old-global', title: 'old global lesson', body: '触发场景：旧。正确做法：归档。', updatedAt: '2026-05-01T00:00:00.000Z' }),
+        layer: 'global',
+    })
+    const now = new Date('2026-09-14T00:00:00.000Z')
+
+    assert.deepEqual(
+        selectForgetTargets(h.store.db, { olderThanDays: 90, now }).map((item) => item.id),
+        ['old-global', 'old-project'],
+        'oldest first, and the fresh record is not a candidate',
+    )
+    assert.deepEqual(
+        selectForgetTargets(h.store.db, { olderThanDays: 90, layer: 'global', now }).map((item) => item.id),
+        ['old-global'],
+    )
+    assert.match(
+        selectForgetTargets(h.store.db, { olderThanDays: 90, now })[0]?.reason ?? '',
+        /not updated since 2026-05-01 \(older than 90d\)/,
+    )
+
+    const tool = forgetTool(h.deps)
+    const listed = String(await tool.execute({ olderThanDays: 90, layer: 'global' } as never, { agent: h.agent } as never))
+    assert.match(listed, /1 record\(s\) match \[layer global \+ not updated for 90d\]/)
+    const applied = String(
+        await tool.execute({ olderThanDays: 90, layer: 'global', dryRun: false } as never, { agent: h.agent } as never),
+    )
+    assert.match(applied, /archived 1 of 1 selected record\(s\)/)
+    assert.equal(getRecord(h.store.db, 'old-global')?.status, 'archived')
+    assert.equal(getRecord(h.store.db, 'old-project')?.status, 'active', 'the layer filter held')
+    assert.equal(getRecord(h.store.db, 'fresh-project')?.status, 'active')
+})
+
+test('a bulk forget without a criterion is refused, and limit caps the selection', async (t) => {
+    const h = await harness(t)
+    for (const id of ['a', 'b', 'c']) {
+        upsertRecord(h.store.db, record({ id, title: `lesson ${id}`, body: '触发场景：x。正确做法：y。' }))
+    }
+    const tool = forgetTool(h.deps)
+
+    const refused = String(await tool.execute({ dryRun: false } as never, { agent: h.agent } as never))
+    assert.match(refused, /refused: a bulk forget needs at least one criterion/)
+    assert.equal(getRecord(h.store.db, 'a')?.status, 'active', 'a criterion-less forget archives nothing')
+
+    const limited = String(await tool.execute({ query: 'lesson', limit: 1 } as never, { agent: h.agent } as never))
+    assert.match(limited, /3 record\(s\) match \[query "lesson"\]/)
+    assert.match(limited, /· a — lesson a — query "lesson" matches the title/)
+    assert.match(limited, /2 more match\(es\) beyond limit 1/)
+
+    const applied = String(
+        await tool.execute({ query: 'lesson', limit: 1, dryRun: false } as never, { agent: h.agent } as never),
+    )
+    assert.match(applied, /archived 1 of 1 selected record\(s\)/)
+    const archived = ['a', 'b', 'c'].filter((id) => getRecord(h.store.db, id)?.status === 'archived')
+    assert.deepEqual(archived, ['a'])
+})
+
+test('an explicit dryRun previews a single-record forget instead of archiving it', async (t) => {
+    const h = await harness(t)
+    upsertRecord(h.store.db, record({ id: 'wrong', title: 'wrong lesson', body: '触发场景：x。正确做法：y。' }))
+    const tool = forgetTool(h.deps)
+
+    const preview = String(await tool.execute({ id: 'wrong', dryRun: true } as never, { agent: h.agent } as never))
+    assert.match(preview, /dry-run — nothing archived/)
+    assert.match(preview, /· wrong \(wrong lesson\)/)
+    assert.equal(getRecord(h.store.db, 'wrong')?.status, 'active')
+
+    // the single-record contract is unchanged: no dryRun means archive now
+    const applied = String(await tool.execute({ id: 'wrong', reason: 'user asked' } as never, { agent: h.agent } as never))
+    assert.match(applied, /retired: wrong/)
+    assert.equal(getRecord(h.store.db, 'wrong')?.status, 'archived')
+})
+
+test('a refused install is reported and leaves the proposal open', async (t) => {
+    const home = tempDir('m3-dsh-home')
+    const h = await harness(t, { memoryHome: home })
+    upsertRecord(h.store.db, stableRecord())
+    consolidate(h.store.db, h.scope, h.store.fts5, { dryRun: false })
+    // Somebody already wrote this skill by hand: the promotion must not clobber it.
+    const file = path.join(home, 'skills', 'mem-stable-lesson', 'SKILL.md')
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    const handWritten = '---\nname: mem-stable-lesson\n---\n\nhand-written skill\n'
+    fs.writeFileSync(file, handWritten)
+
+    const tool = consolidateTool({ config: h.resolved, registry: h.registry, resolver: h.resolver })
+    const refused = String(await tool.execute({ acceptProposal: 'stable-lesson' } as never, { agent: h.agent } as never))
+    assert.match(refused, /already exists with different content/)
+    assert.equal(fs.readFileSync(file, 'utf8'), handWritten, 'the refusal wrote nothing')
+    assert.equal(openProposals(h.store.db).length, 1, 'nothing landed, so the proposal stays open')
+})
+
+test('an unwritable skills directory is a clear failure, not a silent one', () => {
+    const home = tempDir('m3-skill-blocked')
+    fs.writeFileSync(path.join(home, 'skills'), 'this is a file, not a directory')
+    const result = installSkillDraft(home, ['---', 'name: mem-blocked', '---', '', 'body', ''].join('\n'))
+    assert.equal(result.action, 'failed')
+    assert.match(result.message, /cannot write/)
 })

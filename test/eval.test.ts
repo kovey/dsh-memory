@@ -12,6 +12,8 @@ import {
     freezeBaseline,
     healthDigest,
     latestBaseline,
+    maybeFreezeBaseline,
+    metricTaskCount,
     parseBaseline,
     readBaseline,
     renderEvaluation,
@@ -357,6 +359,129 @@ test('a permitted freeze is logged with its reason and the calling session id', 
     assert.match(logged, /baseline frozen/)
     assert.match(logged, /session m5/, 'the log must name the calling session')
     assert.match(logged, /user: 冻结基线，M5 验收通过/, 'the log must carry the reason')
+})
+
+// ---- automatic freeze (eval.autoFreezeBaseline) -------------------------------
+
+/** Snapshot rows in the scope's own database. */
+function snapshotCount(h: { store: { db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } } } }): unknown {
+    return h.store.db.prepare('SELECT COUNT(*) AS n FROM baseline_snapshots').get()?.['n']
+}
+
+test('autoFreezeBaseline never freezes on too little data, and says how much is missing', async (t) => {
+    const h = await harness(t, { eval: { autoFreezeBaseline: true, proposeFreezeAfterTasks: 5 } })
+    insertTask(h.store.db, { id: 't1', date: '2026-09-01', outcome: 'success' })
+    insertTask(h.store.db, { id: 't2', date: '2026-09-02', outcome: 'failed' })
+
+    assert.equal(metricTaskCount(h.store.db), 2)
+    assert.equal(
+        maybeFreezeBaseline(h.store.db, h.scope, h.deps.config),
+        undefined,
+        'freezing without enough data would create a reference that judges nothing',
+    )
+    assert.equal(snapshotCount(h), 0)
+
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(report, /verdict: UNKNOWN/)
+    assert.match(report, /not enough task metrics yet: 2 of 5 required/)
+    assert.match(report, /3 more task\(s\)/)
+    assert.doesNotMatch(report, /enough to freeze a baseline/)
+
+    // A ledger row that carries no gate metric is not data: freezing on such
+    // rows would only produce a snapshot whose four metrics are all null.
+    h.store.db
+        .prepare('INSERT INTO tasks (task_id, date, project, summary, outcome) VALUES (?,?,?,?,?)')
+        .run('t3', '2026-09-03', 'demo', 'no metrics yet', null)
+    assert.equal(metricTaskCount(h.store.db), 2, 'a row with no metric does not count')
+    assert.equal(maybeFreezeBaseline(h.store.db, h.scope, h.deps.config), undefined)
+    assert.equal(snapshotCount(h), 0)
+})
+
+test('enough data with the knob off asks the human to freeze, and freezes nothing itself', async (t) => {
+    const h = await harness(t, { eval: { autoFreezeBaseline: false, proposeFreezeAfterTasks: 3 } })
+    for (const [index, outcome] of ['success', 'success', 'failed'].entries()) {
+        insertTask(h.store.db, { id: `t${index}`, date: `2026-09-0${index + 1}`, outcome })
+    }
+
+    assert.equal(metricTaskCount(h.store.db), 3)
+    assert.equal(maybeFreezeBaseline(h.store.db, h.scope, h.deps.config), undefined)
+
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(report, /verdict: UNKNOWN/)
+    assert.match(report, /3 task metric\(s\) accumulated \(threshold 3, gate window 30d\) — enough to freeze a baseline/)
+    assert.match(
+        report,
+        /memory_stats\(\{ setBaseline: true, baselineReason: "<who asked and what was verified>" \}\)/,
+        'the report must hand over a copyable freeze command',
+    )
+    assert.match(report, /eval\.autoFreezeBaseline is off/)
+    assert.equal(snapshotCount(h), 0, 'a hint must never freeze anything by itself')
+})
+
+test('autoFreezeBaseline freezes once (idempotent) and turns the verdict real', async (t) => {
+    const h = await harness(t, { eval: { autoFreezeBaseline: true, proposeFreezeAfterTasks: 3 } })
+    for (let index = 0; index < 4; index += 1) {
+        insertTask(h.store.db, {
+            id: `t${index}`,
+            date: `2026-09-0${index + 1}`,
+            outcome: 'success',
+            duration: 100,
+            disturb: 1,
+            rework: 1,
+        })
+    }
+
+    const frozen = maybeFreezeBaseline(h.store.db, h.scope, h.deps.config, new Date('2026-09-10T00:00:00.000Z'))
+    assert.ok(frozen, 'four metric rows clear the threshold of three')
+    assert.equal(frozen.tasks, 4)
+    assert.equal(frozen.successRate, 1)
+    assert.match(frozen.note ?? '', /auto-freeze \(eval\.autoFreezeBaseline\): 4 task metric\(s\), gate window 30d/)
+    assert.equal(snapshotCount(h), 1)
+
+    // An existing snapshot is the reference the gate compares against; a second
+    // call must not replace it (that is how a regression gets erased).
+    assert.equal(maybeFreezeBaseline(h.store.db, h.scope, h.deps.config, new Date('2026-09-20T00:00:00.000Z')), undefined)
+    assert.equal(snapshotCount(h), 1)
+    assert.equal(latestBaseline(h.store.db)?.at, '2026-09-10T00:00:00.000Z')
+
+    // The tool path renders a real verdict now instead of UNKNOWN, and a stats
+    // call does not refreeze what is already there.
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(report, /verdict: PASS/)
+    assert.doesNotMatch(report, /UNKNOWN/)
+    assert.equal(snapshotCount(h), 1)
+
+    insertTask(h.store.db, { id: 'bad', date: '2026-09-11', outcome: 'failed', duration: 400, disturb: 5, rework: 6 })
+    const after = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(after, /verdict: REGRESSION/)
+    assert.equal(snapshotCount(h), 1, 'a regression must not be washed away by a refreeze')
+})
+
+test('a stats call freezes the first baseline by itself when the knob is on', async (t) => {
+    const h = await harness(t, { eval: { autoFreezeBaseline: true, proposeFreezeAfterTasks: 2 } })
+    insertTask(h.store.db, { id: 't1', date: '2026-09-01', outcome: 'success' })
+    insertTask(h.store.db, { id: 't2', date: '2026-09-02', outcome: 'success' })
+
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(report, /baseline auto-frozen \(eval\.autoFreezeBaseline\): 2 task\(s\)/)
+    assert.match(report, /verdict: PASS/)
+    assert.equal(snapshotCount(h), 1)
+})
+
+test('a subagent reading memory_stats cannot trigger the auto-freeze', async (t) => {
+    const h = await harness(t, { eval: { autoFreezeBaseline: true, proposeFreezeAfterTasks: 2 } })
+    insertTask(h.store.db, { id: 't1', date: '2026-09-01', outcome: 'success' })
+    insertTask(h.store.db, { id: 't2', date: '2026-09-02', outcome: 'success' })
+    const subagent = { session: { id: 'm5-sub', header: { cwd: h.repo, origin: 'subagent' } } }
+
+    const report = String(await statsTool(h.deps).execute({} as never, { agent: subagent } as never))
+    assert.doesNotMatch(report, /refused/)
+    assert.equal(snapshotCount(h), 0, 'freezing the gate reference stays with the top-level session')
+    assert.match(report, /eval\.autoFreezeBaseline is on/)
+
+    const topLevel = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.match(topLevel, /baseline auto-frozen/)
+    assert.equal(snapshotCount(h), 1)
 })
 
 // ---- write authorization for subagent sessions -------------------------------

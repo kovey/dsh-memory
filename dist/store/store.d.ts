@@ -49,6 +49,15 @@ export declare class StoreRegistry {
      * reported as unavailable (the text view keeps working meanwhile).
      */
     private openDatabaseFor;
+    /**
+     * One line of store health per root per process.
+     *
+     * It lives here rather than in a session hook because `session/created` can
+     * arrive before `registry.initialize()` finished — the store is not openable
+     * yet, and a hook-based line would silently never appear (the lazy
+     * consolidation has the same dependency and needs a ready registry).
+     */
+    private reportHealth;
     /** First-open bootstrap: import the text view, then load the metric ledger. */
     private bootstrap;
     /** Store for `scope`, marked as used (the LRU order of `closeIdle`). */

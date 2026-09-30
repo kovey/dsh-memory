@@ -22,3 +22,7 @@ node_modules/
 .dsh/memory/memory.db-wal
 .dsh/memory/sessions/
 .dsh/memory/.queue/
+
+# 其它 dsh 插件的运行数据（不是本项目的记忆）
+.dsh/audit/
+.dsh/evidence/

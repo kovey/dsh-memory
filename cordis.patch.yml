@@ -72,6 +72,12 @@
           exitCodeSignals: strong
           # 会话启动时补蒸馏几组"采到但没蒸馏"的信号（jobs 被随 agent 取消、进程中途退出都靠它兜底）
           maxRecoverPerSession: 2
+          # pending（蒸馏候选）被召回并"活下来"多少次后晋升为 active —— 没有这条出路，
+          # 未审核候选会长期淤积（实测曾达 55/94）。按"被使用"晋升而非按年龄/次数。
+          promoteAfterRecalls: 3
+          promoteMinSuccessRatio: 0.5
+          # 单次批量遗忘的上限（memory_forget 的批量形态，默认 dry-run）
+          bulkForgetLimit: 50
 
         # Episodic (L1) capture: structured signals only, redacted by default.
         episodic:
@@ -89,12 +95,19 @@
           # 未归因的行永不删（归因还需要它们）。清理在惰性巩固时执行并打印清理量。
           usageRetentionDays: 180
 
+        # 评估门禁：未冻结基线时 verdict 只能是 UNKNOWN（防退化保证形同虚设）。
+        eval:
+          windowDays: 30
+          autoFreezeBaseline: false     # true 时在惰性巩固里自动冻结一次基线（默认人工）
+          proposeFreezeAfterTasks: 5    # 积累多少个任务指标后提示可以冻结
         # Git-ized text view of the memory store.
         git:
           enabled: true
           autoCommit: task-end
           checkpointMinutes: 30
           autoPush: false
+          # 跨进程导出+提交锁的等待上限（nvim-tui 与 web 可能同时写同一个记忆根）
+          lockTimeoutMs: 10000
 
         sqlite:
           journalMode: wal

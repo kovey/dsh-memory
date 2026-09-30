@@ -7,7 +7,7 @@
  * distilled memory cannot diverge in quality rules.
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { appendPreference } from '../learn/profile.js'
+import { appendProfileLine, isProfileName } from '../learn/profile.js'
 import { log } from '../log.js'
 import { applyDraft } from '../learn/gate.js'
 import type { CandidateDraft } from '../learn/gate.js'
@@ -107,6 +107,11 @@ export function saveTool(deps: SaveToolDeps) {
                 description:
                     'Where to store it. Default: project. Global is only for cross-project toolchain facts; profile (L5) is for a standing preference the user stated — it is also written to profile/preferences.md and stays resident in the prompt.',
             },
+            profileFile: {
+                type: 'string',
+                description:
+                    'Only with layer="profile": which L5 file the preference joins, as a bare [a-z0-9-] name (default "preferences"). "conventions" appends to <memory root>/profile/conventions.md — the file is created with a heading when missing.',
+            },
             confidence: { type: 'number', description: '0..1. Verified fixes ≈0.9; observations ≈0.7; guesses ≤0.6.' },
             ttl: { type: 'string', description: '"permanent" (default), "30d"/"180d", or an ISO date.' },
             tags: { type: 'array', items: { type: 'string' }, description: 'Optional keywords.' },
@@ -140,12 +145,20 @@ export function saveTool(deps: SaveToolDeps) {
             // reads — that is what makes it effective without being recalled.
             // Only a user-stated preference belongs here, so require that the
             // caller says so explicitly.
+            let profilePath: string | undefined
             if (args.layer === 'profile') {
                 if (evidenceKind0(args) !== 'user-statement') {
                     return 'rejected: the profile layer holds standing user preferences — pass evidence="user-statement" (and only when the user actually stated one).'
                 }
-                const file = appendPreference(store.scope, `${title}：${body}`)
-                if (file === undefined) return 'rejected: could not write the profile layer for this scope'
+                // The layer is every `.md` under `<root>/profile/`, but the name
+                // is a bare `[a-z0-9-]` slug: it comes from a model, so it must
+                // never be able to name a path (`../lessons/x`, `/etc/passwd`).
+                const profileFile = (args.profileFile ?? 'preferences').trim()
+                if (!isProfileName(profileFile)) {
+                    return `rejected: profileFile must be a bare [a-z0-9-] name (got ${JSON.stringify(profileFile)}); "conventions" writes profile/conventions.md — no dots, slashes or uppercase.`
+                }
+                profilePath = appendProfileLine(store.scope, profileFile, `${title}：${body}`)
+                if (profilePath === undefined) return 'rejected: could not write the profile layer for this scope'
             }
             const evidenceKind = (args.evidence ?? 'self-report') as EvidenceKind
             const evidence: Evidence[] = [
@@ -180,6 +193,7 @@ export function saveTool(deps: SaveToolDeps) {
                     `scope: ${where}`,
                     `confidence: ${result.confidence.toFixed(2)} · status: ${result.record?.status ?? 'active'}`,
                     `path: ${scope.root}/lessons/${result.recordId}.md`,
+                    profilePath !== undefined ? `profile: ${profilePath}` : '',
                     result.action === 'merge' ? `merge reason: ${result.reason}` : '',
                 ]
                     .filter((line) => line !== '')

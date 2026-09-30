@@ -88,6 +88,18 @@ export interface MemoryConfig {
          * cancelled with its agent) and survives crashes mid-distillation.
          */
         maxRecoverPerSession: number;
+        /**
+         * Recall count at which a `pending` record is promoted to `active`.
+         *
+         * Model-distilled candidates enter pending (DESIGN §7), but without a way
+         * out the store drifts to mostly-pending: 55 of 94 records in the live
+         * store. Promotion needs evidence of *use*, not just existence.
+         */
+        promoteAfterRecalls: number;
+        /** Net-positive recall record (successes > failures) required to promote. */
+        promoteMinSuccessRatio: number;
+        /** Cap for one bulk-forget call. */
+        bulkForgetLimit: number;
         /** Wall-clock budget for one recovery pass (never stalls turn closure). */
         recoverBudgetMs: number;
     };
@@ -104,12 +116,28 @@ export interface MemoryConfig {
         everyDays: number;
         archiveInsteadOfDelete: boolean;
     };
+    eval: {
+        /** Trend/comparison window in days. */
+        windowDays: number;
+        /**
+         * Freeze a baseline automatically once a healthy window exists.
+         *
+         * Off by default: freezing is the human-reviewed gate-calibration step
+         * (DESIGN §11). With no baseline the gate can only ever answer UNKNOWN —
+         * which is exactly the state the live store was in.
+         */
+        autoFreezeBaseline: boolean;
+        /** Tasks with metrics after which `memory_stats` proposes a human freeze. */
+        proposeFreezeAfterTasks: number;
+    };
     git: {
         enabled: boolean;
         autoCommit: 'off' | 'task-end' | 'immediate';
         checkpointMinutes: number;
         /** Never automatic: pushing requires an explicit user instruction. */
         autoPush: false;
+        /** Milliseconds to wait for a cross-process export/commit lock. */
+        lockTimeoutMs: number;
     };
     sqlite: {
         journalMode: 'wal' | 'delete';

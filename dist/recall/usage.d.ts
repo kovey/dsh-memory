@@ -33,8 +33,12 @@ export declare function pruneUsage(db: DatabaseSync, retentionDays: number, now?
  * noise". The penalty is applied here, once per observed failure, because
  * `mergeRecord` no longer re-derives confidence.
  */
-export declare function applyOutcome(db: DatabaseSync, sessionId: string, outcome: 'success' | 'failure', turn?: number): number;
-export declare function attributeOutcome(db: DatabaseSync, sessionId: string, outcome: 'success' | 'failure', turn?: number): number;
+export declare function applyOutcome(db: DatabaseSync, sessionId: string, outcome: 'success' | 'failure', turn?: number, options?: {
+    maxStep?: number;
+}): number;
+export declare function attributeOutcome(db: DatabaseSync, sessionId: string, outcome: 'success' | 'failure', turn?: number, options?: {
+    maxStep?: number;
+}): number;
 export interface RecallStats {
     injections: number;
     attributed: number;

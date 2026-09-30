@@ -12,6 +12,7 @@ import type { DatabaseSync } from 'node:sqlite'
 import { log } from '../log.js'
 import { exportAll } from '../store/export.js'
 import { listRecords } from '../store/sqlite/records.js'
+import { transact } from '../store/sqlite/db.js'
 import type { MemoryRecord, MemoryScope } from '../store/types.js'
 import { activeRecords, applyConflicts, detectConflicts } from './conflicts.js'
 import { applyDecay, markConsolidated, planDecay } from './decay.js'
@@ -27,6 +28,10 @@ export interface ConsolidateOptions {
     promotionMinSeen?: number
     /** Promotion floor: confidence required (DESIGN §8: >= 0.9). */
     promotionMinConfidence?: number
+    /** Recalls needed before a `pending` record is promoted by use. */
+    promotionMinRecalls?: number
+    /** Net-positive recall ratio needed for that promotion. */
+    promotionMinSuccessRatio?: number
 }
 
 export interface ProposalDraft {
@@ -50,11 +55,15 @@ export interface ConsolidateReport {
     proposals: ProposalDraft[]
     /** Files written for the promotion proposals (empty in a dry run). */
     skillDrafts: string[]
+    /** `pending` records promoted to `active` because they were recalled and survived. */
+    promotedByUse: string[]
     errors: string[]
 }
 
 const DEFAULT_PROMOTION_SEEN = 3
 const DEFAULT_PROMOTION_CONFIDENCE = 0.9
+const DEFAULT_PROMOTION_RECALLS = 3
+const DEFAULT_PROMOTION_RATIO = 0.5
 
 /** Lessons that have proven themselves often enough to become a skill. */
 export function promotionCandidates(db: DatabaseSync, options: ConsolidateOptions = {}): MemoryRecord[] {
@@ -67,6 +76,39 @@ export function promotionCandidates(db: DatabaseSync, options: ConsolidateOption
             record.supersededBy === undefined &&
             record.status === 'active',
     )
+}
+
+/**
+ * Promote `pending` records that have proven themselves *in use*.
+ *
+ * DESIGN §7 puts model-distilled candidates in pending so unreviewed output is
+ * never injected as fact — but it provided no way out, and the live store drifted
+ * to 55 pending of 94 records. The missing half is evidence of use: a candidate
+ * that keeps being recalled into turns that end well has earned `active`.
+ *
+ * Deliberately needs *recalls* (not just age or repetition): existence is not
+ * evidence, being retrieved and surviving is.
+ */
+export function promoteByUse(
+    db: DatabaseSync,
+    options: { minRecalls?: number; minSuccessRatio?: number; now?: Date; dryRun?: boolean } = {},
+): MemoryRecord[] {
+    const minRecalls = Math.max(1, options.minRecalls ?? DEFAULT_PROMOTION_RECALLS)
+    const minRatio = Math.min(1, Math.max(0, options.minSuccessRatio ?? DEFAULT_PROMOTION_RATIO))
+    const candidates = listRecords(db, { status: ['pending'] }).filter((record) => {
+        if (record.timesRecalled < minRecalls) return false
+        const total = record.successAfterRecall + record.failAfterRecall
+        if (total === 0) return false
+        if (record.successAfterRecall === 0) return false
+        return record.successAfterRecall / total >= minRatio
+    })
+    if (candidates.length === 0 || options.dryRun === true) return candidates
+    transact(db, () => {
+        const statement = db.prepare('UPDATE records SET status = ?, updated_at = ? WHERE id = ?')
+        const at = (options.now ?? new Date()).toISOString()
+        for (const record of candidates) statement.run('active', at, record.id)
+    })
+    return candidates
 }
 
 /** Record promotion proposals (idempotent: one open proposal per record). */
@@ -130,6 +172,7 @@ export function consolidate(
         conflictsResolved: 0,
         proposals: [],
         skillDrafts: [],
+        promotedByUse: [],
         errors: [],
     }
 
@@ -143,6 +186,23 @@ export function consolidate(
         if (plan.factor < 1 && !dryRun) log('info', `memory: decayed ${outcome.decayed} record(s) by ${plan.factor.toFixed(3)}`)
     } catch (error) {
         report.errors.push(`decay: ${message(error)}`)
+    }
+
+    try {
+        // Evidence of use first: a promoted record then participates in the normal
+        // decay/conflict/promotion machinery as a first-class memory.
+        const promoted = promoteByUse(db, {
+            minRecalls: options.promotionMinRecalls,
+            minSuccessRatio: options.promotionMinSuccessRatio,
+            ...(options.now !== undefined ? { now: options.now } : {}),
+            ...(dryRun ? { dryRun: true } : {}),
+        })
+        report.promotedByUse = dryRun ? [] : promoted.map((record) => record.id)
+        if (report.promotedByUse.length > 0) {
+            log('info', `memory: promoted ${report.promotedByUse.length} record(s) from pending by use`)
+        }
+    } catch (error) {
+        report.errors.push(`promote: ${message(error)}`)
     }
 
     try {

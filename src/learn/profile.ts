@@ -22,6 +22,26 @@ import type { MemoryScope } from '../store/types.js'
 export const PROFILE_FILES = ['preferences.md', 'conventions.md'] as const
 export type ProfileFile = (typeof PROFILE_FILES)[number]
 
+/**
+ * A profile file *name* (without `.md`): lowercase letters, digits and dashes.
+ *
+ * This is a security boundary, not cosmetics: `memory_save` takes the name from
+ * a model, and `../../lessons/x` or `/etc/passwd` must never resolve to a path.
+ * `profileFilePath` still re-checks with `assertInsideScope`, so a traversal bug
+ * here is caught there as well.
+ */
+export const PROFILE_NAME_RE = /^[a-z0-9-]{1,64}$/
+
+/** True when `name` may be used as `<memory root>/profile/<name>.md`. */
+export function isProfileName(name: string): boolean {
+    return PROFILE_NAME_RE.test(name)
+}
+
+/** Heading used when a profile file is created (existing files are kept as-is). */
+function headingFor(name: string): string {
+    return name === 'preferences' ? '# 偏好' : `# ${name}`
+}
+
 /** Per-file cap: a preference is a line or two, not an essay. */
 const MAX_FILE_BYTES = 4_000
 
@@ -116,13 +136,40 @@ export function writeProfile(scope: MemoryScope, name: string, text: string): st
     }
 }
 
+/**
+ * Append one line to any L5 file, keeping it a list.
+ *
+ * `preferences.md` is the default door (`appendPreference`), but the layer is
+ * "plain markdown under `profile/`": `conventions.md` and friends are legitimate
+ * L5 files and had no write path at all before this. The name is validated here
+ * rather than at the call site so every writer — tool, test, future caller —
+ * gets the same guarantee.
+ */
+export function appendProfileLine(
+    scope: MemoryScope,
+    name: string,
+    line: string,
+    now = new Date(),
+): string | undefined {
+    if (!isProfileName(name)) {
+        log('warn', `memory: refusing profile file name ${JSON.stringify(name)} — allowed: [a-z0-9-] (no dots, no slashes)`)
+        return undefined
+    }
+    const file = profileFilePath(scope, name)
+    if (file === undefined) return undefined
+    try {
+        const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : `${headingFor(name)}\n`
+        const trimmed = line.trim().replace(/^-\s*/, '')
+        if (existing.includes(trimmed)) return file
+        const body = `${existing.trimEnd()}\n- ${trimmed}  <!-- ${now.toISOString().slice(0, 10)} -->\n`
+        return writeProfile(scope, name, body)
+    } catch (error) {
+        log('warn', `memory: appending to profile ${name} failed:`, error)
+        return undefined
+    }
+}
+
 /** Append one preference line to `preferences.md`, keeping it a list. */
 export function appendPreference(scope: MemoryScope, line: string, now = new Date()): string | undefined {
-    const file = profileFilePath(scope, 'preferences.md')
-    if (file === undefined) return undefined
-    const existing = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '# 偏好\n'
-    const trimmed = line.trim().replace(/^-\s*/, '')
-    if (existing.includes(trimmed)) return file
-    const body = `${existing.trimEnd()}\n- ${trimmed}  <!-- ${now.toISOString().slice(0, 10)} -->\n`
-    return writeProfile(scope, 'preferences.md', body)
+    return appendProfileLine(scope, 'preferences', line, now)
 }

@@ -19,6 +19,7 @@ import { countRecords } from './sqlite/records.js'
 import type { RecordCounts } from './sqlite/records.js'
 import { CORE_TABLES_SQL, FTS_REBUILD_SQL, FTS_SQL, SCHEMA_VERSION } from './sqlite/schema.js'
 import type { MemoryScope } from './types.js'
+import { probeVersioning } from './versioning.js'
 
 type SqliteModule = typeof import('node:sqlite')
 
@@ -50,6 +51,8 @@ DROP TRIGGER IF EXISTS records_fts_ad;
 DROP TRIGGER IF EXISTS records_fts_au;
 DROP TABLE IF EXISTS records_fts;
 `
+
+const reported = new Set<string>()
 
 export class StoreRegistry {
     private readonly stores = new Map<string, ScopeStore>()
@@ -91,6 +94,7 @@ export class StoreRegistry {
         const existing = this.stores.get(scope.root)
         if (existing !== undefined) {
             this.touch(existing)
+            this.reportHealth(existing)
             return existing
         }
         if (this.module === undefined || !this.probe.available) return undefined
@@ -104,6 +108,9 @@ export class StoreRegistry {
         const store: ScopeStore = { scope, db, fts5: this.probe.fts5, openedAt: now, lastUsedAt: now }
         this.stores.set(scope.root, store)
         this.bootstrap(store)
+        // Also for stores that were bootstrapped long ago: the pending ratio is a
+        // property of the *existing* corpus, which is exactly where drift shows.
+        this.reportHealth(store)
         return store
     }
 
@@ -150,8 +157,43 @@ export class StoreRegistry {
         }
     }
 
+    /**
+     * One line of store health per root per process.
+     *
+     * It lives here rather than in a session hook because `session/created` can
+     * arrive before `registry.initialize()` finished — the store is not openable
+     * yet, and a hook-based line would silently never appear (the lazy
+     * consolidation has the same dependency and needs a ready registry).
+     */
+    private reportHealth(store: ScopeStore): void {
+        if (reported.has(store.scope.root)) return
+        reported.add(store.scope.root)
+        try {
+            const counts = countRecords(store.db)
+            if (counts.total === 0) return
+            const pendingShare = Math.round((counts.pending / counts.total) * 100)
+            const hint =
+                pendingShare >= 50
+                    ? ' — mostly unvetted candidates: memory_consolidate promotes the ones that get recalled and survive'
+                    : ''
+            log(
+                'info',
+                `memory: ${store.scope.kind} store — ${counts.total} records (${counts.active} active / ${counts.pending} pending${counts.archived > 0 ? ` / ${counts.archived} archived` : ''}), ${pendingShare}% pending${hint}`,
+            )
+        } catch (error) {
+            log('debug', 'memory: store health line failed:', error)
+        }
+    }
+
     /** First-open bootstrap: import the text view, then load the metric ledger. */
     private bootstrap(store: ScopeStore): void {
+        // Say it out loud when the text view is not actually tracked (see
+        // versioning.ts): everything works, so nothing else would reveal it.
+        try {
+            probeVersioning(store.scope)
+        } catch {
+            // diagnostics must never break a bootstrap
+        }
         try {
             const imported = bootstrapImport(store.db, store.scope)
             if (imported !== undefined && imported.imported > 0) {

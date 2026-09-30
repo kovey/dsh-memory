@@ -40,8 +40,8 @@ export function pruneUsage(db, retentionDays, now = new Date()) {
  * noise". The penalty is applied here, once per observed failure, because
  * `mergeRecord` no longer re-derives confidence.
  */
-export function applyOutcome(db, sessionId, outcome, turn) {
-    const attributed = attributeOutcome(db, sessionId, outcome, turn);
+export function applyOutcome(db, sessionId, outcome, turn, options = {}) {
+    const attributed = attributeOutcome(db, sessionId, outcome, turn, options);
     // Success only needs the counter (already bumped) to affect later maths.
     if (attributed === 0 || outcome === 'success')
         return attributed;
@@ -71,12 +71,20 @@ export function applyOutcome(db, sessionId, outcome, turn) {
     });
     return attributed;
 }
-export function attributeOutcome(db, sessionId, outcome, turn) {
+export function attributeOutcome(db, sessionId, outcome, turn, options = {}) {
+    // A failure observed at step k cannot have been caused by a memory injected
+    // at step k+1: attributing by turn alone blamed every injection in the turn,
+    // including ones the model had not even seen when things went wrong.
+    const maxStep = options.maxStep;
+    const stepClause = maxStep !== undefined ? ' AND (step IS NULL OR step <= ?)' : '';
+    const stepArgs = maxStep !== undefined ? [maxStep] : [];
     const rows = turn === undefined
-        ? db.prepare('SELECT id, record_id FROM usage WHERE session_id = ? AND outcome IS NULL').all(sessionId)
+        ? db
+            .prepare(`SELECT id, record_id FROM usage WHERE session_id = ? AND outcome IS NULL${stepClause}`)
+            .all(sessionId, ...stepArgs)
         : db
-            .prepare('SELECT id, record_id FROM usage WHERE session_id = ? AND outcome IS NULL AND turn = ?')
-            .all(sessionId, turn);
+            .prepare(`SELECT id, record_id FROM usage WHERE session_id = ? AND outcome IS NULL AND turn = ?${stepClause}`)
+            .all(sessionId, turn, ...stepArgs);
     if (rows.length === 0)
         return 0;
     transact(db, () => {

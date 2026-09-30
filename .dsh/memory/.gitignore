@@ -5,3 +5,4 @@ memory.db-wal
 sessions/
 .queue/
 *.bak.*
+.dsh-memory-commit.lock

@@ -531,3 +531,82 @@ test('a subagent cannot archive, reindex or sync memory, and nothing is written'
     assert.match(allowed, /retired: keep-me/)
     assert.equal(statusOf(), 'archived')
 })
+
+// ---- the auto-freeze quality gate --------------------------------------------
+
+test('auto-freeze refuses an unhealthy window and says why, without writing a snapshot', async (t) => {
+    // The bug: the only condition was "enough metric rows". A period with a 12%
+    // success rate and 6.1 rework rounds per task was frozen as the reference,
+    // which turns the gate into a rubber stamp (DESIGN §11: a freeze is a human
+    // calibration step, and only after a *good* period).
+    const h = await harness(t, { eval: { autoFreezeBaseline: true, proposeFreezeAfterTasks: 3 } })
+    for (let index = 0; index < 4; index += 1) {
+        insertTask(h.store.db, {
+            id: `bad${index}`,
+            date: `2026-09-0${index + 1}`,
+            outcome: 'failed',
+            duration: 300,
+            disturb: 4,
+            rework: 6,
+        })
+    }
+    const logFile = path.join(tempDir('m5-freeze-gate-log'), 'memory.log')
+    setLogFile(logFile)
+    try {
+        assert.equal(
+            maybeFreezeBaseline(h.store.db, h.scope, h.deps.config, new Date('2026-09-10T00:00:00.000Z')),
+            undefined,
+            'an unhealthy window must not become the gate reference',
+        )
+        assert.equal(snapshotCount(h), 0, 'nothing was frozen')
+        const logged = fs.readFileSync(logFile, 'utf8')
+        assert.match(logged, /\[info\][^\n]*quality gate not met/, 'the refusal is explained, not silent')
+        assert.match(logged, /current success 0 < eval\.autoFreezeMinSuccessRate 0\.5/, 'it names the rate and its threshold')
+        assert.match(logged, /current rework 6 > eval\.autoFreezeMaxRework 3/, 'and the rework side too')
+    } finally {
+        setLogFile(undefined)
+    }
+
+    // The stats hint must not promise a freeze the gate would refuse.
+    const hint = String(await statsTool(h.deps).execute({} as never, { agent: h.agent } as never))
+    assert.doesNotMatch(hint, /the next memory_stats call freezes it without asking/)
+    assert.match(hint, /eval\.autoFreezeBaseline is on but the quality gate blocks it/)
+    assert.match(hint, /current success 0 < eval\.autoFreezeMinSuccessRate 0\.5/)
+    assert.equal(snapshotCount(h), 0, 'reading the report still must not freeze anything')
+
+    // The human path still works, and a healthy window freezes normally.
+    const healthy = await harness(t, { eval: { autoFreezeBaseline: true, proposeFreezeAfterTasks: 3 } })
+    for (let index = 0; index < 4; index += 1) {
+        insertTask(healthy.store.db, {
+            id: `good${index}`,
+            date: `2026-09-0${index + 1}`,
+            outcome: 'success',
+            duration: 60,
+            disturb: 0,
+            rework: 1,
+        })
+    }
+    const frozen = maybeFreezeBaseline(healthy.store.db, healthy.scope, healthy.deps.config, new Date('2026-09-10T00:00:00.000Z'))
+    assert.ok(frozen, 'a healthy window still freezes')
+    assert.equal(frozen.successRate, 1)
+    // and the snapshot stays a one-off (idempotence is unchanged)
+    assert.equal(maybeFreezeBaseline(healthy.store.db, healthy.scope, healthy.deps.config, new Date('2026-09-20T00:00:00.000Z')), undefined)
+    assert.equal(snapshotCount(healthy), 1)
+})
+
+test('the quality gate reads its thresholds from eval config', async (t) => {
+    const h = await harness(t, {
+        eval: { autoFreezeBaseline: true, proposeFreezeAfterTasks: 2, autoFreezeMinSuccessRate: 0.9, autoFreezeMaxRework: 0 },
+    })
+    insertTask(h.store.db, { id: 'a', date: '2026-09-01', outcome: 'success', duration: 60, disturb: 0, rework: 1 })
+    insertTask(h.store.db, { id: 'b', date: '2026-09-02', outcome: 'failed', duration: 60, disturb: 0, rework: 1 })
+
+    // success 0.5 < the configured 0.9: refused
+    assert.equal(maybeFreezeBaseline(h.store.db, h.scope, h.deps.config), undefined)
+    assert.equal(snapshotCount(h), 0)
+
+    // the same window with the *default* thresholds (0.5 / 3) is healthy
+    const lenient = { ...h.deps.config, eval: { ...h.deps.config.eval, autoFreezeMinSuccessRate: 0.5, autoFreezeMaxRework: 3 } }
+    assert.ok(maybeFreezeBaseline(h.store.db, h.scope, lenient, new Date('2026-09-10T00:00:00.000Z')))
+    assert.equal(snapshotCount(h), 1)
+})

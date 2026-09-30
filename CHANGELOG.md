@@ -69,9 +69,36 @@
 - 脱敏补 **JWT** 与**高熵长串**启发式（保留 git SHA 与普通标识符）。
 - 每个配置旋钮都写进随包发布的 `cordis.patch.yml` 注释；`.gitignore` 排除其它插件的运行数据。
 
+### Fixed（对抗性审查回归，2026-09-30）
+
+一轮"已确认并复现"的缺陷修复，每条都先补**会失败的回归测试**再修：
+
+- **归因高水位在真实路径上是空转的**：`tools/result` 与 `agent/request-error` 写信号时不带 `step`，
+  `failureSteps` 恒为空 → `applyOutcome` 不加 `step <= ?`（"失败之后才注入的记忆被记为失败"仍然存在）。
+  现在 `agent/pre-step` 把当前 step 记进 `SessionState`，两类信号都从那里取；高水位只取**硬失败**
+  （工具失败/返工/请求错误）的最早 step，`user-correction` 不再把它压回 step 1（那是"少归因"的另一半）。
+- **`memory_forget({ olderThanDays: 0 })` 会归档整库**：`0`/负数/NaN 现在一律视为"未提供"，
+  不构成判据也不加时间条件，仍受"至少一个判据"守卫。
+- **自动冻结没有质量门**：新增 `eval.autoFreezeMinSuccessRate`（默认 0.5）与 `eval.autoFreezeMaxRework`
+  （默认 3）；窗口不健康则**不落盘**、只 `log('info')` 说明，`memory_stats` 也不再承诺"下次自动冻结"。
+  （真机库里已存在的那条糟糕快照需要人工决定是否删除，插件不动真机数据。）
+- **`learn.promoteAfterRecalls` / `promoteMinSuccessRatio` 是死配置**：两个 `consolidate()` 调用点
+  （工具 + 惰性巩固）现在从 config 传入；`test/patch.test.ts` 增加"关键旋钮必须被 src 引用"的断言，
+  防止再出现"写在 patch 注释里但没人读"。
+- **置信度重算不受 `maxStep` 约束**：重算只针对本次真正 bump 过的 `record_id`，被豁免的记录
+  confidence 与计数完全不变。
+- **提交内导出在 store 未打开时静默 no-op**：导出前先 `registry.open(scope)`；导出返回 `false` 时 `warn`
+  （含 scope 与原因）——pre-sync 检查点与 session 结束这两条路径都曾命中。
+- 同类小缺陷：空库首开会 latch 掉健康度行；`isGitIgnored` 把"探测失败"当成"未被忽略"（新增 `unknown`）；
+  `installSkillDraft` 的符号链接可写到 `skills/` 之外（改为 realpath 包含性判断）；提交锁加同主机
+  存活检查 + 阶段边界心跳，`acquireCommitLock(root, undefined)` 不再死循环（回落默认值）；
+  `renderReport` 补渲染 `promotedByUse`；`profileFilePath` 自己校验名字白名单；`promoteByUse` 归一负计数；
+  高熵脱敏豁免带词边界的长标识符；`skillNameOf` 解析 YAML 引号与行尾注释。
+
 ### Verified
 
-- `npm test` **211 例全绿**（本轮新增 27 例）；`tsc` 零错误。
+- `npm test` **全量测试全绿**（`node --test test/*.test.ts`，本文件不写死用例数——写死的数字会立刻过期）；
+  `tsc` 零错误。
 - **真机验证**（宿主 dsh 0.2.0-rc.2，nvim-tui e2e，人为构造一个忽略 `.dsh/` 的仓库）：
   ```
   memory: /private/tmp/…/.dsh/memory is git-ignored in this repository — project memory is machine-local …

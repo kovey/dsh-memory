@@ -75,6 +75,8 @@
           # pending（蒸馏候选）被召回并"活下来"多少次后晋升为 active —— 没有这条出路，
           # 未审核候选会长期淤积（实测曾达 55/94）。按"被使用"晋升而非按年龄/次数。
           promoteAfterRecalls: 3
+          # 晋升判据：成功/(成功+失败) ≥ 该比例（默认 0.5 = 净正），且至少有一次成功。
+          # 两者都由 memory_consolidate 从 config 传入（写死在实现里的默认值曾经让这两个旋钮失效）。
           promoteMinSuccessRatio: 0.5
           # 单次批量遗忘的上限（memory_forget 的批量形态，默认 dry-run）
           bulkForgetLimit: 50
@@ -99,6 +101,10 @@
         eval:
           windowDays: 30
           autoFreezeBaseline: false     # true 时在惰性巩固里自动冻结一次基线（默认人工）
+          # 自动冻结的质量门：只有"够多数据"会把糟糕时期冻成基准（实测曾冻出 12% 成功率/6.12 返工），
+          # 因此还要求当前窗口同时满足下面两条，否则不落盘、只提示，冻结仍留给人工。
+          autoFreezeMinSuccessRate: 0.5
+          autoFreezeMaxRework: 3
           proposeFreezeAfterTasks: 5    # 积累多少个任务指标后提示可以冻结
         # Git-ized text view of the memory store.
         git:

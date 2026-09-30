@@ -115,10 +115,58 @@ export function pruneSkillDrafts(scope, keepIds) {
 export function isSafeSkillName(name) {
     return name.length <= 64 && /^[a-z0-9][a-z0-9-]*$/.test(name);
 }
-/** The `name:` frontmatter field of a rendered draft — the name the host loads it under. */
+/**
+ * The `name:` frontmatter field of a rendered draft — the name the host loads it
+ * under.
+ *
+ * YAML, not "the rest of the line": a value may be quoted (`name: "mem-x"`) and a
+ * trailing ` # …` is a comment, not part of the scalar. Taking the raw text made
+ * the first form install nothing (quotes are not a valid skill name) and the
+ * second form invent a name with the comment glued on.
+ */
 export function skillNameOf(draft) {
-    const match = /^name:[ \t]*(\S+)[ \t]*$/m.exec(draft);
-    return match?.[1];
+    const match = /^name:[ \t]*(.*?)[ \t]*$/m.exec(draft);
+    if (match === null)
+        return undefined;
+    const name = yamlScalar(match[1] ?? '');
+    return name === '' ? undefined : name;
+}
+/** A single-line YAML scalar: strip a trailing comment, then the quotes. */
+function yamlScalar(raw) {
+    let value = raw.trim();
+    const quote = value[0];
+    if (quote === '"' || quote === "'") {
+        // Inside quotes the comment marker is content, so only the closing quote
+        // ends the scalar (an escaped quote inside is deliberately not handled —
+        // a skill name has no business carrying one).
+        const end = value.indexOf(quote, 1);
+        if (end !== -1)
+            value = value.slice(0, end + 1);
+    }
+    else {
+        // ` #` starts a comment; a bare `#` is part of the value.
+        const comment = /(^|\s)#/.exec(value);
+        if (comment !== null)
+            value = value.slice(0, comment.index).trim();
+    }
+    if (value.length >= 2 && (value[0] === '"' || value[0] === "'") && value.endsWith(value[0])) {
+        value = value.slice(1, -1);
+    }
+    return value.trim();
+}
+/**
+ * `fs.realpathSync` where it can fail (a target that does not exist yet).
+ *
+ * A missing path has nothing to resolve *to*, so `undefined` means "keep the
+ * lexical value" for the root and "nothing to check" for a target.
+ */
+function realPathIfExists(target) {
+    try {
+        return fs.realpathSync(target);
+    }
+    catch {
+        return undefined;
+    }
 }
 /**
  * Install a reviewed promotion draft as a host skill:
@@ -126,14 +174,20 @@ export function skillNameOf(draft) {
  *
  * Only an explicit `acceptProposal` reaches this function, so the human
  * decision stays where DESIGN §3 put it — but the step after it is a copy, not
- * an authoring exercise. Two rules keep the install safe:
+ * an authoring exercise. Three rules keep the install safe:
  *
  *   - the existing file is never clobbered silently: different content is a
  *     conflict unless the caller passed `overwrite`, because a promoted skill
  *     may be a file somebody wrote by hand;
  *   - a failure (bad name, unwritable directory) is returned as a message, so
  *     the caller can leave the proposal open instead of reporting a promotion
- *     that did not happen.
+ *     that did not happen;
+ *   - the target must resolve *inside* the skills root. `isInside` is purely
+ *     lexical, so `<home>/skills/<name>` as a symlink used to send the write
+ *     wherever the link pointed. The containment check is therefore redone on
+ *     `realpath` for any part that already exists; a symlinked *root* that stays
+ *     inside (macOS `/tmp` → `/private/tmp`) is still legitimate, which is why
+ *     this resolves instead of refusing every symlink outright.
  */
 export function installSkillDraft(home, draft, options = {}) {
     const name = skillNameOf(draft);
@@ -148,11 +202,25 @@ export function installSkillDraft(home, draft, options = {}) {
         };
     }
     const skillsRoot = path.join(home, 'skills');
-    const file = path.join(skillsRoot, name, 'SKILL.md');
+    const dir = path.join(skillsRoot, name);
+    const file = path.join(dir, 'SKILL.md');
     // Defence in depth: the name is validated above, but a write outside
     // <home>/skills must be impossible even if that check ever changes.
     if (!isInside(skillsRoot, file)) {
         return { action: 'invalid-name', name, message: `refusing to write outside ${skillsRoot}: ${file}` };
+    }
+    const realRoot = realPathIfExists(skillsRoot);
+    for (const target of [realPathIfExists(dir), realPathIfExists(file)]) {
+        if (target === undefined)
+            continue;
+        if (realRoot !== undefined && isInside(realRoot, target))
+            continue;
+        return {
+            action: 'failed',
+            name,
+            file,
+            message: `refused: ${target} resolves outside ${realRoot ?? skillsRoot} (a symlink in the skill path) — nothing was written`,
+        };
     }
     const existing = readFileIfExists(file);
     if (existing !== undefined && existing !== draft && options.overwrite !== true) {

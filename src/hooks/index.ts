@@ -64,7 +64,22 @@ export function createHookDeps(
         // The commit path owns the cross-process lock, so the text-view export runs
         // *inside* it: two hosts exporting and committing the same root used to
         // interleave (SQLite serializes its own writes, the export did not).
-        committer: new AutoCommitter(config, { exportText: (scope) => registry.exportScope(scope) }),
+        //
+        // The export reopens the scope first. `registry.exportScope` is a no-op
+        // returning `false` for a root that is not in the open map, and both real
+        // callers can hit that: `memory_sync` checkpoints *before* it opens the
+        // store, and `session/disposed` commits after `closeIdle()` released it.
+        // The commit then succeeded while the text view was missing records, which
+        // a later rebuild reads as "records to delete".
+        committer: new AutoCommitter(config, {
+            exportText: (scope) => {
+                if (registry.open(scope) === undefined) {
+                    log('warn', `memory: text-view export skipped for ${scope.root}: the store could not be opened`)
+                    return false
+                }
+                return registry.exportScope(scope)
+            },
+        }),
         ...(semantic !== undefined ? { semantic } : {}),
     }
 }
@@ -223,7 +238,15 @@ function runLazyConsolidation(deps: HookDeps, scope: MemoryScope): void {
             everyNTasks: deps.config.consolidate.everyNTasks,
         })
         if (!due.due) return
-        const report = consolidate(store.db, store.scope, store.fts5, { dryRun: false, resolveConflicts: false })
+        const report = consolidate(store.db, store.scope, store.fts5, {
+            dryRun: false,
+            resolveConflicts: false,
+            // Same two knobs as the tool path: without them the hard-coded
+            // defaults in `promoteByUse` overrode `learn.promoteAfterRecalls` /
+            // `learn.promoteMinSuccessRatio` on the lazy-consolidation path too.
+            promotionMinRecalls: deps.config.learn.promoteAfterRecalls,
+            promotionMinSuccessRatio: deps.config.learn.promoteMinSuccessRatio,
+        })
         // Retention belongs to the same periodic pass: without it the episode
         // files and the signals table grow forever (the setting existed but had
         // no caller).

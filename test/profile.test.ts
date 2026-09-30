@@ -3,7 +3,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { resolveConfig } from '../dist/config.js'
-import { appendProfileLine, appendPreference, isProfileName, readProfile, renderProfile, writeProfile } from '../dist/learn/profile.js'
+import { appendProfileLine, appendPreference, isProfileName, profileFilePath, readProfile, renderProfile, writeProfile } from '../dist/learn/profile.js'
 import { clearRepoCache } from '../dist/paths.js'
 import { ScopeResolver } from '../dist/scope/resolver.js'
 import { loadSqliteModule } from '../dist/store/sqlite/db.js'
@@ -174,4 +174,29 @@ test('the L5 door still requires a preference the user actually stated', async (
     )
     assert.match(out, /rejected: the profile layer holds standing user preferences/)
     assert.equal(fs.existsSync(path.join(h.scope.root, 'profile', 'conventions.md')), false)
+})
+
+test('the profile name rule lives in profileFilePath, so every writer inherits it', () => {
+    // The whitelist was only enforced on the tool surface (`memory_save`) and in
+    // `appendProfileLine`; `writeProfile` and `profileFilePath` accepted anything
+    // that stayed inside the root — `UPPER`, `a.b`, `x/y` all became files.
+    const scope = { kind: 'global' as const, root: tempDir('l5-name-guard'), reason: 'no-project-context' as const }
+    for (const bad of ['UPPERCASE', 'with.dot', 'a/b', 'a b', '.hidden', '']) {
+        assert.equal(profileFilePath(scope, bad), undefined, `${JSON.stringify(bad)} must not resolve to a path`)
+        assert.equal(writeProfile(scope, bad, '- x\n'), undefined, `${JSON.stringify(bad)} must not be written`)
+        assert.equal(appendProfileLine(scope, bad, 'x'), undefined)
+    }
+    assert.equal(fs.existsSync(path.join(scope.root, 'profile')), false, 'no file was created')
+    assert.equal(fs.existsSync(path.join(scope.root, 'UPPERCASE.md')), false, 'and nothing outside profile/ either')
+
+    // the legitimate names keep working through the same door
+    assert.ok(writeProfile(scope, 'team-rules-2', '- 评审必须两人。\n'))
+    assert.equal(appendPreference(scope, '回复用中文'), path.join(scope.root, 'profile', 'preferences.md'))
+
+    // reading stays name-agnostic: a file a human dropped in the layer is read,
+    // the rule governs names this plugin *creates* (a model-supplied name).
+    fs.writeFileSync(path.join(scope.root, 'profile', 'hand.written.md'), '- 手工写的偏好\n')
+    const names = readProfile(scope).map((entry) => entry.name)
+    assert.ok(names.includes('hand.written.md'), `a hand-written layer file is still read (${names.join(',')})`)
+    assert.equal(profileFilePath(scope, 'hand.written'), undefined, 'writing that name is still refused')
 })

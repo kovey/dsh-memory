@@ -143,17 +143,54 @@ export function metricTaskCount(db) {
     return rowInt(row, 'n');
 }
 /**
+ * Why the current window may not be frozen automatically, or `undefined` when it
+ * is healthy enough.
+ *
+ * The frozen snapshot is what every later period is judged against, so freezing
+ * a bad period inverts the gate: a 12% success rate with 6.1 rework rounds per
+ * task becomes "normal", and every later — genuinely better — period reads as a
+ * regression or a pass. DESIGN §11 makes a freeze a human calibration step after
+ * a *good* period; an automatic freeze therefore has to prove the period is good.
+ *
+ * A metric that carries no data does not pass either: "no success rate recorded"
+ * is not evidence of a healthy window, it is the absence of evidence.
+ */
+export function qualityGateFailure(snapshot, config) {
+    const minSuccess = config.eval.autoFreezeMinSuccessRate;
+    const maxRework = config.eval.autoFreezeMaxRework;
+    const failures = [];
+    if (snapshot.successRate === null) {
+        failures.push(`current success n/a (eval.autoFreezeMinSuccessRate ${minSuccess})`);
+    }
+    else if (snapshot.successRate < minSuccess) {
+        failures.push(`current success ${snapshot.successRate} < eval.autoFreezeMinSuccessRate ${minSuccess}`);
+    }
+    if (snapshot.avgRework === null) {
+        failures.push(`current rework n/a (eval.autoFreezeMaxRework ${maxRework})`);
+    }
+    else if (snapshot.avgRework > maxRework) {
+        failures.push(`current rework ${snapshot.avgRework} > eval.autoFreezeMaxRework ${maxRework}`);
+    }
+    // Every failing side is named: a log that only reports the first one sends the
+    // reader back for a second run to learn the other half.
+    return failures.length > 0 ? failures.join(' and ') : undefined;
+}
+/**
  * Freeze the first baseline automatically, when the user asked for it
- * (`eval.autoFreezeBaseline`) and the ledger has enough comparable rows.
+ * (`eval.autoFreezeBaseline`), the ledger has enough comparable rows, and the
+ * window passes the quality gate.
  *
  * This is the escape hatch from the gate's permanent-UNKNOWN state: with no
  * snapshot the gate can only ever answer UNKNOWN, which is exactly the state the
- * live store was in. Both guards matter:
+ * live store was in. Three guards matter:
  *
  *   - an existing snapshot is never replaced (idempotent) — refreezing is how a
  *     regression signal gets erased, and `setBaseline` already requires a human
  *     reason for that reason;
- *   - no data means no freeze, so the gate never pretends to have a reference.
+ *   - no data means no freeze, so the gate never pretends to have a reference;
+ *   - a window that fails the quality gate is *not* written: the automatic path
+ *     stays quiet and only hints, leaving the freeze to the human step it was
+ *     always meant to be.
  *
  * Returns the frozen snapshot, or undefined when nothing was frozen.
  */
@@ -168,8 +205,18 @@ export function maybeFreezeBaseline(db, scope, config, now = new Date()) {
         return undefined;
     const label = scope.kind === 'project' ? `project:${scope.repo ?? scope.root}` : 'global';
     const windowDays = config.eval.windowDays;
+    // The same snapshot `freezeBaseline` is about to write, taken *before* the
+    // gate: no write may happen between the two reads.
+    const current = snapshotMetrics(db, now);
+    const failure = qualityGateFailure(current, config);
+    if (failure !== undefined) {
+        log('info', `memory: baseline auto-freeze skipped for ${label} — quality gate not met (${failure}); ` +
+            `${metricTasks} task metric(s) ≥ threshold ${threshold}, but freezing a bad period would make the gate a rubber stamp. ` +
+            `A human freeze is still possible: memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })`);
+        return undefined;
+    }
     const snapshot = freezeBaseline(db, label, `auto-freeze (eval.autoFreezeBaseline): ${metricTasks} task metric(s), gate window ${windowDays}d`, now);
-    log('info', `memory: baseline auto-frozen for ${label} — ${metricTasks} task metric(s) with outcome/cost data in the task ledger (threshold ${threshold}, gate window ${windowDays}d)`);
+    log('info', `memory: baseline auto-frozen for ${label} — ${metricTasks} task metric(s) with outcome/cost data in the task ledger (threshold ${threshold}, gate window ${windowDays}d, success ${snapshot.successRate} / rework ${snapshot.avgRework})`);
     return snapshot;
 }
 /** Tolerance so noise in a small ledger does not read as a regression. */
@@ -299,14 +346,16 @@ export function renderEvaluation(gate, health, trend, baselineTasks, progress) {
     if (noBaseline) {
         lines.push(`  verdict: UNKNOWN — no baseline snapshot yet (tasks so far: ${gate.current.tasks})`);
         if (progress !== undefined) {
-            const { metricTasks, threshold, windowDays, autoFreeze } = progress;
+            const { metricTasks, threshold, windowDays, autoFreeze, autoFreezeBlocked } = progress;
             const remaining = Math.max(0, threshold - metricTasks);
             if (metricTasks >= threshold) {
                 lines.push(`  ${metricTasks} task metric(s) accumulated (threshold ${threshold}, gate window ${windowDays}d) — enough to freeze a baseline`);
                 lines.push('  freeze it: memory_stats({ setBaseline: true, baselineReason: "<who asked and what was verified>" })');
-                lines.push(autoFreeze
-                    ? '  eval.autoFreezeBaseline is on: the next memory_stats call freezes it without asking'
-                    : '  eval.autoFreezeBaseline is off, so nothing is frozen automatically — this stays a human decision');
+                lines.push(!autoFreeze
+                    ? '  eval.autoFreezeBaseline is off, so nothing is frozen automatically — this stays a human decision'
+                    : autoFreezeBlocked === undefined
+                        ? '  eval.autoFreezeBaseline is on: the next memory_stats call freezes it without asking'
+                        : `  eval.autoFreezeBaseline is on but the quality gate blocks it (${autoFreezeBlocked}) — nothing is frozen automatically until the window is healthy`);
             }
             else {
                 lines.push(`  not enough task metrics yet: ${metricTasks} of ${threshold} required (eval.proposeFreezeAfterTasks) — ${remaining} more task(s) with an outcome/duration/disturb/rework value needed`);

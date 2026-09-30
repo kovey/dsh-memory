@@ -46,3 +46,17 @@ test('a repo that ignores .dsh is reported as unversioned', (t) => {
     // a global root has no repository to be ignored by
     assert.equal(probeVersioning({ kind: 'global', root: '/tmp/whatever', reason: 'no-project-context' }), 'versioned')
 })
+
+test('a probe that cannot run reports "unknown" instead of claiming the text view is versioned', (t) => {
+    // The catch branch mapped every failure to "not ignored" — including "git is
+    // missing", "not a repository" and a timeout — so a broken probe read as
+    // "memory is safely tracked". `status === 0` there was dead code: exit 0 is
+    // the *success* path of `git check-ignore`.
+    const nowhere = path.join(tempDir('versioning-not-a-repo'), 'does-not-exist')
+    assert.equal(isGitIgnored(nowhere, path.join(nowhere, '.dsh', 'memory')), undefined, 'no answer is not "not ignored"')
+    assert.equal(
+        probeVersioning({ kind: 'project', repo: nowhere, root: path.join(nowhere, '.dsh', 'memory'), reason: 'session-cwd' }),
+        'unknown',
+        'versioning must not be claimed without an answer from git',
+    )
+})

@@ -83,6 +83,46 @@ test('every configured key exists in the resolved config (no typos shipped)', ()
     assert.equal(resolved.sqlite.maxOpenRoots, 4, 'store LRU bound is shipped')
 })
 
+test('every knob the patch promises is actually read outside config.ts (no dead settings)', () => {
+    // A setting can be documented in `cordis.patch.yml`, resolved in config.ts,
+    // and still never reach the code that is supposed to honour it: both
+    // `learn.promoteAfterRecalls` and `learn.promoteMinSuccessRatio` were declared,
+    // documented and *ignored* (the consolidation call sites passed no options, so
+    // the hard-coded defaults won no matter what the user configured).
+    const root = path.join(import.meta.dirname, '..', 'src')
+    const files: string[] = []
+    const walk = (dir: string): void => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+            const full = path.join(dir, entry.name)
+            if (entry.isDirectory()) walk(full)
+            else if (entry.name.endsWith('.ts')) files.push(full)
+        }
+    }
+    walk(root)
+    const readers = files.filter((file) => path.basename(file) !== 'config.ts')
+
+    const knobs = [
+        'promoteAfterRecalls',
+        'promoteMinSuccessRatio',
+        'bulkForgetLimit',
+        'autoFreezeBaseline',
+        'proposeFreezeAfterTasks',
+        'lockTimeoutMs',
+        'usageRetentionDays',
+        'foreignModelGraceDays',
+        'sessionToolBudgetTokens',
+        'autoFreezeMinSuccessRate',
+        'autoFreezeMaxRework',
+    ]
+    for (const knob of knobs) {
+        const hits = readers.filter((file) => fs.readFileSync(file, 'utf8').includes(knob))
+        assert.ok(
+            hits.length > 0,
+            `\`${knob}\` is shipped in the patch and resolved in config, but no module outside config.ts reads it`,
+        )
+    }
+})
+
 test('peer anchors track the installed dsh runtime', async () => {
     // rc.2 added a hard peer gate: a bundle whose peers do not match the running
     // dsh is *skipped* at load time. Forgetting to bump these anchors after a dsh

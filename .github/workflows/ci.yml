@@ -1,8 +1,10 @@
 name: CI
 
-# The suite is the project's regression net: 183 tests including the shipped
-# patch-file validation and the dsh peer-anchor guard. Running it on every push
-# is what keeps "tests are green" from being a claim made by hand.
+# The suite is the project's regression net: the whole `test/*.test.ts` set,
+# including the shipped patch-file validation and the dsh peer-anchor guard.
+# Running it on every push is what keeps "tests are green" from being a claim
+# made by hand. (No count is written here on purpose: a hard-coded "183 tests"
+# went stale the moment the suite grew.)
 on:
   push:
     branches: ['**']

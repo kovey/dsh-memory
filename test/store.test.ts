@@ -10,6 +10,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { resolveConfig } from '../dist/config.js'
+import { setLogFile } from '../dist/log.js'
 import { clearRepoCache, projectMemoryRoot } from '../dist/paths.js'
 import { ScopeResolver } from '../dist/scope/resolver.js'
 import { exportAll, exportIndex } from '../dist/store/export.js'
@@ -22,7 +23,7 @@ import { countRecords, extractTerms, getRecord, materialize, rawSearch, upsertRe
 import { loadSqliteModule } from '../dist/store/sqlite/db.js'
 import { StoreRegistry } from '../dist/store/store.js'
 import type { MemoryScope } from '../dist/store/types.js'
-import { fakeRepo, lessonDoc, memoryFixture, useGlobalMemoryHome } from './helpers.ts'
+import { fakeRepo, lessonDoc, memoryFixture, tempDir, useGlobalMemoryHome } from './helpers.ts'
 
 interface Fixture2 {
     store: ReturnType<StoreRegistry['open']>
@@ -495,4 +496,54 @@ test('a rebuild keeps the local data the text view cannot reproduce', async (t) 
     rebuildScope(store.db, scope, true)
     assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM usage WHERE session_id = ?').get('sess-sidecar')?.['n'], 1)
     assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM signals WHERE session_id = ?').get('sess-sidecar')?.['n'], 1)
+})
+
+test('the store health line is reported once the store actually has content', async (t) => {
+    // `reported.add(root)` ran *before* `countRecords`, so the first open of an
+    // empty root latched the root and the health line never appeared — not on
+    // that open, and not on any later one either.
+    const logFile = path.join(tempDir('store-health-log'), 'memory.log')
+    setLogFile(logFile)
+    try {
+        const repo = fakeRepo('store-health-empty')
+        useGlobalMemoryHome(memoryFixture('store-health-global', {}).root)
+        const config = resolveConfig({})
+        const registry = new StoreRegistry(config)
+        const report = await registry.initialize(loadSqliteModule)
+        if (!registry.available) {
+            t.skip(`node:sqlite unavailable: ${report.probe.reason ?? 'unknown'}`)
+            return
+        }
+        const scope = new ScopeResolver(config).resolve({ cwd: repo })
+        const first = registry.open(scope)
+        assert.ok(first)
+        assert.equal(countRecords(first.db).total, 0)
+        const health = (): string => {
+            try {
+                return fs.readFileSync(logFile, 'utf8')
+            } catch {
+                return ''
+            }
+        }
+        assert.doesNotMatch(health(), /store — \d+ records/, 'an empty store has nothing to report')
+
+        upsertRecord(
+            first.db,
+            materialize({
+                title: 'a first lesson',
+                body: '触发场景：首个记录。正确做法：报告健康度。',
+                layer: 'project',
+                scopeKind: 'project',
+            }),
+        )
+        registry.close(scope.root)
+        assert.ok(registry.open(scope), 'the root reopens')
+        assert.match(
+            health(),
+            /\[info\][^\n]*store — 1 records \(1 active \/ 0 pending\)/,
+            'the second open reports the content the empty first open had latched away',
+        )
+    } finally {
+        setLogFile(undefined)
+    }
 })

@@ -7,7 +7,7 @@
  */
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { consolidate, promoteByUse } from '../dist/learn/consolidate.js'
+import { consolidate, promoteByUse, renderReport } from '../dist/learn/consolidate.js'
 import { countRecords, getRecord, listRecords, materialize, upsertRecord } from '../dist/store/sqlite/records.js'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -16,6 +16,7 @@ import { clearRepoCache } from '../dist/paths.js'
 import { ScopeResolver } from '../dist/scope/resolver.js'
 import { loadSqliteModule } from '../dist/store/sqlite/db.js'
 import { StoreRegistry } from '../dist/store/store.js'
+import { consolidateTool } from '../dist/tools/consolidate.js'
 import { fakeRepo, lessonDoc, memoryFixture, useGlobalMemoryHome } from './helpers.ts'
 
 /** Local harness: one project store seeded with a single lesson. */
@@ -113,4 +114,95 @@ test('consolidation performs the promotion and reports it', async (t) => {
     assert.equal(countRecords(store.db).pending, 0)
     // the promoted record is a first-class memory now: it survives the export pass
     assert.equal(listRecords(store.db, { status: ['active'] }).some((r) => r.id === 'proven-candidate'), true)
+})
+
+// ---- the configured thresholds must reach the real call path ------------------
+
+/** A candidate that clears the *default* floors (3 recalls, ratio 0.5). */
+function seedProvenCandidate(
+    store: { db: Parameters<typeof upsertRecord>[0] },
+    repo: string,
+    overrides: Partial<{ timesRecalled: number; successAfterRecall: number; failAfterRecall: number }> = {},
+): void {
+    upsertRecord(store.db, {
+        ...materialize({
+            title: 'proven candidate',
+            body: '触发场景：x。正确做法：y。',
+            layer: 'project',
+            scopeKind: 'project',
+            repo,
+            confidence: 0.7,
+        }),
+        id: 'proven-candidate',
+        status: 'pending' as const,
+        timesRecalled: overrides.timesRecalled ?? 5,
+        successAfterRecall: overrides.successAfterRecall ?? 4,
+        failAfterRecall: overrides.failAfterRecall ?? 1,
+    })
+}
+
+test('learn.promoteAfterRecalls / promoteMinSuccessRatio actually reach the promotion call', async (t) => {
+    // Both call sites used to omit the two options, so the hard-coded defaults in
+    // `promoteByUse` won forever: setting the knobs to 99 / 0.99 promoted anyway.
+    const h = await harness(t)
+    const store = h.registry.open(h.resolver.resolve({ agent: h.agent }))
+    assert.ok(store)
+    seedProvenCandidate(store, h.repo)
+
+    const strictConfig = resolveConfig({ learn: { promoteAfterRecalls: 99, promoteMinSuccessRatio: 0.99 } })
+    const tool = consolidateTool({
+        config: strictConfig,
+        registry: h.registry,
+        resolver: new ScopeResolver(strictConfig),
+    })
+    const output = String(await tool.execute({ dryRun: false } as never, { agent: h.agent } as never))
+    assert.equal(getRecord(store.db, 'proven-candidate')?.status, 'pending', 'the configured floor is what the pass uses')
+    assert.doesNotMatch(output, /promoted by use/)
+
+    // ...and the same record is promoted once the configured floor is met, so the
+    // test cannot pass by simply never promoting anything.
+    const generous = resolveConfig({ learn: { promoteAfterRecalls: 3, promoteMinSuccessRatio: 0.5 } })
+    const generousTool = consolidateTool({
+        config: generous,
+        registry: h.registry,
+        resolver: new ScopeResolver(generous),
+    })
+    const promoted = String(await generousTool.execute({ dryRun: false } as never, { agent: h.agent } as never))
+    assert.equal(getRecord(store.db, 'proven-candidate')?.status, 'active')
+    assert.match(promoted, /promoted by use/)
+})
+
+test('the consolidation report renders promotedByUse (DESIGN §14 promise)', async (t) => {
+    const h = await harness(t)
+    const store = h.registry.open(h.resolver.resolve({ agent: h.agent }))
+    assert.ok(store)
+    seedProvenCandidate(store, h.repo)
+
+    const dry = renderReport(consolidate(store.db, store.scope, store.fts5, { dryRun: true }))
+    assert.doesNotMatch(dry, /promoted by use/, 'a dry run promoted nothing, so there is no line')
+
+    const applied = consolidate(store.db, store.scope, store.fts5, { dryRun: false })
+    assert.deepEqual(applied.promotedByUse, ['proven-candidate'])
+    const rendered = renderReport(applied)
+    assert.match(rendered, /promoted by use: 1/, 'the report must show a count')
+    assert.match(rendered, /proven-candidate/, 'and which records moved')
+})
+
+test('negative counters in a hand-written lesson cannot promote a record', async (t) => {
+    // `success_after_recall: -5` (a hand-edited or corrupt frontmatter) made the
+    // ratio -5 / -5 = 1, i.e. a perfect candidate. Counters are counts: a
+    // negative value is normalized to 0 and then fails the `success > 0` rule.
+    const h = await harness(t)
+    const store = h.registry.open(h.resolver.resolve({ agent: h.agent }))
+    assert.ok(store)
+    seedProvenCandidate(store, h.repo, { timesRecalled: 5, successAfterRecall: -5, failAfterRecall: 0 })
+
+    assert.deepEqual(promoteByUse(store.db, { minRecalls: 3, minSuccessRatio: 0.5 }), [])
+    assert.equal(getRecord(store.db, 'proven-candidate')?.status, 'pending')
+
+    // a real count on the same record still promotes it
+    upsertRecord(store.db, { ...getRecord(store.db, 'proven-candidate')!, successAfterRecall: 3, failAfterRecall: 1 })
+    assert.deepEqual(promoteByUse(store.db, { minRecalls: 3, minSuccessRatio: 0.5 }).map((record) => record.id), [
+        'proven-candidate',
+    ])
 })

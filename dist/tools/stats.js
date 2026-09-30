@@ -6,7 +6,7 @@
  * baseline.
  */
 import { defineTool } from '@deepseek-ai/dsh-tools';
-import { evaluateGate, freezeBaseline, healthDigest, latestBaseline, maybeFreezeBaseline, metricTaskCount, readBaseline, renderEvaluation, snapshotMetrics, windowSummary, } from '../eval/baseline.js';
+import { evaluateGate, freezeBaseline, healthDigest, latestBaseline, maybeFreezeBaseline, metricTaskCount, qualityGateFailure, readBaseline, renderEvaluation, snapshotMetrics, windowSummary, } from '../eval/baseline.js';
 import { episodeDigest } from '../learn/episodic.js';
 import { log } from '../log.js';
 import { openProposalsCount } from '../learn/stats.js';
@@ -112,11 +112,15 @@ export function statsTool(deps) {
                     lines.push(`  semantic: ${deps.semantic.provider.id} — indexed ${stats.indexed}, pending ${stats.pending}, weight ${semanticCfg.weight}${error !== undefined ? ` (last error: ${error})` : ''}`);
                 }
                 const baselineDoc = readBaseline(store.scope);
+                // The same gate `maybeFreezeBaseline` applies, so the report never
+                // promises a freeze that the freeze path would refuse.
+                const autoFreezeBlocked = qualityGateFailure(current, deps.config);
                 lines.push(...renderEvaluation(gate, healthDigest(store.db, windowDays), trend, baselineDoc?.tasks ?? [], {
                     metricTasks: metricTaskCount(store.db),
                     threshold: deps.config.eval.proposeFreezeAfterTasks,
                     windowDays,
                     autoFreeze: deps.config.eval.autoFreezeBaseline,
+                    ...(autoFreezeBlocked !== undefined ? { autoFreezeBlocked } : {}),
                 }));
             }
             return lines.join('\n');

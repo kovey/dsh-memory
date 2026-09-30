@@ -11,6 +11,8 @@ export class SessionState {
     injected = new Map();
     distill = new Map();
     turns = new Map();
+    /** Current step per session, keyed by turn (`observeStep`). */
+    steps = new Map();
     startedAt = new Map();
     overrides = new Map();
     toolTokens = new Map();
@@ -103,6 +105,37 @@ export class SessionState {
     lastTurn(sessionId) {
         return this.turns.get(sessionId) ?? 0;
     }
+    /**
+     * Record the step the agent loop is currently in.
+     *
+     * `agent/pre-step` is the only place the harness tells the plugin its step,
+     * so it is also the single source for everyone else: a tool result carries no
+     * turn/step (see `ToolExecution`), and attribution needs to know *when* a
+     * failure happened to decide which injections the model had already seen.
+     * Only a later step of the same turn (or a newer turn) replaces the mark, so
+     * a late event cannot be labelled with a stale step.
+     */
+    observeStep(sessionId, turn, step) {
+        const current = this.steps.get(sessionId);
+        if (current !== undefined && (turn < current.turn || (turn === current.turn && step < current.step)))
+            return;
+        this.steps.set(sessionId, { turn, step });
+        this.touch(sessionId);
+    }
+    /**
+     * Step last observed for `turn` — `undefined` when that turn was never seen
+     * (or when nothing was observed at all, e.g. a session that started before
+     * the hooks were registered). Callers must treat `undefined` as "unknown"
+     * rather than "step 1".
+     */
+    lastStep(sessionId, turn) {
+        const current = this.steps.get(sessionId);
+        if (current === undefined)
+            return undefined;
+        if (turn !== undefined && current.turn !== turn)
+            return undefined;
+        return current.step;
+    }
     distillBudget(sessionId) {
         let budget = this.distill.get(sessionId);
         if (budget === undefined) {
@@ -122,6 +155,7 @@ export class SessionState {
         this.injected.delete(sessionId);
         this.distill.delete(sessionId);
         this.turns.delete(sessionId);
+        this.steps.delete(sessionId);
         this.startedAt.delete(sessionId);
         this.overrides.delete(sessionId);
         this.toolTokens.delete(sessionId);

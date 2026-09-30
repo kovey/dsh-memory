@@ -16,6 +16,8 @@ export declare class SessionState {
     private readonly injected;
     private readonly distill;
     private readonly turns;
+    /** Current step per session, keyed by turn (`observeStep`). */
+    private readonly steps;
     private readonly startedAt;
     private readonly overrides;
     private readonly toolTokens;
@@ -53,6 +55,24 @@ export declare class SessionState {
     /** Record the highest turn number observed, for metric bookkeeping. */
     observeTurn(sessionId: string, turn: number): void;
     lastTurn(sessionId: string): number;
+    /**
+     * Record the step the agent loop is currently in.
+     *
+     * `agent/pre-step` is the only place the harness tells the plugin its step,
+     * so it is also the single source for everyone else: a tool result carries no
+     * turn/step (see `ToolExecution`), and attribution needs to know *when* a
+     * failure happened to decide which injections the model had already seen.
+     * Only a later step of the same turn (or a newer turn) replaces the mark, so
+     * a late event cannot be labelled with a stale step.
+     */
+    observeStep(sessionId: string, turn: number, step: number): void;
+    /**
+     * Step last observed for `turn` — `undefined` when that turn was never seen
+     * (or when nothing was observed at all, e.g. a session that started before
+     * the hooks were registered). Callers must treat `undefined` as "unknown"
+     * rather than "step 1".
+     */
+    lastStep(sessionId: string, turn?: number): number | undefined;
     distillBudget(sessionId: string): DistillBudget;
     chargeDistill(sessionId: string, tokens: number): void;
     forget(sessionId: string): void;

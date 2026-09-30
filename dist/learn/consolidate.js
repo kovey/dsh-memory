@@ -35,12 +35,18 @@ export function promoteByUse(db, options = {}) {
     const candidates = listRecords(db, { status: ['pending'] }).filter((record) => {
         if (record.timesRecalled < minRecalls)
             return false;
-        const total = record.successAfterRecall + record.failAfterRecall;
+        // Counters are counts: a hand-written lesson can carry a *negative*
+        // `success_after_recall` (or `fail_after_recall`), and the raw ratio then
+        // reads as a perfect record (-5 / -5 = 1). Normalizing to >= 0 keeps the
+        // "at least one real success, and it is a majority" requirement meaningful.
+        const success = Math.max(0, record.successAfterRecall);
+        const fail = Math.max(0, record.failAfterRecall);
+        const total = success + fail;
         if (total === 0)
             return false;
-        if (record.successAfterRecall === 0)
+        if (success === 0)
             return false;
-        return record.successAfterRecall / total >= minRatio;
+        return success / total >= minRatio;
     });
     if (candidates.length === 0 || options.dryRun === true)
         return candidates;
@@ -205,6 +211,10 @@ export function renderReport(report) {
         `  archive: ${report.archived}${report.archivedIds.length > 0 ? ` (${report.archivedIds.slice(0, 5).join(', ')}${report.archivedIds.length > 5 ? '…' : ''})` : ''}`,
         `  conflicts: found ${report.conflictsFound} · recorded ${report.conflictsRecorded} · resolved ${report.conflictsResolved}${report.conflictsResolved === 0 && report.conflictsFound > 0 ? ' (pass resolveConflicts=true to supersede the weaker lesson)' : ''}`,
     ];
+    if (report.promotedByUse.length > 0) {
+        const shown = report.promotedByUse.slice(0, 5).join(', ');
+        lines.push(`  promoted by use: ${report.promotedByUse.length} pending → active (${shown}${report.promotedByUse.length > 5 ? '…' : ''})`);
+    }
     if (report.proposals.length > 0) {
         lines.push(`  promotion proposals (${report.proposals.length}) — human approval required:`);
         for (const proposal of report.proposals.slice(0, 5)) {

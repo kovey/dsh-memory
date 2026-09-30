@@ -14,6 +14,19 @@ export declare const PROFILE_NAME_RE: RegExp;
 /** True when `name` may be used as `<memory root>/profile/<name>.md`. */
 export declare function isProfileName(name: string): boolean;
 export declare function profileDir(scope: MemoryScope): string;
+/**
+ * Path of one profile file, with the *name* rule enforced here rather than at
+ * the call sites.
+ *
+ * `isProfileName` used to be checked only on the `memory_save` tool surface and
+ * in `appendProfileLine`, so every other writer (`writeProfile`, a test, a future
+ * caller) could create `profile/UPPER.md`, `profile/a.b.md` or `profile/x/y.md`:
+ * names that stay inside the root but are not part of the documented layer. The
+ * rule belongs where the path is built — one door, one check.
+ *
+ * Returns `undefined` (and logs) for a name that is not a bare `[a-z0-9-]` slug
+ * or that would resolve outside the scope.
+ */
 export declare function profileFilePath(scope: MemoryScope, name: ProfileFile | string): string | undefined;
 export interface ProfileEntry {
     name: string;

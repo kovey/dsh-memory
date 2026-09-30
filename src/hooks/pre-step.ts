@@ -65,6 +65,13 @@ export function createPreStepHook(deps: RecallHookDeps) {
 }
 
 async function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decision: PreStepDecision): Promise<PreStepDecision> {
+    // First thing, before any early return: this hook is the only place the
+    // harness hands the plugin its current step, and every later event that has
+    // to be placed in time (a tool failure, a request error) reads it back from
+    // the session state. Recording it only when a recall is injected left those
+    // events unplaced, which is what made turn-end attribution blame injections
+    // the model had not seen yet.
+    noteCurrentStep(deps, payload)
     if (decision.kind !== 'enter' || !Array.isArray(decision.messages)) return decision
     const admitted: readonly UserMessage[] = decision.messages
     const config = deps.config
@@ -133,6 +140,23 @@ async function injectRecall(deps: RecallHookDeps, payload: PreStepPayload, decis
         kind: 'enter',
         messages: [message as UserMessage, ...admitted],
         ...(decision.startsRequestSeries === true ? { startsRequestSeries: true as const } : {}),
+    }
+}
+
+/**
+ * Remember which step this turn is in.
+ *
+ * Cheap, total, and independent of whether a recall happens: the injection rules
+ * (first step only, budget, threshold) must not decide whether the plugin knows
+ * *when* it is.
+ */
+function noteCurrentStep(deps: RecallHookDeps, payload: PreStepPayload): void {
+    try {
+        const sessionId = sessionIdOf(payload.agent)
+        if (sessionId === undefined || payload.turn === undefined || payload.step === undefined) return
+        deps.state.observeStep(sessionId, payload.turn, payload.step)
+    } catch (error) {
+        log('debug', 'memory: step observation failed:', error)
     }
 }
 

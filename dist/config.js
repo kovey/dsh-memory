@@ -38,7 +38,13 @@ export const DEFAULT_CONFIG = {
     },
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
     consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true, usageRetentionDays: 180 },
-    eval: { windowDays: 30, autoFreezeBaseline: false, proposeFreezeAfterTasks: 5 },
+    eval: {
+        windowDays: 30,
+        autoFreezeBaseline: false,
+        autoFreezeMinSuccessRate: 0.5,
+        autoFreezeMaxRework: 3,
+        proposeFreezeAfterTasks: 5,
+    },
     git: {
         enabled: true,
         autoCommit: 'task-end',
@@ -180,6 +186,8 @@ export function resolveConfig(raw) {
         eval: {
             windowDays: num(rootEval['windowDays'], d.eval.windowDays, 1, 365),
             autoFreezeBaseline: bool(rootEval['autoFreezeBaseline'], d.eval.autoFreezeBaseline),
+            autoFreezeMinSuccessRate: num(rootEval['autoFreezeMinSuccessRate'], d.eval.autoFreezeMinSuccessRate, 0, 1),
+            autoFreezeMaxRework: num(rootEval['autoFreezeMaxRework'], d.eval.autoFreezeMaxRework, 0, 100),
             proposeFreezeAfterTasks: num(rootEval['proposeFreezeAfterTasks'], d.eval.proposeFreezeAfterTasks, 1, 1_000),
         },
         git: {

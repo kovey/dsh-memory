@@ -41,18 +41,16 @@ export function pruneUsage(db, retentionDays, now = new Date()) {
  * `mergeRecord` no longer re-derives confidence.
  */
 export function applyOutcome(db, sessionId, outcome, turn, options = {}) {
-    const attributed = attributeOutcome(db, sessionId, outcome, turn, options);
+    const applied = attributeRows(db, sessionId, outcome, turn, options);
     // Success only needs the counter (already bumped) to affect later maths.
-    if (attributed === 0 || outcome === 'success')
-        return attributed;
-    const rows = turn === undefined
-        ? db.prepare('SELECT DISTINCT record_id FROM usage WHERE session_id = ?').all(sessionId)
-        : db.prepare('SELECT DISTINCT record_id FROM usage WHERE session_id = ? AND turn = ?').all(sessionId, turn);
+    if (applied.count === 0 || outcome === 'success')
+        return applied.count;
+    // Only the records that were *just* attributed: re-selecting the session's
+    // rows here (whatever their step) is how an exempt injection — one the model
+    // had not seen when things went wrong — still had its confidence rewritten.
+    const recordIds = applied.recordIds;
     transact(db, () => {
-        for (const row of rows) {
-            const id = row['record_id'];
-            if (typeof id !== 'string')
-                continue;
+        for (const id of recordIds) {
             const record = getRecord(db, id);
             if (record === undefined)
                 continue;
@@ -69,9 +67,21 @@ export function applyOutcome(db, sessionId, outcome, turn, options = {}) {
                 upsertRecord(db, { ...record, confidence });
         }
     });
-    return attributed;
+    return applied.count;
 }
 export function attributeOutcome(db, sessionId, outcome, turn, options = {}) {
+    return attributeRows(db, sessionId, outcome, turn, options).count;
+}
+/**
+ * Attribute every *unattributed* injection in range, and report which records
+ * were touched.
+ *
+ * The record ids are the point: `applyOutcome` must re-derive confidence for the
+ * records this call actually bumped, and for nothing else. Re-querying the
+ * session's usage rows afterwards re-admitted the very injections `maxStep` had
+ * just exempted.
+ */
+function attributeRows(db, sessionId, outcome, turn, options = {}) {
     // A failure observed at step k cannot have been caused by a memory injected
     // at step k+1: attributing by turn alone blamed every injection in the turn,
     // including ones the model had not even seen when things went wrong.
@@ -86,7 +96,8 @@ export function attributeOutcome(db, sessionId, outcome, turn, options = {}) {
             .prepare(`SELECT id, record_id FROM usage WHERE session_id = ? AND outcome IS NULL AND turn = ?${stepClause}`)
             .all(sessionId, turn, ...stepArgs);
     if (rows.length === 0)
-        return 0;
+        return { count: 0, recordIds: [] };
+    const recordIds = new Set();
     transact(db, () => {
         const setOutcome = db.prepare('UPDATE usage SET outcome = ? WHERE id = ?');
         const bumpSuccess = db.prepare('UPDATE records SET success_after_recall = success_after_recall + 1 WHERE id = ?');
@@ -103,9 +114,10 @@ export function attributeOutcome(db, sessionId, outcome, turn, options = {}) {
                 bumpSuccess.run(recordId);
             else
                 bumpFailure.run(recordId);
+            recordIds.add(recordId);
         }
     });
-    return rows.length;
+    return { count: rows.length, recordIds: [...recordIds] };
 }
 /** Recall statistics for `memory_stats`. */
 export function recallStats(db) {

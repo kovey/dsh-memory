@@ -127,6 +127,17 @@ export interface MemoryConfig {
          * which is exactly the state the live store was in.
          */
         autoFreezeBaseline: boolean;
+        /**
+         * Quality floor for that automatic freeze: the window must reach this
+         * success rate *and* stay under `autoFreezeMaxRework`.
+         *
+         * Without it the only condition was "enough metric rows", and a live
+         * period with a 12% success rate and 6.1 rework rounds per task was
+         * frozen as the reference the gate compares against — a rubber stamp.
+         */
+        autoFreezeMinSuccessRate: number;
+        /** Ceiling on the average rework rounds per task for an automatic freeze. */
+        autoFreezeMaxRework: number;
         /** Tasks with metrics after which `memory_stats` proposes a human freeze. */
         proposeFreezeAfterTasks: number;
     };

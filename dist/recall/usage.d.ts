@@ -39,6 +39,12 @@ export declare function applyOutcome(db: DatabaseSync, sessionId: string, outcom
 export declare function attributeOutcome(db: DatabaseSync, sessionId: string, outcome: 'success' | 'failure', turn?: number, options?: {
     maxStep?: number;
 }): number;
+export interface AttributeResult {
+    /** Rows (injections) that moved from unattributed to `outcome`. */
+    count: number;
+    /** Distinct records those rows belong to — the exact set to re-derive. */
+    recordIds: string[];
+}
 export interface RecallStats {
     injections: number;
     attributed: number;

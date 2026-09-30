@@ -154,6 +154,11 @@ export function consolidateTool(deps: ConsolidateToolDeps) {
                 const report = consolidate(store.db, store.scope, store.fts5, {
                     dryRun,
                     resolveConflicts: args.resolveConflicts === true && !dryRun,
+                    // The promotion floors are configuration, not constants: both
+                    // call sites used to omit them, so `learn.promoteAfterRecalls`
+                    // and `learn.promoteMinSuccessRatio` were dead letters.
+                    promotionMinRecalls: deps.config.learn.promoteAfterRecalls,
+                    promotionMinSuccessRatio: deps.config.learn.promoteMinSuccessRatio,
                 })
                 reports.push(renderReport(report))
             }
@@ -276,6 +281,21 @@ export interface ForgetTarget {
 }
 
 /**
+ * `olderThanDays` as a *criterion*: only a finite, positive number selects a
+ * time window; anything else means "not provided".
+ *
+ * This is a safety boundary, not a convenience. `bulkForget` refuses a selection
+ * with no criterion at all, but `olderThanDays: 0` used to count as one while
+ * `selectForgetTargets` built no cutoff for it (only `> 0` did) — so "older than
+ * 0 days" archived the entire store, records written that same day included,
+ * through the back door that guard exists to close.
+ */
+export function forgetAgeDays(value: number | undefined): number | undefined {
+    if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined
+    return value
+}
+
+/**
  * Records a bulk forget would touch.
  *
  * Only `active`/`pending` records are candidates: archiving an archived record
@@ -289,10 +309,8 @@ export function selectForgetTargets(
 ): ForgetTarget[] {
     const now = options.now ?? new Date()
     const query = options.query?.trim().toLowerCase() ?? ''
-    const cutoff =
-        options.olderThanDays !== undefined && options.olderThanDays > 0
-            ? new Date(now.getTime() - options.olderThanDays * 86_400_000).toISOString()
-            : undefined
+    const ageDays = forgetAgeDays(options.olderThanDays)
+    const cutoff = ageDays !== undefined ? new Date(now.getTime() - ageDays * 86_400_000).toISOString() : undefined
     const records = listRecords(db, {
         status: ['active', 'pending'],
         ...(options.layer !== undefined ? { layers: [options.layer] } : {}),
@@ -311,7 +329,7 @@ export function selectForgetTargets(
         }
         if (cutoff !== undefined) {
             if (record.updatedAt >= cutoff) continue
-            reasons.push(`not updated since ${record.updatedAt.slice(0, 10)} (older than ${options.olderThanDays}d)`)
+            reasons.push(`not updated since ${record.updatedAt.slice(0, 10)} (older than ${ageDays}d)`)
         }
         matched.push({
             id: record.id,
@@ -344,10 +362,14 @@ async function bulkForget(
         reason?: string
     },
 ): Promise<string> {
+    // Only a finite, positive `olderThanDays` is a criterion (see
+    // `forgetAgeDays`): a caller that passes `0` gets the "no criterion"
+    // refusal instead of an unqualified "archive everything".
+    const ageDays = forgetAgeDays(options.olderThanDays)
     const criteria: string[] = []
     if (options.query !== undefined && options.query.trim() !== '') criteria.push(`query "${options.query.trim()}"`)
     if (options.layer !== undefined) criteria.push(`layer ${options.layer}`)
-    if (options.olderThanDays !== undefined) criteria.push(`not updated for ${options.olderThanDays}d`)
+    if (ageDays !== undefined) criteria.push(`not updated for ${ageDays}d`)
     if (criteria.length === 0) {
         return [
             'refused: a bulk forget needs at least one criterion — pass `query`, `layer` or `olderThanDays` (or `id` to retire a single record).',
@@ -363,7 +385,7 @@ async function bulkForget(
         const matched = selectForgetTargets(store.db, {
             ...(options.query !== undefined ? { query: options.query } : {}),
             ...(options.layer !== undefined ? { layer: options.layer } : {}),
-            ...(options.olderThanDays !== undefined ? { olderThanDays: options.olderThanDays } : {}),
+            ...(ageDays !== undefined ? { olderThanDays: ageDays } : {}),
         })
         const selected = matched.slice(0, options.limit)
         lines.push(

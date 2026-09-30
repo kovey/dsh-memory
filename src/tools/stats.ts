@@ -14,6 +14,7 @@ import {
     latestBaseline,
     maybeFreezeBaseline,
     metricTaskCount,
+    qualityGateFailure,
     readBaseline,
     renderEvaluation,
     snapshotMetrics,
@@ -163,12 +164,16 @@ export function statsTool(deps: StatsToolDeps) {
                     )
                 }
                 const baselineDoc = readBaseline(store.scope)
+                // The same gate `maybeFreezeBaseline` applies, so the report never
+                // promises a freeze that the freeze path would refuse.
+                const autoFreezeBlocked = qualityGateFailure(current, deps.config)
                 lines.push(
                     ...renderEvaluation(gate, healthDigest(store.db, windowDays), trend, baselineDoc?.tasks ?? [], {
                         metricTasks: metricTaskCount(store.db),
                         threshold: deps.config.eval.proposeFreezeAfterTasks,
                         windowDays,
                         autoFreeze: deps.config.eval.autoFreezeBaseline,
+                        ...(autoFreezeBlocked !== undefined ? { autoFreezeBlocked } : {}),
                     }),
                 )
             }

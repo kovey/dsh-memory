@@ -83,6 +83,24 @@ const TOKEN_RUN = /[A-Za-z0-9_+/=-]{48,}/g;
 const TOKEN_MIN_CHARS = 48;
 /** A hex digest is a git SHA / checksum, not a credential. */
 const HEX_ONLY = /^[0-9a-fA-F]+$/;
+/**
+ * A word boundary inside a camelCase / PascalCase identifier.
+ *
+ * Two or more of these mean the run is built from words — a long API name such
+ * as `parseISO8601DurationIntoMillisecondsWithTimezone` has five — while an
+ * opaque token essentially never has that shape. The trade is deliberate: the
+ * enumerated prefix rules (`sk-`, `glpat-`, …) still catch real credentials, and
+ * the cost of masking an identifier is losing the evidence a lesson needs.
+ *
+ * A boundary count alone would also exempt an alternating-case secret
+ * (`AbCdEf12…` is full of lower→upper steps), so one word-like lowercase run is
+ * required as well: every name built from real words has one, the alternating
+ * shape does not, and the existing regression test for it stays meaningful.
+ */
+const CAMEL_BOUNDARY = /[a-z][A-Z]/g;
+const WORD_BOUNDARIES_REQUIRED = 2;
+/** A run of lowercase letters long enough to be a word rather than alternation. */
+const WORD_RUN = /[a-z]{3,}/;
 /** Mask secrets/home paths and truncate to `maxChars`. */
 export function redact(text, policy = 'redacted', maxChars = 400) {
     if (policy === 'none')
@@ -110,8 +128,11 @@ function maskJwts(text) {
 }
 /**
  * Long runs that *look* like a secret: mixed case (a hex digest and an English
- * sentence do not have it), at least one digit (which keeps ordinary camelCase
- * identifiers), and not pure hex at all.
+ * sentence do not have it), at least one digit, not pure hex, and not a word.
+ *
+ * The last condition is the identifier exemption: "at least one digit" was meant
+ * to keep ordinary camelCase names out, but a *long* identifier usually carries a
+ * version or a size (`…8601…`, `…2048…`) and was masked wholesale.
  */
 function maskHighEntropy(text) {
     return text.replace(TOKEN_RUN, (run) => (looksHighEntropy(run) ? '[redacted:high-entropy]' : run));
@@ -121,6 +142,11 @@ function looksHighEntropy(run) {
         return false;
     if (!/[a-z]/.test(run) || !/[A-Z]/.test(run) || !/[0-9]/.test(run))
         return false;
-    return !HEX_ONLY.test(run);
+    if (HEX_ONLY.test(run))
+        return false;
+    // A name is a sequence of words; a token is alternation. Without the second
+    // half of that test, `AbCdEf12GhIj…` would be "an identifier" too.
+    const boundaries = (run.match(CAMEL_BOUNDARY) ?? []).length;
+    return !(boundaries >= WORD_BOUNDARIES_REQUIRED && WORD_RUN.test(run));
 }
 //# sourceMappingURL=redact.js.map

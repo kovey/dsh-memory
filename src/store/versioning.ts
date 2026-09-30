@@ -19,15 +19,29 @@ export type VersioningState = 'versioned' | 'ignored' | 'no-repo' | 'unknown'
 
 const probed = new Set<string>()
 
-/** True when git reports `path` as ignored in `repo`. */
-export function isGitIgnored(repo: string, path: string): boolean {
+/**
+ * Is `path` ignored in `repo`?
+ *
+ * Three-state on purpose: `true` / `false` are git's answers, `undefined` means
+ * git never answered (not a repository, no git on PATH, timeout). The old
+ * boolean collapsed that third case into "not ignored", so a broken probe read
+ * as "your memory is safely tracked" — the exact opposite of what it means.
+ * (`status === 0` in the catch was dead code: exit 0 is the *success* path of
+ * `git check-ignore`, the only exit code that returns from the `try`.)
+ */
+export function isGitIgnored(repo: string, path: string): boolean | undefined {
     try {
         execFileSync('git', ['-C', repo, 'check-ignore', '-q', path], { stdio: 'ignore', timeout: 5_000 })
         return true
     } catch (error) {
-        // exit code 1 = not ignored; anything else (no git, no repo) = unknown
         const status = (error as { status?: number }).status
-        return status === 0
+        // exit 1 = git answered "not ignored"; everything else is "no answer".
+        if (status === 1) return false
+        log(
+            'debug',
+            `memory: git check-ignore could not answer for ${repo} (${status === undefined ? 'spawn failure' : `exit ${status}`}) — versioning state unknown`,
+        )
+        return undefined
     }
 }
 
@@ -39,7 +53,8 @@ export function probeVersioning(scope: MemoryScope): VersioningState {
     if (scope.kind !== 'project' || scope.repo === undefined) return 'versioned'
     let state: VersioningState = 'unknown'
     try {
-        state = isGitIgnored(scope.repo, scope.root) ? 'ignored' : 'versioned'
+        const ignored = isGitIgnored(scope.repo, scope.root)
+        state = ignored === undefined ? 'unknown' : ignored ? 'ignored' : 'versioned'
     } catch {
         state = 'unknown'
     }

@@ -40,9 +40,39 @@ const MAX_FILE_BYTES = 4_000;
 export function profileDir(scope) {
     return path.join(scope.root, 'profile');
 }
+/**
+ * Path of one profile file, with the *name* rule enforced here rather than at
+ * the call sites.
+ *
+ * `isProfileName` used to be checked only on the `memory_save` tool surface and
+ * in `appendProfileLine`, so every other writer (`writeProfile`, a test, a future
+ * caller) could create `profile/UPPER.md`, `profile/a.b.md` or `profile/x/y.md`:
+ * names that stay inside the root but are not part of the documented layer. The
+ * rule belongs where the path is built — one door, one check.
+ *
+ * Returns `undefined` (and logs) for a name that is not a bare `[a-z0-9-]` slug
+ * or that would resolve outside the scope.
+ */
 export function profileFilePath(scope, name) {
+    // `preferences.md` and `preferences` are the same file.
+    const base = name.endsWith('.md') ? name.slice(0, -3) : name;
+    if (!isProfileName(base)) {
+        log('warn', `memory: refusing profile file name ${JSON.stringify(name)} — allowed: [a-z0-9-] (no dots, no slashes)`);
+        return undefined;
+    }
+    return fileInsideProfile(scope, `${base}.md`);
+}
+/**
+ * Path inside `<root>/profile/`, contained by the scope but *not* name-filtered.
+ *
+ * The reader uses this: the layer is "plain markdown under `profile/`", so a file
+ * a human dropped there (`hand.written.md`) is part of it. The name rule governs
+ * names this plugin *creates* — which are always model-supplied — not the files
+ * somebody wrote by hand.
+ */
+function fileInsideProfile(scope, fileName) {
     try {
-        const file = path.join(profileDir(scope), name.endsWith('.md') ? name : `${name}.md`);
+        const file = path.join(profileDir(scope), fileName);
         assertInsideScope(scope, file);
         return file;
     }
@@ -67,7 +97,7 @@ export function readProfile(scope) {
         ...names.filter((name) => !PROFILE_FILES.includes(name)).sort(),
     ];
     for (const name of ordered) {
-        const file = profileFilePath(scope, name);
+        const file = fileInsideProfile(scope, name);
         if (file === undefined)
             continue;
         try {

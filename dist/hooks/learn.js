@@ -91,10 +91,17 @@ export function registerLearnHooks(ctx, deps) {
                 if (failure === undefined)
                     return undefined;
                 const tool = typeof exec.name === 'string' ? exec.name : undefined;
+                // `ToolExecution` carries no turn/step, so the step comes from the
+                // session state that `agent/pre-step` feeds — the same value the
+                // correction signal is stamped with. Without it the turn-end
+                // attribution had no high-water mark at all and blamed injections
+                // that happened *after* the failure.
+                const step = deps.state.lastStep(sessionId, turn);
                 deps.signals.add({
                     sessionId,
                     kind: failure.kind,
                     turn,
+                    ...(step !== undefined ? { step } : {}),
                     ...(tool !== undefined ? { tool } : {}),
                     detail: failure.detail,
                     at: new Date().toISOString(),
@@ -110,6 +117,7 @@ export function registerLearnHooks(ctx, deps) {
                             sessionId,
                             kind: 'rework',
                             turn,
+                            ...(step !== undefined ? { step } : {}),
                             tool,
                             detail: `${tool} failed ${repeats}× in one turn`,
                             at: new Date().toISOString(),
@@ -133,10 +141,16 @@ export function registerLearnHooks(ctx, deps) {
             const sessionId = sessionIdOf(payload?.agent);
             if (sessionId === undefined)
                 return action;
+            // The payload carries the step of the failed request; the session
+            // state is the fallback for a harness that omits it (and the same
+            // source the tool-result signals use).
+            const turn = payload.turn ?? deps.state.lastTurn(sessionId);
+            const step = payload.step ?? deps.state.lastStep(sessionId, turn);
             deps.signals.add({
                 sessionId,
                 kind: 'request-error',
-                turn: payload.turn ?? deps.state.lastTurn(sessionId),
+                turn,
+                ...(step !== undefined ? { step } : {}),
                 ...(payload.failure?.code !== undefined ? { detail: payload.failure.code } : {}),
                 at: new Date().toISOString(),
             });
@@ -194,6 +208,15 @@ function attributeAcrossRoots(deps, sessionId, outcome, turn, options = {}) {
     }
     return attributed;
 }
+/**
+ * Signal kinds that pin the step at which a turn actually went wrong.
+ *
+ * A `user-correction` is excluded on purpose: it is recorded on the first step of
+ * the turn (that is where new user text arrives) while the work it complains about
+ * happened before it, so using it as the high-water mark shrinks blame to step 1
+ * and under-attributes. It is still used when it is the only step-bearing signal.
+ */
+const HARD_FAILURE_KINDS = ['tool-failure', 'rework', 'request-error'];
 /**
  * Scopes whose pending debt has been *attempted* in this process.
  *
@@ -262,12 +285,26 @@ async function handleTurnEnd(deps, payload) {
     });
     try {
         // Only memories the model had already seen when things went wrong can be
-        // blamed: use the earliest failure signal's step as the high-water mark.
-        const failureSteps = collected.signals
+        // blamed: the earliest *hard* failure step is the high-water mark.
+        //
+        // A user correction is deliberately not a hard failure here. It is
+        // detected on the step that carries the new user text — which is the
+        // first step of the turn — so letting it into the `min()` pulled the mark
+        // back to step 1, exempting every injection the model had already seen
+        // later in the turn.
+        const hardSteps = collected.signals
+            .filter((signal) => HARD_FAILURE_KINDS.includes(signal.kind))
             .map((signal) => signal.step)
             .filter((step) => typeof step === 'number');
+        const anySteps = collected.signals
+            .map((signal) => signal.step)
+            .filter((step) => typeof step === 'number');
+        // A turn whose only signal is a correction still gets a mark (that is the
+        // one step-bearing signal it has); a turn where a hard failure carries no
+        // step at all falls back to "every injection in this turn", as before.
+        const steps = hardSteps.length > 0 ? hardSteps : anySteps;
         attributeAcrossRoots(deps, sessionId, 'failure', turn, {
-            ...(failureSteps.length > 0 ? { maxStep: Math.min(...failureSteps) } : {}),
+            ...(steps.length > 0 ? { maxStep: Math.min(...steps) } : {}),
         });
     }
     catch (error) {

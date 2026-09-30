@@ -51,17 +51,35 @@ export declare function latestBaseline(db: DatabaseSync): MetricSnapshot | undef
  */
 export declare function metricTaskCount(db: DatabaseSync): number;
 /**
+ * Why the current window may not be frozen automatically, or `undefined` when it
+ * is healthy enough.
+ *
+ * The frozen snapshot is what every later period is judged against, so freezing
+ * a bad period inverts the gate: a 12% success rate with 6.1 rework rounds per
+ * task becomes "normal", and every later — genuinely better — period reads as a
+ * regression or a pass. DESIGN §11 makes a freeze a human calibration step after
+ * a *good* period; an automatic freeze therefore has to prove the period is good.
+ *
+ * A metric that carries no data does not pass either: "no success rate recorded"
+ * is not evidence of a healthy window, it is the absence of evidence.
+ */
+export declare function qualityGateFailure(snapshot: MetricSnapshot, config: MemoryConfig): string | undefined;
+/**
  * Freeze the first baseline automatically, when the user asked for it
- * (`eval.autoFreezeBaseline`) and the ledger has enough comparable rows.
+ * (`eval.autoFreezeBaseline`), the ledger has enough comparable rows, and the
+ * window passes the quality gate.
  *
  * This is the escape hatch from the gate's permanent-UNKNOWN state: with no
  * snapshot the gate can only ever answer UNKNOWN, which is exactly the state the
- * live store was in. Both guards matter:
+ * live store was in. Three guards matter:
  *
  *   - an existing snapshot is never replaced (idempotent) — refreezing is how a
  *     regression signal gets erased, and `setBaseline` already requires a human
  *     reason for that reason;
- *   - no data means no freeze, so the gate never pretends to have a reference.
+ *   - no data means no freeze, so the gate never pretends to have a reference;
+ *   - a window that fails the quality gate is *not* written: the automatic path
+ *     stays quiet and only hints, leaving the freeze to the human step it was
+ *     always meant to be.
  *
  * Returns the frozen snapshot, or undefined when nothing was frozen.
  */
@@ -150,6 +168,14 @@ export interface BaselineProgress {
     windowDays: number;
     /** `eval.autoFreezeBaseline` — says whether anyone will freeze it automatically. */
     autoFreeze: boolean;
+    /**
+     * Set when the configured quality gate would block that automatic freeze.
+     *
+     * Without it the report promises "the next memory_stats call freezes it
+     * without asking" for a window the freeze path will refuse, which is exactly
+     * the kind of rubber-stamp claim the gate exists to prevent.
+     */
+    autoFreezeBlocked?: string;
 }
 /** Render the gate + health report for `memory_stats`. */
 export declare function renderEvaluation(gate: GateReport, health: HealthDigest, trend: {

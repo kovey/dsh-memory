@@ -42,8 +42,10 @@ import { log } from '../log.js';
 import { commitMemory, ensureGitignore } from './git.js';
 /** Lock file name inside the memory root — deliberately not under `.git/`. */
 export const LOCK_FILE_NAME = '.dsh-memory-commit.lock';
-/** A lock older than this (mtime) belongs to a dead holder and may be taken. */
+/** A lock older than this (mtime) *may* belong to a dead holder. */
 export const STALE_LOCK_MS = 120_000;
+/** Deadline used when no usable `timeoutMs` reaches {@link acquireCommitLock}. */
+export const DEFAULT_LOCK_TIMEOUT_MS = 10_000;
 /** Poll interval while another process holds the lock. */
 const POLL_MS = 50;
 export function lockFilePath(root) {
@@ -111,6 +113,50 @@ function preemptStaleLock(file, holder, ageMs) {
     return true;
 }
 /**
+ * Liveness of the holder, when it can be decided at all.
+ *
+ * `true`/`false` are answers for a holder on *this* host (the lock records pid
+ * and hostname); `undefined` means "cannot tell" — another machine sharing the
+ * root, or a malformed lock — and the mtime is then the only evidence.
+ *
+ * This is what keeps a *slow* holder from being preempted: an export or a git
+ * commit that takes longer than `STALE_LOCK_MS` used to look exactly like a
+ * crashed process, and two holders then sat in the critical section together.
+ */
+function holderIsAlive(holder) {
+    if (holder?.pid === undefined)
+        return undefined;
+    if (holder.host !== undefined && holder.host !== os.hostname())
+        return undefined;
+    try {
+        // signal 0 = "does this process exist and may I signal it", no delivery
+        process.kill(holder.pid, 0);
+        return true;
+    }
+    catch (error) {
+        // EPERM means the process exists but belongs to another user.
+        return error.code === 'EPERM';
+    }
+}
+/**
+ * Refresh a held lock's mtime — the heartbeat of a long critical section.
+ *
+ * The section is synchronous, so a timer cannot fire inside it: the holder
+ * instead touches its own lock at each phase boundary (acquire, after the
+ * export, before the commit). A *single* phase longer than `STALE_LOCK_MS`
+ * therefore still looks stale to a foreign host; a same-host contender is
+ * covered by {@link holderIsAlive} instead.
+ */
+export function touchCommitLock(lock, now = Date.now()) {
+    try {
+        const stamp = new Date(now);
+        fs.utimesSync(lock.file, stamp, stamp);
+    }
+    catch (error) {
+        log('debug', `memory: refreshing the commit lock ${lock.file} failed:`, error);
+    }
+}
+/**
  * Try to create the lock file exclusively. Creation is the atomic step:
  * `wx` fails with `EEXIST` when another process got there first, and any other
  * errno means this root cannot be locked at all (sandbox, read-only mount).
@@ -145,12 +191,21 @@ function createLock(file) {
  * Acquire the export+commit lock for one memory root, waiting up to `timeoutMs`
  * for another process. Returns a failure record (never throws) when the lock
  * stayed busy or could not be created at all.
+ *
+ * `timeoutMs` falls back to {@link DEFAULT_LOCK_TIMEOUT_MS} for anything that is
+ * not a usable non-negative number. `waited >= undefined` is false forever, so a
+ * caller that omitted the value (a partially built config object is enough) used
+ * to spin in this loop without ever reaching the deadline.
  */
 export function acquireCommitLock(root, timeoutMs) {
+    const deadlineMs = typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs >= 0
+        ? timeoutMs
+        : DEFAULT_LOCK_TIMEOUT_MS;
     const file = lockFilePath(root);
     const started = Date.now();
     let holder;
     let preempted = false;
+    let warnedAlive = false;
     try {
         fs.mkdirSync(root, { recursive: true });
     }
@@ -171,16 +226,21 @@ export function acquireCommitLock(root, timeoutMs) {
         }
         holder = readHolder(file) ?? holder;
         const age = lockAgeMs(file);
-        if (age !== undefined && age > STALE_LOCK_MS && preemptStaleLock(file, holder, age)) {
+        const alive = holderIsAlive(holder);
+        if (age !== undefined && age > STALE_LOCK_MS && alive !== true && preemptStaleLock(file, holder, age)) {
             preempted = true;
             continue;
         }
+        if (alive === true && age !== undefined && age > STALE_LOCK_MS && !warnedAlive) {
+            warnedAlive = true;
+            log('info', `memory: commit lock ${file} looks stale (mtime ${Math.round(age / 1000)}s) but ${describeHolder(holder)} is alive on this host — waiting instead of preempting it`);
+        }
         const waited = Date.now() - started;
-        if (waited >= timeoutMs) {
+        if (waited >= deadlineMs) {
             log('info', `memory: commit lock ${file} is held by ${describeHolder(holder)} — skipping this commit after ${waited}ms (git.lockTimeoutMs)`);
             return { reason: 'lock-timeout', waitedMs: waited, ...(holder !== undefined ? { holder } : {}) };
         }
-        sleepSync(Math.max(1, Math.min(POLL_MS, timeoutMs - waited)));
+        sleepSync(Math.max(1, Math.min(POLL_MS, deadlineMs - waited)));
     }
 }
 /** Release a lock this process holds; never touches a lock someone else took. */
@@ -312,7 +372,18 @@ export class AutoCommitter {
             // never be staged, and the gitignore template must exist before add.
             ensureGitignore(scope.root);
             ensureLockIgnored(scope.root);
-            this.hooks.exportText?.(scope);
+            // Phase boundary: the export and the git commit are each unbounded
+            // work, so the lock is refreshed around them rather than relying on a
+            // timer that cannot fire inside this synchronous section.
+            touchCommitLock(lock);
+            const exported = this.hooks.exportText?.(scope);
+            if (exported === false) {
+                // Not fatal for the commit itself (the text view may be complete
+                // already), but a silent miss is unrecoverable: the next rebuild
+                // reads the text view as the source of truth.
+                log('warn', `memory: text-view export failed for ${scope.root} (${reason}) — the commit may not carry this store's records; the export is skipped when its database is not open`);
+            }
+            touchCommitLock(lock);
             const result = commitMemory(scope.root, {
                 message: `${scope.kind === 'project' ? 'project' : 'global'} memory: ${reason}`,
             });

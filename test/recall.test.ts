@@ -460,3 +460,39 @@ test('the recall query prefers the newest text when the budget is tight', () => 
     assert.doesNotMatch(query.text, /重构部署脚本/)
     assert.equal(query.sources, 2, 'both messages still count as sources')
 })
+
+test('the confidence recompute obeys maxStep: an exempt record is left byte-for-byte alone', async (t) => {
+    // `attributeOutcome` learned to skip records injected after the failure, but
+    // the confidence recompute right behind it re-selected *every* record of the
+    // session/turn with its own query — so an exempt record still had its
+    // confidence rewritten (0.95 → 0.49 in the live store).
+    const h = await harness(t)
+    const store = h.registry.open(h.resolver.resolve({ agent: h.agent }))
+    assert.ok(store)
+    const blamed = listRecords(store.db).find((record) => record.id === 'shell-background-trap')
+    assert.ok(blamed)
+    const exempt = { ...blamed, id: 'injected-later', title: 'injected after the failure', confidence: 0.95, timesSeen: 0 }
+    upsertRecord(store.db, exempt)
+    const before = getRecord(store.db, 'injected-later')
+    assert.ok(before)
+    assert.equal(before.confidence, 0.95)
+
+    const at = new Date().toISOString()
+    const insert = store.db.prepare(
+        'INSERT INTO usage (record_id, session_id, turn, step, score, injected_at, outcome) VALUES (?,?,?,?,?,?,NULL)',
+    )
+    insert.run('shell-background-trap', 'sess-exempt', 1, 1, 0.9, at)
+    insert.run('injected-later', 'sess-exempt', 1, 3, 0.9, at)
+
+    assert.equal(applyOutcome(store.db, 'sess-exempt', 'failure', 1, { maxStep: 1 }), 1, 'only the step-1 injection is blamed')
+
+    const after = getRecord(store.db, 'injected-later')
+    assert.equal(after?.confidence, before.confidence, 'the exempt record keeps its confidence')
+    assert.equal(after?.failAfterRecall, 0, 'and no failure count')
+    assert.equal(after?.successAfterRecall, before.successAfterRecall)
+    assert.equal(after?.timesSeen, before.timesSeen)
+    assert.equal(after?.updatedAt, before.updatedAt, 'nothing was rewritten at all')
+    assert.equal(getRecord(store.db, 'shell-background-trap')?.failAfterRecall, 1, 'the blamed record still takes the hit')
+    // and the recompute still happens for the record that *was* blamed
+    assert.ok((getRecord(store.db, 'shell-background-trap')?.confidence ?? 1) < 0.95)
+})

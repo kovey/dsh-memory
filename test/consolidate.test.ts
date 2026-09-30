@@ -17,7 +17,7 @@ import { getMeta, setMeta } from '../dist/store/sqlite/db.js'
 import { loadSqliteModule } from '../dist/store/sqlite/db.js'
 import { countRecords, getRecord, listRecords, materialize, upsertRecord } from '../dist/store/sqlite/records.js'
 import { StoreRegistry } from '../dist/store/store.js'
-import { consolidateTool, forgetTool, selectForgetTargets } from '../dist/tools/consolidate.js'
+import { consolidateTool, forgetAgeDays, forgetTool, selectForgetTargets } from '../dist/tools/consolidate.js'
 import type { MemoryRecord } from '../dist/store/types.js'
 import { fakeRepo, memoryFixture, tempDir, useGlobalMemoryHome } from './helpers.ts'
 
@@ -598,4 +598,96 @@ test('an unwritable skills directory is a clear failure, not a silent one', () =
     const result = installSkillDraft(home, ['---', 'name: mem-blocked', '---', '', 'body', ''].join('\n'))
     assert.equal(result.action, 'failed')
     assert.match(result.message, /cannot write/)
+})
+
+// ---- bulk forget: "no criterion" must not come back through the side door -----
+
+test('olderThanDays: 0, a negative value or NaN is not a criterion and archives nothing', async (t) => {
+    // `bulkForget` refuses a selection with no criterion, but `0` used to count
+    // as one while `selectForgetTargets` applied no cutoff at all: "older than
+    // 0 days" archived the whole store, records written today included.
+    const h = await harness(t)
+    upsertRecord(h.store.db, record({ id: 'written-today', title: 'fresh lesson', body: '触发场景：今天。正确做法：别归档我。' }))
+    h.registry.exportScope(h.scope)
+    const tool = forgetTool(h.deps)
+
+    for (const olderThanDays of [0, -30]) {
+        const out = String(
+            await tool.execute({ olderThanDays, dryRun: false } as never, { agent: h.agent } as never),
+        )
+        assert.match(
+            out,
+            /refused: a bulk forget needs at least one criterion/,
+            `olderThanDays: ${olderThanDays} must not act as a criterion`,
+        )
+    }
+    assert.equal(getRecord(h.store.db, 'written-today')?.status, 'active', 'nothing was archived')
+    assert.ok(fs.existsSync(path.join(h.scope.root, 'lessons', 'written-today.md')), 'its file is still there')
+
+    // The tool schema rejects NaN before the handler runs; the classifier itself
+    // must treat it exactly like "not provided" too.
+    assert.equal(forgetAgeDays(undefined), undefined)
+    assert.equal(forgetAgeDays(0), undefined)
+    assert.equal(forgetAgeDays(-30), undefined)
+    assert.equal(forgetAgeDays(Number.NaN), undefined)
+    assert.equal(forgetAgeDays(90), 90)
+
+    // a real window still works and keeps its label
+    const listed = String(await tool.execute({ olderThanDays: 90 } as never, { agent: h.agent } as never))
+    assert.match(listed, /\[not updated for 90d\]/)
+    assert.match(listed, /0 record\(s\) match/, 'a record written today is not stale')
+})
+
+test('a symlinked skill directory cannot redirect the install outside the skills root', () => {
+    // `<home>/skills/<name>` as a symlink: `isInside` is purely lexical, so the
+    // write followed the link and landed outside the host's skills directory.
+    const home = tempDir('m3-skill-symlink-home')
+    const outside = tempDir('m3-skill-symlink-outside')
+    fs.mkdirSync(path.join(home, 'skills'), { recursive: true })
+    fs.symlinkSync(outside, path.join(home, 'skills', 'mem-escape'))
+    const draft = (name: string): string => ['---', `name: ${name}`, '---', '', 'body', ''].join('\n')
+
+    const escaped = installSkillDraft(home, draft('mem-escape'))
+    assert.notEqual(escaped.action, 'installed', `a symlinked target must be refused (${escaped.message})`)
+    assert.equal(fs.existsSync(path.join(outside, 'SKILL.md')), false, 'nothing was written outside the skills root')
+
+    // A symlinked *root* that stays inside is legitimate (macOS `/tmp` is
+    // `/private/tmp`): the check is realpath containment, not "no symlinks".
+    const linked = tempDir('m3-skill-linked-home')
+    const real = path.join(linked, 'real-skills')
+    fs.mkdirSync(real, { recursive: true })
+    fs.symlinkSync(real, path.join(linked, 'skills'))
+    const ok = installSkillDraft(linked, draft('mem-plain'))
+    assert.equal(ok.action, 'installed', ok.message)
+    assert.equal(fs.readFileSync(path.join(real, 'mem-plain', 'SKILL.md'), 'utf8'), draft('mem-plain'))
+})
+
+test('a quoted or commented `name:` in a draft still resolves to the skill name', () => {
+    // `skillNameOf` took everything up to end-of-line: `name: "mem-quoted"`
+    // installed nothing (the quotes are not a valid skill name) and
+    // `name: mem-x # note` produced the name `mem-x # note`.
+    const home = tempDir('m3-skill-yaml-name')
+    const draft = (name: string): string => ['---', `name: ${name}`, '---', '', 'body', ''].join('\n')
+
+    const quoted = installSkillDraft(home, draft('"mem-quoted"'))
+    assert.equal(quoted.action, 'installed', quoted.message)
+    assert.equal(quoted.name, 'mem-quoted')
+
+    const single = installSkillDraft(home, draft("'mem-single'"))
+    assert.equal(single.action, 'installed', single.message)
+    assert.equal(single.name, 'mem-single')
+
+    const commented = installSkillDraft(home, draft('mem-commented # keep this short'))
+    assert.equal(commented.action, 'installed', commented.message)
+    assert.equal(commented.name, 'mem-commented')
+
+    const both = installSkillDraft(home, draft('"mem-both" # quoted and commented'))
+    assert.equal(both.action, 'installed', both.message)
+    assert.equal(both.name, 'mem-both')
+
+    for (const name of ['mem-quoted', 'mem-single', 'mem-commented', 'mem-both']) {
+        assert.ok(fs.existsSync(path.join(home, 'skills', name, 'SKILL.md')), `${name}/SKILL.md exists`)
+    }
+    // a name that is invalid even after unquoting is still refused
+    assert.equal(installSkillDraft(home, draft('"../escape"')).action, 'invalid-name')
 })

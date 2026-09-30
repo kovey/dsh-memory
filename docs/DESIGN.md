@@ -567,14 +567,30 @@ config 无效，结论：**改插件配置就写 profile patch 的顶层 `- id: 
    真机语料实测：pending 38 → 33、active 56 → 61（晋升的 5 条均有明确使用证据）。
 2. **归因按时序定位**（`applyOutcome(..., { maxStep })`）：过去"本轮失败"会把该轮**所有**注入记为失败，
    包括失败之后才注入、模型根本没看到的记忆。现在以最早的失败信号 step 为高水位，只归因 step ≤ 它的注入。
+   <!-- 2026-09-30 复审修正：这条承诺在真实路径上曾是**空转**的——只有 `user-correction` 带 step
+        （`onToolResult`/`onRequestError` 都拿不到 step），`failureSteps` 恒为空 → 不加 `step <= ?`。
+        现在 `agent/pre-step` 把当前 step 写进 `SessionState.observeStep`（harness 唯一告知 step 的位置），
+        工具失败/返工/请求错误都从那里取 step；高水位只取**硬失败**（工具失败/返工/请求错误）的最早 step，
+        `user-correction` 单独处理（它在回合第 1 步记录，用它取 min 会把范围压到 step 1，反而少归因）。
+        置信度重算也只针对本次真正 bump 过的 record_id（此前它用另一条不带 step 的查询重选，被豁免的记录
+        仍会被改写）。 -->
+
 3. **召回查询取最新文本**：此前按到达顺序取前 2000 字符，长回合会被"最早说的话"主导；现改为**最新优先**再截断。
 
 **门禁可用性**：`eval.autoFreezeBaseline`（默认 false，可选自动冻结）+ `eval.proposeFreezeAfterTasks`（默认 5）——
 未冻结基线时渲染明确给出可复制的冻结命令与还差多少数据（此前永远只能输出 UNKNOWN）。
+<!-- 2026-09-30 复审修正：自动冻结必须过**质量门**（`eval.autoFreezeMinSuccessRate` 默认 0.5、
+     `eval.autoFreezeMaxRework` 默认 3）。只有"数据够多"一个条件时，真机把 success_rate 0.122 /
+     avg_rework 6.12 的糟糕时期冻成了基准 → 门禁变橡皮图章。现在不达标则不落盘、只 `log('info')` 说明，
+     `memory_stats` 也据此不再承诺"下一次调用会自动冻结"。 -->
+
 **晋升闭环被消费**：`memory_consolidate({ acceptProposal })` 真正把技能草稿落到 `~/.dsh/skills/<name>/SKILL.md`
 （人工审批环节保留：只有显式 accept 才写；覆盖需 `overwrite`；skill 名限 `[a-z0-9-]` 防穿越）。
 **安全与运维**：脱敏补 JWT 与高熵长串启发式（保留 git SHA 与普通标识符）；批量遗忘（默认 dry-run）；
 跨进程导出+提交锁（`git.lockTimeoutMs`，陈旧锁可抢占）；L5 支持写入 `conventions.md` 等命名文件；
+<!-- 2026-09-30 复审修正：批量遗忘的 `olderThanDays` 只有**正有限数**才算判据（0/负数/NaN = 未提供），
+     否则 `0` 会绕过"至少一个判据"守卫归档整库；陈旧锁抢占前先看**同主机 pid 是否存活**，
+     并在导出/提交流程的阶段边界刷新锁 mtime（同步临界区里定时器不会触发）。 -->
 **版本化诊断**（哪�些仓库忽略 `.dsh/` → 明说"记忆未纳入 git"）；启动时输出一行健康度（pending 占比）；
 CI（GitHub Actions，Node 22.19/24 矩阵跑 typecheck + 全量测试）。
 

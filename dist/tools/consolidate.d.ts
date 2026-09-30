@@ -20,6 +20,17 @@ export interface ForgetTarget {
     reason: string;
 }
 /**
+ * `olderThanDays` as a *criterion*: only a finite, positive number selects a
+ * time window; anything else means "not provided".
+ *
+ * This is a safety boundary, not a convenience. `bulkForget` refuses a selection
+ * with no criterion at all, but `olderThanDays: 0` used to count as one while
+ * `selectForgetTargets` built no cutoff for it (only `> 0` did) — so "older than
+ * 0 days" archived the entire store, records written that same day included,
+ * through the back door that guard exists to close.
+ */
+export declare function forgetAgeDays(value: number | undefined): number | undefined;
+/**
  * Records a bulk forget would touch.
  *
  * Only `active`/`pending` records are candidates: archiving an archived record

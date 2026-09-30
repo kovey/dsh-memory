@@ -12,6 +12,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
 import { resolveConfig } from '../dist/config.js'
+import { setLogFile } from '../dist/log.js'
 import { clearRepoCache } from '../dist/paths.js'
 import { ScopeResolver } from '../dist/scope/resolver.js'
 import { exportAll } from '../dist/store/export.js'
@@ -539,4 +540,52 @@ test('a real rebase conflict is resolved from any working directory', async (t) 
     assert.match(merged, /本机做法/, 'the longer side won the body')
     // and nothing was written into the unrelated cwd
     assert.equal(fs.existsSync(path.join(elsewhere, 'lessons', 'shared.md')), false)
+})
+
+// ---- the export inside the commit critical section ---------------------------
+
+test('a commit after the store was closed still writes the text view', async (t) => {
+    // `exportText` called `exportScope`, which returns false when the root is not
+    // in the registry's open map — and said nothing. The pre-sync checkpoint runs
+    // before `registry.open()`, `session/disposed` runs after `closeIdle()`, so the
+    // commit reported success while the text view was missing records (a later
+    // rebuild then deletes them).
+    const repo = initRepo('m4-export-closed-store')
+    const h = await openScope(t, repo, { git: { autoCommit: 'immediate' } })
+    upsertRecord(h.store.db, {
+        ...materialize({
+            title: 'closed store lesson',
+            body: '触发场景：store 已关闭。正确做法：导出前重新打开。',
+            layer: 'project',
+            scopeKind: 'project',
+            repo,
+        }),
+        id: 'reopen-me',
+    })
+    h.registry.close(h.scope.root)
+    assert.equal(h.registry.listOpen().length, 0, 'the store really is closed')
+
+    const { createHookDeps } = await import('../dist/hooks/index.js')
+    const deps = createHookDeps(h.resolved, h.registry, h.resolver, { save: true })
+    const outcome = deps.committer.commitNow(h.scope, 'session end')
+    assert.equal(outcome.committed, true, outcome.detail)
+    assert.ok(fs.existsSync(path.join(h.scope.root, 'lessons', 'reopen-me.md')), 'the export reopened the store')
+    assert.match(git(repo, 'ls-files'), /lessons\/reopen-me\.md/, 'and the record is committed')
+})
+
+test('an export that returns false is warned about instead of being swallowed', async () => {
+    const root = initRepo('m4-export-warn')
+    const logFile = path.join(tempDir('m4-export-warn-log'), 'memory.log')
+    setLogFile(logFile)
+    try {
+        const committer = new AutoCommitter(resolveConfig({ git: { autoCommit: 'immediate' } }), {
+            exportText: () => false,
+        })
+        committer.commitNow({ kind: 'global', root, reason: 'no-project-context' }, 'export refused')
+        const logged = fs.readFileSync(logFile, 'utf8')
+        assert.match(logged, /\[warn\][^\n]*text-view export/, 'a failed export must be visible in the log')
+        assert.match(logged, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 'and it names the scope')
+    } finally {
+        setLogFile(undefined)
+    }
 })

@@ -13,9 +13,10 @@ import test from 'node:test'
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveConfig } from '../dist/config.js'
 import { setLogFile } from '../dist/log.js'
-import { acquireCommitLock, AutoCommitter, LOCK_FILE_NAME, releaseCommitLock, STALE_LOCK_MS } from '../dist/sync/autocommit.js'
+import { acquireCommitLock, AutoCommitter, LOCK_FILE_NAME, releaseCommitLock, STALE_LOCK_MS, touchCommitLock } from '../dist/sync/autocommit.js'
 import type { CommitLock, CommitOutcome } from '../dist/sync/autocommit.js'
 import { recoverPendingDistillations, registerLearnHooks } from '../dist/hooks/learn.js'
+import { createHookDeps, registerHooks } from '../dist/hooks/index.js'
 import { materialize, upsertRecord } from '../dist/store/sqlite/records.js'
 import { recall } from '../dist/recall/engine.js'
 import { candidateConfidence, nextConfidence, statusFor } from '../dist/learn/confidence.js'
@@ -30,9 +31,10 @@ import { distillInFlightTtlMs, isDistilling, runDistillation } from '../dist/lea
 import { SignalBuffer, detectCorrection, detectResultFailure, looksLikeTestFailure, summarize } from '../dist/learn/signals.js'
 import type { Signal } from '../dist/learn/signals.js'
 import { clearRepoCache } from '../dist/paths.js'
+import { recordRecalls } from '../dist/recall/usage.js'
 import { SessionState } from '../dist/recall/session-state.js'
 import { ScopeResolver } from '../dist/scope/resolver.js'
-import { listEvidence, countRecords, getRecord } from '../dist/store/sqlite/records.js'
+import { listEvidence, countRecords, getRecord, listRecords } from '../dist/store/sqlite/records.js'
 import { loadSqliteModule } from '../dist/store/sqlite/db.js'
 import { StoreRegistry } from '../dist/store/store.js'
 import type { ScopeStore } from '../dist/store/store.js'
@@ -1516,4 +1518,288 @@ test('an exception inside the critical section still releases the lock', () => {
         )
         assert.equal(ok.committed, true, ok.detail)
     })
+})
+
+// ---- cross-process lock: liveness, heartbeat, bounded wait --------------------
+
+test('a lock whose holder is alive on this host is waited on, not preempted', () => {
+    // mtime alone cannot tell "a slow holder" from "a dead holder": a section
+    // that ran longer than STALE_LOCK_MS looked stale, was preempted, and *two*
+    // processes were then inside the export+commit critical section at once.
+    const root = commitRepo('m4-lock-live-holder')
+    const held = acquireCommitLock(root, 0)
+    assert.ok('file' in held, 'the parent takes the lock')
+    const lockFile = (held as CommitLock).file
+    const old = new Date(Date.now() - STALE_LOCK_MS - 60_000)
+    fs.utimesSync(lockFile, old, old)
+
+    const contender = acquireCommitLock(root, 0)
+    assert.ok(!('file' in contender), 'this process is alive, so the lock must not be stolen')
+    assert.equal((contender as { reason: string }).reason, 'lock-timeout')
+    assert.match(fs.readFileSync(lockFile, 'utf8'), new RegExp(`"token":"${(held as CommitLock).token}"`), 'the live holder still owns it')
+    releaseCommitLock(held as CommitLock)
+    assert.equal(fs.existsSync(lockFile), false)
+})
+
+test('an old lock from a dead holder is still preempted (liveness did not break the escape hatch)', () => {
+    const root = commitRepo('m4-lock-dead-holder')
+    const lockFile = path.join(root, LOCK_FILE_NAME)
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: 4242, host: 'crashed-host', at: '2026-01-01T00:00:00.000Z', token: 'dead' }))
+    const old = new Date(Date.now() - STALE_LOCK_MS - 60_000)
+    fs.utimesSync(lockFile, old, old)
+    const taken = acquireCommitLock(root, 0)
+    assert.ok('file' in taken, 'a foreign host with a stale mtime is still preempted')
+    assert.equal((taken as CommitLock).preempted, true)
+    releaseCommitLock(taken as CommitLock)
+})
+
+test('touchCommitLock refreshes a held lock so a slow section does not look stale', () => {
+    // A phase boundary heartbeat: the section is synchronous, so the holder
+    // refreshes its own lock instead of relying on a timer that cannot fire.
+    const root = commitRepo('m4-lock-heartbeat')
+    const file = path.join(root, LOCK_FILE_NAME)
+    const lock: CommitLock = { root, file, token: 'mine', preempted: false }
+    fs.writeFileSync(file, JSON.stringify({ pid: process.pid, host: 'other-host', at: '2026-01-01T00:00:00.000Z', token: 'mine' }))
+    const old = new Date(Date.now() - STALE_LOCK_MS - 60_000)
+    fs.utimesSync(file, old, old)
+
+    // a foreign host cannot check liveness, so only the mtime decides here
+    const before = acquireCommitLock(root, 0)
+    assert.ok('file' in before, 'the stale-looking lock is preempted until it is refreshed')
+    releaseCommitLock(before as CommitLock)
+
+    // the owner's own lock, still stale-looking, is refreshed by the heartbeat
+    fs.writeFileSync(file, JSON.stringify({ pid: 1, host: 'other-host', at: '2026-01-01T00:00:00.000Z', token: 'mine' }))
+    fs.utimesSync(file, old, old)
+    touchCommitLock(lock)
+    assert.ok(Date.now() - fs.statSync(file).mtimeMs < 5_000, 'the heartbeat rewrote the mtime')
+    const after = acquireCommitLock(root, 60)
+    assert.equal((after as { reason?: string }).reason, 'lock-timeout', 'a refreshed lock is no longer stale')
+})
+
+test('the commit path heartbeats its own lock before it commits', () => {
+    const root = commitRepo('m4-lock-heartbeat-commit')
+    writeLesson(root, 'kept.md', 'kept\n')
+    const lockFile = path.join(root, LOCK_FILE_NAME)
+    const committer = new AutoCommitter(resolveConfig({ git: { autoCommit: 'immediate' } }), {
+        exportText: () => {
+            // A long export: by the time it returns, the lock looks stale. The
+            // token is also handed to "another process" so the lock file survives
+            // the finally-block release and the test can inspect its mtime.
+            fs.writeFileSync(
+                lockFile,
+                JSON.stringify({ pid: 1, host: 'other-host', at: '2026-01-01T00:00:00.000Z', token: 'foreign' }),
+            )
+            const old = new Date(Date.now() - STALE_LOCK_MS - 60_000)
+            fs.utimesSync(lockFile, old, old)
+        },
+    })
+    const outcome = committer.commitNow(commitScope(root), 'slow section')
+    assert.equal(outcome.committed, true, outcome.detail)
+    assert.equal(fs.existsSync(lockFile), true, 'a lock that changed owner is not ours to release')
+    assert.ok(
+        Date.now() - fs.statSync(lockFile).mtimeMs < 5_000,
+        'the commit refreshed the lock after the export instead of letting it look stale',
+    )
+})
+
+test('an undefined lock timeout falls back to the default instead of spinning forever', async () => {
+    // `acquireCommitLock(root, undefined)` never returned: `waited >= undefined`
+    // is false forever, so the loop polls to the end of time (a config object
+    // built without `git.lockTimeoutMs` is enough to reach it).
+    const root = commitRepo('m4-lock-undefined-timeout')
+    const lockFile = path.join(root, LOCK_FILE_NAME)
+    // fresh mtime + a foreign host: neither staleness nor liveness can end this,
+    // so only the deadline can.
+    fs.writeFileSync(lockFile, JSON.stringify({ pid: 1, host: 'other-host', at: new Date().toISOString(), token: 'foreign' }))
+    const script = `
+const { acquireCommitLock } = await import(${JSON.stringify(path.join(repoRoot, 'dist/sync/autocommit.js'))})
+const started = Date.now()
+const result = acquireCommitLock(process.env.DSH_TEST_ROOT, undefined)
+console.log(JSON.stringify({ reason: result.reason ?? null, waitedMs: Date.now() - started }))
+`
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+        env: { ...process.env, DSH_TEST_ROOT: root },
+        stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    let out = ''
+    child.stdout.on('data', (chunk: Buffer) => {
+        out += String(chunk)
+    })
+    const killTimer = setTimeout(() => child.kill('SIGKILL'), 25_000)
+    const code = await new Promise<number | null>((resolve) => child.on('close', resolve))
+    clearTimeout(killTimer)
+    assert.equal(code, 0, `the child never returned (out=${out})`)
+    const parsed = JSON.parse(out.trim()) as { reason: string | null; waitedMs: number }
+    assert.equal(parsed.reason, 'lock-timeout', 'the fallback deadline fired')
+    assert.ok(parsed.waitedMs >= 9_000, `it waited for the default timeout (${parsed.waitedMs}ms)`)
+    assert.ok(parsed.waitedMs < 20_000, `and it is bounded (${parsed.waitedMs}ms)`)
+}, { timeout: 40_000 })
+
+test('the high-entropy sweep keeps long identifiers that carry word boundaries', () => {
+    // A 48-char camelCase identifier has mixed case and a digit, so the shape
+    // heuristic ate it even though it is obviously a name, not a secret.
+    const identifier = 'parseISO8601DurationIntoMillisecondsWithTimezone'
+    assert.equal(identifier.length, 48)
+    assert.equal(redact(identifier, 'redacted', 400), identifier)
+    assert.equal(
+        redact(`call ${identifier} now`, 'redacted', 400),
+        `call ${identifier} now`,
+        'a sentence around it keeps its evidence',
+    )
+    // two lower→upper boundaries is the exemption; fewer than that is still opaque
+    const opaque = `Xk9${'q'.repeat(44)}Z`
+    assert.equal(opaque.length, 48)
+    assert.equal(redact(opaque), '[redacted:high-entropy]', 'one boundary is not a name')
+    // and the enumerated rules are untouched
+    assert.equal(redact('sk-abcdefghijklmnop'), 'sk-***')
+})
+
+// ---- step-aware attribution through the real hook wiring ---------------------
+
+type RegisteredHandlers = Map<string, ((...args: unknown[]) => unknown)[]>
+
+/**
+ * Real hooks (`registerHooks`) over a real registry/store.
+ *
+ * Every listener of an event is kept: `registerHooks` registers two
+ * `agent/turn-stopping` handlers (learning and the git committer), and a map that
+ * kept only the last one would silently skip the code under test.
+ */
+function wiredHooks(h: { resolved: ReturnType<typeof resolveConfig>; registry: StoreRegistry; resolver: ScopeResolver; agent: unknown }) {
+    const handlers: RegisteredHandlers = new Map()
+    const ctx = {
+        ...(fakeCtx('[]') as unknown as Record<string, unknown>),
+        on: (event: string, handler: (...args: unknown[]) => unknown) => {
+            const list = handlers.get(event) ?? []
+            list.push(handler)
+            handlers.set(event, list)
+        },
+    }
+    const deps = createHookDeps(h.resolved, h.registry, h.resolver, { save: true })
+    const handle = registerHooks(ctx as never, deps)
+    return { handlers, deps, handle }
+}
+
+/** Fire every listener of one event, as the host would. */
+async function emitHooks(handlers: RegisteredHandlers, event: string, ...args: unknown[]): Promise<void> {
+    const list = handlers.get(event)
+    assert.ok(list !== undefined && list.length > 0, `no listener registered for ${event}`)
+    for (const handler of list) await handler(...args)
+}
+
+/**
+ * Drive the registered `agent/pre-step` listeners for one step of a turn, exactly
+ * as the agent loop would: `next()` returns the decision, the hook may prepend an
+ * injected memory message.
+ */
+async function runPreStep(
+    handlers: RegisteredHandlers,
+    agent: unknown,
+    turn: number,
+    step: number,
+    text: string,
+): Promise<void> {
+    const message = { content: [{ type: 'text', text }], source: { kind: 'user-rpc' } }
+    await emitHooks(handlers, 'agent/pre-step', { agent, messages: [message], turn, step, signal: new AbortController().signal }, async () => ({
+        kind: 'enter',
+        messages: [message],
+    }))
+}
+
+/** `usage.outcome` of one record, with the SQL NULL normalized for assertions. */
+function usageOutcome(h: { store: ScopeStore }, recordId: string): string {
+    const value = h.store.db
+        .prepare('SELECT outcome FROM usage WHERE record_id = ? AND session_id = ?')
+        .get(recordId, 'sess-learn')?.['outcome']
+    return typeof value === 'string' ? value : 'unattributed'
+}
+
+test('a tool failure pins attribution to its own step: a later injection is not blamed', async (t) => {
+    // The failure signals carried no step on the real path (`onToolResult` had
+    // nowhere to get one), so `failureSteps` was always empty and *every*
+    // injection in the turn was marked failed — including one made after the
+    // failure, which the model had never seen.
+    const h = await harness(t)
+    const { handlers, deps, handle } = wiredHooks(h)
+    try {
+        const seen = listRecords(h.store.db)[0]
+        assert.ok(seen)
+        const later = {
+            ...materialize({
+                title: 'a lesson injected after the failure',
+                body: '触发场景：失败之后才注入。正确做法：不该被归因。',
+                layer: 'project' as const,
+                scopeKind: 'project' as const,
+            }),
+            id: 'injected-later',
+        }
+        upsertRecord(h.store.db, later)
+        // Both injections go through the same writer `recordUsage` uses; only the
+        // step differs, which is the whole point of the guard.
+        recordRecalls(h.store.db, [
+            { recordId: seen.id, sessionId: 'sess-learn', turn: 1, step: 1, score: 0.9 },
+            { recordId: later.id, sessionId: 'sess-learn', turn: 1, step: 3, score: 0.9 },
+        ])
+
+        await runPreStep(handlers, h.agent, 1, 1, 'qqzzxx task text')
+        // step 2 is where the tool fails; the step comes from the pre-step hook
+        await runPreStep(handlers, h.agent, 1, 2, 'qqzzxx')
+        deps.state.observeTurn('sess-learn', 1)
+        await emitHooks(
+            handlers,
+            'tools/result',
+            { name: 'bash', agent: h.agent },
+            { isError: true, content: [{ type: 'text', text: 'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY' }] },
+        )
+        assert.equal(deps.signals.peek('sess-learn', 1)[0]?.step, 2, 'the failure signal knows its step')
+        await runPreStep(handlers, h.agent, 1, 3, 'qqzzxx')
+        await emitHooks(handlers, 'agent/turn-stopping', { agent: h.agent, turn: 1 })
+
+        assert.equal(usageOutcome(h, seen.id), 'failure', 'the injection the model had seen is blamed')
+        assert.equal(usageOutcome(h, later.id), 'unattributed', 'the injection made after the failure is not')
+        assert.equal(getRecord(h.store.db, later.id)?.failAfterRecall, 0)
+        assert.equal(getRecord(h.store.db, seen.id)?.failAfterRecall, 1)
+    } finally {
+        handle.dispose()
+    }
+})
+
+test('a correction on step 1 does not exempt an injection the model saw on step 2', async (t) => {
+    // The reverse half of the same bug: with a correction (step 1) and a tool
+    // failure in one turn, `Math.min` picked step 1 and the mark excluded
+    // everything after it — under-attributing a failure the model did see.
+    const h = await harness(t)
+    const { handlers, deps, handle } = wiredHooks(h)
+    try {
+        const record = listRecords(h.store.db)[0]
+        assert.ok(record)
+        recordRecalls(h.store.db, [
+            { recordId: record.id, sessionId: 'sess-learn', turn: 1, step: 2, score: 0.9 },
+        ])
+
+        // step 1 carries the user's correction; the real pre-step hook records it
+        await runPreStep(handlers, h.agent, 1, 1, '不对，应该换个方式重跑一遍')
+        const correction = deps.signals.peek('sess-learn', 1).find((signal) => signal.kind === 'user-correction')
+        assert.equal(correction?.step, 1, 'the correction is stamped with its own step')
+
+        await runPreStep(handlers, h.agent, 1, 3, 'qqzzxx')
+        deps.state.observeTurn('sess-learn', 1)
+        await emitHooks(
+            handlers,
+            'tools/result',
+            { name: 'bash', agent: h.agent },
+            { isError: true, content: [{ type: 'text', text: 'ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY' }] },
+        )
+        await emitHooks(handlers, 'agent/turn-stopping', { agent: h.agent, turn: 1 })
+
+        assert.equal(
+            usageOutcome(h, record.id),
+            'failure',
+            'the tool failure (step 3) is the mark, not the correction (step 1)',
+        )
+        assert.equal(getRecord(h.store.db, record.id)?.failAfterRecall, 1)
+    } finally {
+        handle.dispose()
+    }
 })

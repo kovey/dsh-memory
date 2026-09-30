@@ -121,6 +121,17 @@ export interface MemoryConfig {
          * which is exactly the state the live store was in.
          */
         autoFreezeBaseline: boolean
+        /**
+         * Quality floor for that automatic freeze: the window must reach this
+         * success rate *and* stay under `autoFreezeMaxRework`.
+         *
+         * Without it the only condition was "enough metric rows", and a live
+         * period with a 12% success rate and 6.1 rework rounds per task was
+         * frozen as the reference the gate compares against — a rubber stamp.
+         */
+        autoFreezeMinSuccessRate: number
+        /** Ceiling on the average rework rounds per task for an automatic freeze. */
+        autoFreezeMaxRework: number
         /** Tasks with metrics after which `memory_stats` proposes a human freeze. */
         proposeFreezeAfterTasks: number
     }
@@ -216,7 +227,13 @@ export const DEFAULT_CONFIG: MemoryConfig = {
     },
     episodic: { enabled: true, retentionDays: 90, captureUserText: 'redacted' },
     consolidate: { enabled: true, everyNTasks: 5, everyDays: 7, archiveInsteadOfDelete: true, usageRetentionDays: 180 },
-    eval: { windowDays: 30, autoFreezeBaseline: false, proposeFreezeAfterTasks: 5 },
+    eval: {
+        windowDays: 30,
+        autoFreezeBaseline: false,
+        autoFreezeMinSuccessRate: 0.5,
+        autoFreezeMaxRework: 3,
+        proposeFreezeAfterTasks: 5,
+    },
     git: {
         enabled: true,
         autoCommit: 'task-end',
@@ -380,6 +397,13 @@ export function resolveConfig(raw: unknown): MemoryConfig {
         eval: {
             windowDays: num(rootEval['windowDays'], d.eval.windowDays, 1, 365),
             autoFreezeBaseline: bool(rootEval['autoFreezeBaseline'], d.eval.autoFreezeBaseline),
+            autoFreezeMinSuccessRate: num(
+                rootEval['autoFreezeMinSuccessRate'],
+                d.eval.autoFreezeMinSuccessRate,
+                0,
+                1,
+            ),
+            autoFreezeMaxRework: num(rootEval['autoFreezeMaxRework'], d.eval.autoFreezeMaxRework, 0, 100),
             proposeFreezeAfterTasks: num(
                 rootEval['proposeFreezeAfterTasks'],
                 d.eval.proposeFreezeAfterTasks,

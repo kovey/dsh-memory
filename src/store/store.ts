@@ -167,10 +167,13 @@ export class StoreRegistry {
      */
     private reportHealth(store: ScopeStore): void {
         if (reported.has(store.scope.root)) return
-        reported.add(store.scope.root)
         try {
             const counts = countRecords(store.db)
+            // Latch *after* the read: an empty first open (the usual shape — a
+            // fresh root bootstraps before anything was ever saved) used to mark
+            // the root as reported and the health line never appeared again.
             if (counts.total === 0) return
+            reported.add(store.scope.root)
             const pendingShare = Math.round((counts.pending / counts.total) * 100)
             const hint =
                 pendingShare >= 50

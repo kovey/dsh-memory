@@ -124,6 +124,37 @@ test('every knob the patch promises is actually read outside config.ts (no dead 
     }
 })
 
+/** Does `anchor` admit `version`? Supports exactly the two forms this package
+ *  uses: an exact version, or `>=<low> <<high>`. Deliberately tiny — pulling in
+ *  semver for two shapes would add a dependency to test a manifest field. */
+function admits(anchor: string, version: string): boolean {
+    const range = /^>=\s*(\S+)\s+<\s*(\S+)$/.exec(anchor.trim())
+    if (range === null) return anchor.trim() === version
+    const low = range[1] as string
+    const high = range[2] as string
+    return compareVersions(version, low) >= 0 && compareVersions(version, high) < 0
+}
+
+/** Numeric major.minor.patch compare; a prerelease sorts BELOW its release, and
+ *  two prereleases compare lexically (enough for `rc.N`). */
+function compareVersions(a: string, b: string): number {
+    const split = (v: string) => {
+        const [core, pre] = v.split('-', 2)
+        const nums = (core ?? '').split('.').map((n) => Number(n) || 0)
+        return { nums, pre: pre ?? '' }
+    }
+    const x = split(a)
+    const y = split(b)
+    for (let i = 0; i < 3; i += 1) {
+        const d = (x.nums[i] ?? 0) - (y.nums[i] ?? 0)
+        if (d !== 0) return d < 0 ? -1 : 1
+    }
+    if (x.pre === y.pre) return 0
+    if (x.pre === '') return 1
+    if (y.pre === '') return -1
+    return x.pre < y.pre ? -1 : 1
+}
+
 test('peer anchors track the installed dsh runtime', async () => {
     // rc.2 added a hard peer gate: a bundle whose peers do not match the running
     // dsh is *skipped* at load time. Forgetting to bump these anchors after a dsh
@@ -134,10 +165,14 @@ test('peer anchors track the installed dsh runtime', async () => {
     const dshPackages = Object.keys(pkg.peerDependencies).filter((name) => name.startsWith('@deepseek-ai/dsh-'))
     assert.ok(dshPackages.length >= 4, 'the dsh peer set is declared')
     for (const name of dshPackages) {
-        assert.equal(
-            (pkg.peerDependencies as Record<string, string>)[name],
-            runtime.version,
-            `${name} must be anchored to the installed dsh runtime (${runtime.version})`,
+        // The anchor may be an exact version OR a range. A range is what lets one
+        // release serve several host versions (0.2.1 added this need), but it must
+        // still ADMIT the installed runtime — otherwise the bundle is skipped at
+        // load time, which is the failure this test exists to prevent.
+        const anchor = (pkg.peerDependencies as Record<string, string>)[name] as string
+        assert.ok(
+            admits(anchor, runtime.version),
+            `${name} (${anchor}) must admit the installed dsh runtime ${runtime.version}`,
         )
     }
     const dev = pkg.devDependencies as Record<string, string>

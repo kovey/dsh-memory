@@ -3,6 +3,34 @@
 本文件记录 dsh-memory 的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] — 2026-10-19
+
+> **兼容性修复**：dsh **0.2.1** 起本插件不再被跳过。0.2.0 仍兼容，升级是安全的。
+
+### Fixed
+
+- **peer 锚点由精确版本改为范围，0.2.1-rc.2 宿主不再跳过本插件。**
+  0.1.7 时代 peer 改为精确值（`"@deepseek-ai/dsh-agent": "0.2.0-rc.2"`），跨 rc 即失效；
+  而 dsh 0.2.1 的加载器在 peer 不匹配时**直接跳过整个 bundle**，表现为**记忆功能静默消失**
+  ——启动时只有一行 stderr：
+
+  ```
+  dsh: skipping profile bundle "dsh-memory": Plugin dsh-memory@0.3.1 is incompatible
+      with dsh 0.2.1-rc.2: requirements {"@deepseek-ai/dsh-agent":"0.2.0-rc.2", …}
+  ```
+
+  现改为 `>=0.2.0-rc.2 <0.2.2`（5 个 dsh peer）。**上界取 `<0.2.2` 而非 `<0.3.0>`**：只声明
+  **实际验证过**的范围 —— 0.2.0→0.2.1 就改过安装机制，声称 0.2.x 全兼容没有依据。
+  用宿主自己的 `evaluatePluginCompatibility()` 实测：0.2.0-rc.2 / 0.2.1-rc.1 / 0.2.1-rc.2 /
+  0.2.1 全部兼容，0.2.2 拒绝。
+
+### Changed
+
+- **`peer anchors track the installed dsh runtime` 测试改为「范围必须覆盖运行时」。**
+  它原本断言 peer **精确等于**运行时版本，正是把上面那个失效模式固化了 —— 改成范围后该断言
+  必然失败。新断言保留原意（锚点写错会导致插件下线），并附一个**自足的版本比较器**
+  （本仓无 `semver` 依赖，不为两个范围形态引入新依赖）。
+
 ## [0.2.0] — 2026-09-24
 
 > **破坏性变更**：本版适配 **dsh 0.1.7-rc.1**，插件与宿主必须**一起**升级。

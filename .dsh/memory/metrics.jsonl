@@ -7,3 +7,4 @@
 {"task_id":"s-2026-09-30-fc91eb66","date":"2026-09-30","project":"session","summary":"auto: 1 turn(s), 0 tool call(s), 33 signal(s)","outcome":"failed","duration_min":31,"disturb_count":1,"rework_rounds":15,"lessons":0,"tokens":0}
 {"task_id":"s-2026-09-30-d24db3f6","date":"2026-09-30","project":"session","summary":"auto: 1 turn(s), 0 tool call(s), 7 signal(s)","outcome":"failed","duration_min":11,"disturb_count":1,"rework_rounds":2,"lessons":0,"tokens":0}
 {"task_id":"s-2026-10-12-bc388ef3","date":"2026-10-12","project":"session","summary":"auto: 45 turn(s), 2 tool call(s), 10 signal(s)","outcome":"failed","duration_min":17467,"disturb_count":4,"rework_rounds":2,"lessons":7,"tokens":2785}
+{"task_id":"s-2026-10-22-faa166dd","date":"2026-10-22","project":"session","summary":"auto: 3 turn(s), 69 tool call(s), 0 signal(s)","outcome":"success","duration_min":36,"disturb_count":0,"rework_rounds":0,"lessons":0,"tokens":0}

@@ -1,6 +1,6 @@
 ---
 title: 脚本与引号内使用 ~ 不会展开，需显式取 $HOME 或 expanduser
-confidence: 0.6
+confidence: 0.55
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

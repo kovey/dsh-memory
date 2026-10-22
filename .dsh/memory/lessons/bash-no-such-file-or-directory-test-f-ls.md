@@ -1,12 +1,13 @@
 ---
 title: bash 报 no such file or directory 时先用 test -f / ls 确认路径，再重发命令
-confidence: 0.6
+confidence: 0.55
 expires: permanent
 times_seen: 1
 updated: 2026-09-30
 tags: tool-failure, ENOENT, path, bash
 status: pending
 origin: distilled
+times_recalled: 1
 created: 2026-09-30
 evidence: rework×1, test-failure×1, tool-failure×1
 ---

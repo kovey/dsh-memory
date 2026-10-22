@@ -1,6 +1,6 @@
 ---
 title: edit 报 old_string and new_string must differ：说明改动已生效或写错了，先 Read 再决定是否重试
-confidence: 0.56
+confidence: 0.5
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

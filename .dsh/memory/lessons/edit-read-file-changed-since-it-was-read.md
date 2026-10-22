@@ -1,6 +1,6 @@
 ---
 title: edit 前必须重新 Read：文件被同轮其它命令改写会报 file changed since it was read
-confidence: 0.6
+confidence: 0.55
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

@@ -1,12 +1,13 @@
 ---
 title: 定位 @deepseek-ai/dsh-tools 包文件时不要假设 dist/ 或 lib/*.d.ts 路径
-confidence: 0.6
+confidence: 0.55
 expires: permanent
 times_seen: 1
 updated: 2026-09-30
 tags: node_modules, dsh-tools, 路径定位, grep
 status: pending
 origin: distilled
+times_recalled: 1
 created: 2026-09-30
 evidence: rework×1, test-failure×1, tool-failure×3
 ---

@@ -1,6 +1,6 @@
 ---
 title: bash 输出含括号的标记字符串必须加引号，否则触发 syntaxerror
-confidence: 0.6
+confidence: 0.55
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

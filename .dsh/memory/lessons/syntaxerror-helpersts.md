@@ -1,6 +1,6 @@
 ---
 title: 测试导入的命名导出不存在会在模块加载期抛 SyntaxError，先核对 helpers.ts 的导出再跑测试
-confidence: 0.6
+confidence: 0.55
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

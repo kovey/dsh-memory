@@ -1,6 +1,6 @@
 ---
 title: 后台 subagent 完成通知到达且用户已示意停止时，不要基于其结果继续追加动作
-confidence: 0.56
+confidence: 0.5
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

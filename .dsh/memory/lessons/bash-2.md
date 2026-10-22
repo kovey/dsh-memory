@@ -1,6 +1,6 @@
 ---
 title: 同一轮内 bash 连续失败 2 次后应停止重试，先定位根因再改命令
-confidence: 0.6
+confidence: 0.55
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

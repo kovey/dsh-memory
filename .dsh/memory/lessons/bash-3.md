@@ -1,6 +1,6 @@
 ---
 title: 同一轮 bash 连续失败两次应先诊断而非重复原命令
-confidence: 0.6
+confidence: 0.55
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

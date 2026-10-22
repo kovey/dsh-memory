@@ -1,360 +1,229 @@
 # dsh-memory
 
-DeepSeek Harness（dsh）的分层记忆插件：**严格分离的项目级 / 全局记忆** + **任务前自动召回** + **任务后持续学习**。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的分层记忆插件：
+**项目级 / 全局记忆严格分离**，任务前自动召回，任务后自动学习，不依赖模型"记得去复盘"。
 
-当前版本 **v0.2.0**（变更见 [`CHANGELOG.md`](CHANGELOG.md)；**跨宿主版本升级见 [`UPGRADE.md`](UPGRADE.md)**；v0.1.0 曾因 patch 缩进错误不可安装，已删除并在 `release/v0.1.0` 分支重建）。
-
-设计文档（唯一决策存档）：[`docs/DESIGN.md`](docs/DESIGN.md) ｜
-发布与安装：[`docs/RELEASE.md`](docs/RELEASE.md) ｜
-代码审查记录：[`docs/REVIEW-2026-09-14.md`](docs/REVIEW-2026-09-14.md)
-
+- 当前版本 **v0.3.2**｜变更 [`CHANGELOG.md`](CHANGELOG.md)｜跨宿主升级 [`UPGRADE.md`](UPGRADE.md)
+- 宿主兼容见[支持矩阵](#支持哪些宿主和端)；Node `^22.19 || >=24`（依赖内置 `node:sqlite`）
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
-- 运行环境：Node `^22.19 || >=24`（依赖内置 `node:sqlite`；构建需要 TypeScript）
-- **兼容性**：dsh `0.2.0-rc.2`（peerDependencies 精确锚定；dsh 升级后需同步升级锚定，
-  否则 rc.2 起加载器会跳过该 bundle 并提示 `dsh plugin allow-version` 可显式豁免）
-- 数据：每个记忆根一个 SQLite 库（`node:sqlite` + FTS5，WAL）；Markdown/JSONL 作为进 Git 的文本视图
-- 隔离：项目记忆只写 `<repo>/.dsh/memory`，全局记忆只写 `~/.dsh/memory`，**跨库写入被硬阻断**
-- 当前进度：**M0–M5 全部完成 + 语义检索 + 蒸馏后台运行器**（见设计文档 §11、§14）
+- 设计存档（唯一决策来源）：[`docs/DESIGN.md`](docs/DESIGN.md)
+
+## 它做什么
+
+| 阶段 | 行为 |
+|---|---|
+| 会话开始 | 注入常驻段：协议段（≤240 tok）+ 索引摘要（≤150）+ L5 偏好（≤200），合计 **≤590 tok** |
+| 每轮第 1 步 | `agent/pre-step` 召回：项目记忆 + 关键词命中的全局教训（**≤600 tok / ≤5 条**，会话内幂等去重） |
+| 干活时 | 11 个工具按需读写（见[工具](#工具)），会话内工具输出有累计预算 |
+| 轮次结束 | 只对"疼痛轮次"做**有界**蒸馏：15s 超时、每会话 3 次、每日 200k tok |
+| 任务收尾 | 导出文本视图 + 记忆根本地 git 提交（**绝不 push**） |
+| 每 5 任务 / 7 天 | 惰性巩固：过期归档、置信度衰减、矛盾检测、晋升提案 |
+
+三条不变量：**项目记忆只写 `<repo>/.dsh/memory`、全局只写 `$DSH_HOME/memory`（默认 `~/.dsh/memory`），跨库写入硬阻断**；
+插件故障不伤宿主（钩子整体 try/catch）；**绝不写 stdout/stderr**（日志只落文件）。
 
 ## 快速开始
 
 ```bash
-# 安装（发布版：GitHub tag —— 打成 tag 后固定版本，推荐）
-dsh plugin --profile nvim-tui add github:kovey/dsh-memory#v0.2.0
-# 尚未打 tag 时先用分支体验（不固定版本）：
-#   dsh plugin --profile nvim-tui add github:kovey/dsh-memory#main
-# 然后把 "dsh-memory" 追加到 ~/.dsh/profiles/nvim-tui/package.json 的 dsh.profile.bundles
-# —— 插件自带的 cordis.patch.yml 会插入 id: memory，profile patch 里不要重复 insert
-# ⚠️ `dsh plugin add` 只是在 profile 目录里执行 pnpm；**只 add 不加 bundles = 装了但不加载**。
+# 发布版（推荐，固定 tag）
+dsh plugin --profile nvim-tui add github:kovey/dsh-memory#v0.3.2
+# 再把 "dsh-memory" 追加到 ~/.dsh/profiles/<profile>/package.json 的 dsh.profile.bundles
+# ⚠️ dsh plugin add 只是在 profile 里执行 pnpm；只 add 不加 bundles = 装了但不加载
 
-# 本地开发（link 到工作区；`tui` 是生产面，脚本会拒绝操作它）
+# 本地开发（link 到工作区；tui 是生产面，脚本默认拒绝操作它）
 ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
-./scripts/install-into-dsh.sh --dry-run && ./scripts/install-into-dsh.sh
-```
-
-重启 profile 后，插件在 `~/.dsh/memory-plugin.log` 打印一行 `memory: ready (…)` 即为就绪；
-模型侧会多出 `memory_save` / `memory_search` / `memory_recall` / `memory_get` / `memory_stats` /
-`memory_forget` / `memory_consolidate` / `memory_sync` / `memory_reindex` / `memory_config` /
-`memory_import` 共 11 个工具（注册失败的工具不会被协议段宣传）。
-
-## 状态（M5：全部里程碑完成）
-
-| 能力 | 状态 |
-|---|---|
-| SQLite schema v2（CJK bigram 索引、WAL、迁移） | ✅ |
-| 文本视图 → DB 引导导入（`lessons/*.md`、`metrics.jsonl`） | ✅ |
-| DB → 文本视图导出（`lessons/*.md`、`MEMORY.md`）与往返一致性 | ✅ |
-| 作用域解析（会话 cwd → 仓库根）与项目/全局守卫 | ✅ |
-| 常驻协议段（可开关）+ 项目索引摘要（per-agent scoped section）+ **L5 偏好层常驻** | ✅ |
-| 11 个工具（含 `memory_config` 会话级降噪、`memory_import` 外部导入） | ✅ |
-| 子代理写保护（写类工具统一拒绝，可由 `routing.subagentWrite` 打开） | ✅ |
-| 门禁三态 `pass / regression / **unknown**`（无数据不再算通过） | ✅ |
-| L4 晋升：草稿 + 人审 `acceptProposal` 安装到 `~/.dsh/skills/<name>/SKILL.md` | ✅ |
-| pending 按「被使用」晋升（recalled ≥3 且成功率 ≥50%） | ✅ |
-| 门禁可用性：未冻结基线时给出冻结命令与数据缺口；可选 `autoFreezeBaseline` | ✅ |
-| 跨进程导出/提交锁、批量遗忘（dry-run 默认）、版本化诊断、健康度行、CI | ✅ |
-| `agent/pre-step` 自动召回（阈值 0.35 / 预算 600 tok / 会话内幂等） | ✅ |
-| 召回记账 `usage`（注入次数、召回后成败归因） | ✅ |
-| 工具 `memory_search` / `memory_get` / `memory_recall` / `memory_stats` / `memory_reindex` | ✅ |
-| 信号采集：工具失败 / 请求失败 / 用户纠正 / 返工（`tools/result`、`agent/request-error`、pre-step） | ✅ |
-| L1 情节落盘：`<repo>/.dsh/memory/sessions/*.jsonl` + `signals` 表（脱敏、90 天保留） | ✅ |
-| 有界自动蒸馏：仅疼痛 turn、固定 flash、3s 超时、每会话/每日预算、`distill` 审计 | ✅ |
-| 写入门控：去重合并（相似度 ≥0.7）、泛泛条目拒收、无证据置信度封顶 0.55 | ✅ |
-| 召回成败归因：安静且有实际工具调用的 turn 记 success，疼痛 turn 记 failure | ✅ |
-| 工具 `memory_save`（默认项目级；全局仅跨项目工具链事实） | ✅ |
-| 衰减与归档：TTL 过期、长期 pending 低价值、置信度半衰期（180 天，单次最多 ×0.5，≥7 天一次） | ✅ |
-| 归档不删除：条目文件移入 `archive/lessons/`，可回查；导出同时维护两份视图 | ✅ |
-| 矛盾检测：同主题 + 相反指令 + 共享对象 → `conflicts` 表；**消解需显式 `resolveConflicts`** | ✅ |
-| 晋升提案：`times_seen ≥3` 且 conf ≥0.9 → `proposals` 表，**人审后**才写技能 | ✅ |
-| 工具 `memory_consolidate` / `memory_forget`；会话创建时惰性触发巩固（每 7 天或每 5 个任务） | ✅ |
-| 技能改造：`auto-retrospective` / `memory-merge` 改走插件工具，保留文件降级路径 | ✅ |
-| git 化：`git init`（全局记忆库已初始化）+ 忽略规则（db/sessions/queue 不入库） | ✅ |
-| 自动提交：`task-end`（默认，30 分钟检查点节流）/ `immediate` / `off`；**提交只含记忆目录**，绝不 push | ✅ |
-| `memory_sync`：commit → fetch → rebase → 冲突按规则合并（lessons 合并 / MEMORY.md 重生成）→ 重建 | ✅ |
-| DB 重建 `memory_reindex(rebuild=true)`：文本视图 → 库（含 episodes + metrics），克隆后指纹一致 | ✅ |
-| 评估门禁：baseline.md 解析（基线任务集）、指标快照冻结、四项指标回归判定 | ✅ |
-| 记忆健康度：召回命中率、召回后成败、pending 积压、蒸馏成本/超时、矛盾与提案 | ✅ |
-| 门禁三态（pass / regression / **unknown**——无数据不再算通过） | ✅ |
-| 趋势窗口对比（近 N 天 vs 前 N 天）+ `memory_stats({ setBaseline: true, baselineReason: "<谁要求、验证了什么>" })` | ✅ |
-| 可选语义召回：OpenAI 兼容 /embeddings + 按内容哈希增量缓存 + 与词法打分混合（**默认关**） | ✅ |
-| 蒸馏运行器可选 `jobs`：交给 `ctx.jobs`，轮次立即结束，作业可见/可取消 | ✅ |
-| 实机验证：真实 dsh 宿主中加载、引导导入 18 条、turn 1 自动召回 4 条（533 tok） | ✅ |
-| 质量工序：矛盾/衰减/归档/晋升（M3） | ⏳ |
-| git 化同步与 `--rebuild`（M4） | ⏳ |
-| baseline 回归门禁（M5） | ⏳ |
-
-## 安装（三端挂载）
-
-插件通过 **bundle 层**挂载：profile 的 `dsh.profile.bundles` 列表 + 插件自带的
-`cordis.patch.yml`（`id: memory`）。`insert` 是纯追加语义，**profile 自己的
-`cordis.patch.yml` 不得再 insert 同 id**（loader 对重复 id 直接抛错）。
-
-```bash
-# 1) 让三个 profile 都能解析到本包（共享的 profiles/node_modules）
-ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
-
-# 2) 把 dsh-memory 加进各 profile 的 bundle 列表（幂等，自动备份）
 ./scripts/install-into-dsh.sh --dry-run   # 先看要改什么
 ./scripts/install-into-dsh.sh             # nvim-tui / web / headless
 ```
 
-覆盖配置：在 profile 的 `cordis.patch.yml` 里按 id 覆盖（不要重复 insert）：
+重启 profile 后，`~/.dsh/memory-plugin.log` 出现 `memory: ready (…)` 即为就绪。
+覆盖配置写在 profile 的 `cordis.patch.yml`，**按 id 覆盖、不要重复 `insert`**（loader 对重复 id 直接抛错）：
 
 ```yaml
-- config:
-    - id: memory
-      config:
-        prompt:
-          protocol: { enabled: false }   # 关掉常驻协议段：零 token
-        recall:
-          autoInject: false              # 关掉自动召回：完全被动
-          budgetTokens: 800
-        learn:
-          autoDistill: false
+- id: memory
+  config:
+    recall: { autoInject: false }          # 只关自动召回
+    prompt: { protocol: { enabled: false } }  # 关掉常驻协议段
 ```
+
+> `dsh --patch <file>` 的 overlay 实测**不作用于**本插件 config（六次真机运行 ready 行始终是默认值）——调参请用 profile patch。
+
+## 支持哪些宿主和端
+
+**端无关。** 插件只注入 `ctx.tools` 与 `ctx.systemPrompt`、只订阅核心 agent 事件，没有任何 surface 专用代码，
+所以 nvim-tui / web / headless 同构可用。官方桌面端就是 web 应用的 Electron 壳，同样零适配——
+但它有**独立的 `$DSH_HOME/profiles/desktop`**，插件要单独装进那个 profile（CLI 的 `web`/`tui` profile 不共享）。
+
+**真正会挡住它的是宿主内核版本**：5 个 `@deepseek-ai/dsh-*` peer 不匹配时，加载器会**静默跳过整条 bundle**
+（只写日志，记忆功能无声消失）。
+
+| 宿主 dsh | 该用的 dsh-memory |
+|---|---|
+| `0.2.0-rc.2` / `0.2.1-rc.x` / `0.2.1` | **v0.3.2**（范围锚定 `>=0.2.0-rc.2 <0.2.2`） |
+| `0.1.7-rc.2` | v0.2.1 |
+| `0.1.7-rc.1` | v0.2.0 |
+| `0.2.0-rc.1` | v0.2.2 |
+| `≥0.2.2` | 无（需要下一次适配） |
+
+被跳过时日志/启动 stderr 会出现 `Plugin dsh-memory@… is incompatible with dsh …`。
+`dsh plugin allow-version` 能对精确 `插件@版本 × 内核` 显式豁免，但它只跳门禁、**不解决 API 差异**，跨大版本别用。
+
+## 记忆放在哪
+
+| 层 | 位置 | 生命周期 |
+|---|---|---|
+| L1 情节 | `<root>/sessions/*.jsonl` + `signals` 表 | 90 天、脱敏、**从不注入** |
+| L2 项目记忆 | `<repo>/.dsh/memory/lessons/*.md` | 长期，每任务必召回 |
+| L3 全局记忆 | `~/.dsh/memory/lessons/*.md` | 长期，关键词命中才召回 |
+| L4 技能 | 草稿 `<root>/proposals/<id>.SKILL.md` → 人审后装到 `~/.dsh/skills/<name>/SKILL.md` | 人审闸门 |
+| L5 偏好 | `<root>/profile/*.md` | 常驻提示词（≤200 tok） |
+
+`<root>`（项目根或全局根）内固定这些内容：
+
+```
+lessons/*.md       记录，唯一真源（进 git）
+MEMORY.md          人读索引，自动重生成（勿手改结构）
+metrics.jsonl      任务指标（进 git）
+profile/*.md       L5 偏好（进 git）
+baseline.md        评估基线任务集（人所有，插件只读）
+sessions/  archive/  proposals/    情节 / 归档 / 晋升草稿
+memory.db(+wal/shm)  派生索引，不入库（.gitignore 已含）
+```
+
+全局根默认 `~/.dsh/memory`，可用 `DSH_MEMORY_HOME` 重定向（测试用）；项目根由会话 `header.cwd`
+经 git 解析得到（**不看进程 cwd**，同一仓库的 linked worktree 共享一个记忆根）。
 
 ## 工具
 
-| 工具 | 说明 |
+| 工具 | 用途 |
 |---|---|
-| `memory_search` | 检索项目 → 全局记忆，返回标题/元数据/摘要（不返回全文） |
-| `memory_get` | 按 id 读取一条记忆的完整正文 |
-| `memory_stats` | 记忆库健康度：条目数、pending、过期、召回次数、任务指标 |
-| `memory_save` | 写入一条长期经验：默认写项目级；同一门控负责去重/合并/拒收 |
-| `memory_recall` | 一次取回任务召回包（项目 + 命中关键词的全局教训，已排序并按预算裁剪） |
-| `memory_sync` | 与远端同步：本地提交 → fetch/rebase → 冲突按规则合并 → 从文本视图重建库（push 仅在显式 `push=true` 时发生） |
-| `memory_consolidate` | 记忆质量巩固：过期归档 / 衰减 / 矛盾检测与消解 / 晋升提案（默认 dry-run） |
-| `memory_forget` | 退役一条记忆（归档保留文件，不物理删除） |
-| `memory_config` | 会话级降噪（`autoRecall: false`），不落盘 |
-| `memory_import` | 把外部 lesson 文件导入项目/全局库 |
-| `memory_reindex` | 从文本视图重建派生索引；`rebuild=true` 时做完整重建（删除磁盘上已不存在的记录、重导 episodes 与指标） |
+| `memory_search` / `memory_get` | 检索（标题+摘要）/ 按 id 读全文 |
+| `memory_recall` | 一次取回召回包（已排序、按预算裁剪） |
+| `memory_save` | 写长期经验（默认项目级；同一门控负责去重/合并/拒收） |
+| `memory_stats` | 健康度 + 评估门禁 + 趋势 |
+| `memory_consolidate` / `memory_forget` | 巩固（默认 dry-run）/ 退役（归档不删） |
+| `memory_sync` | 提交 → fetch/rebase → 冲突按规则合并 → 重建（`push=true` 才推） |
+| `memory_reindex` | 从文本视图重建索引；`rebuild=true` 做全量重建 |
+| `memory_import` / `memory_config` | 导入外部 lesson / 会话级降噪（不落盘） |
 
-## 蒸馏用哪个模型？——默认跟随会话
+注册失败的工具不会出现在常驻协议段里——能力由**实际注册结果**推导，不是"打算注册什么"。
 
-不需要额外配置：`learn.distillModel` 留空（默认）时，蒸馏调用**直接沿用当前会话自己的
-provider/model**（`agent.options`）。想固定用便宜模型时再显式写死：
+## 常用配置
 
-```yaml
-- config:
-    - id: memory
-      config:
-        learn:
-          distillModel: { provider: deepseek-official, model: deepseek-v4-flash }
-```
+默认值全在 [`cordis.patch.yml`](cordis.patch.yml)，profile patch 里只写要改的：
 
-真机日志会标明实际用的 route，审计表也记录它：
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `recall.autoInject` / `budgetTokens` / `maxItems` / `minScore` | `true` / 600 / 5 / 0.35 | 每轮自动召回 |
+| `recall.sessionToolBudgetTokens` | 20000 | 会话内工具输出累计上限 |
+| `routing.subagentWrite` | `false` | 子代理默认不能写记忆（写类工具统一拒绝） |
+| `learn.collectSignals` | `true` | 信号采集：失败命令 / 请求失败 / 用户纠正 / 返工 |
+| `learn.autoDistill` / `distillTimeoutMs` / `maxDistillPerSession` | `true` / 15000 / 3 | 疼痛轮次蒸馏 |
+| `learn.distillRunner` | `inline` | `inline` 任何端都成立；`jobs` 让轮次立即结束（长驻会话） |
+| `learn.distillModel` | 空 | 留空 = 沿用当前会话自己的 provider/model |
+| `learn.exitCodeSignals` | `strong` | `strong`=exit≥2 与错误标记；`all`=任何非零；`off` |
+| `episodic.retentionDays` / `captureUserText` | 90 / `redacted` | 情节保留与脱敏 |
+| `consolidate.everyNTasks` / `everyDays` | 5 / 7 | 惰性巩固触发频率 |
+| `eval.autoFreezeBaseline` | `false` | 基线默认人工冻结（见[评估门禁](#评估门禁)） |
+| `git.autoCommit` / `checkpointMinutes` | `task-end` / 30 | `off` / `task-end` / `immediate`；插件**永不 push**（`git.autoPush` 是字面量 `false`，没有开关） |
+| `sqlite.journalMode` / `maxOpenRoots` | `wal` / 4 | 派生库 |
+| `semantic.enabled` | `false` | 语义召回（下一节） |
 
-```
-memory: distilled 1 new + 0 merged record(s) from turn 7 via deepseek-official/deepseek-v4-flash
-```
+完整键表与取值范围以 [`src/config.ts`](src/config.ts) 的 `DEFAULT_CONFIG` 为准。
 
-## 本地语义召回（已实测，推荐做法）
+## 语义召回（可选，默认关）
 
-本机已装好 Ollama + bge-m3（1024 维，1.2GB），插件的 `remote` provider 直接可用：
-
-```bash
-brew install ollama
-brew services start ollama      # 或 ollama serve &
-ollama pull bge-m3
-```
-
-在 profile 的 `cordis.patch.yml` 里（**顶层 `- id: <entry>` + `config:` 形状**）：
+词法检索（FTS5 + CJK bigram）零成本、离线可用，是默认路径；**只在词法召回不足时**才调用 embedding，
+失败静默降级为词法，向量按内容哈希缓存、未变动的记录不重复嵌入。默认关是因为它是除蒸馏外唯一会花钱的路径。
 
 ```yaml
 - id: memory
   config:
     semantic:
       enabled: true
-      baseUrl: 'http://127.0.0.1:11434/v1'
+      baseUrl: 'http://127.0.0.1:11434/v1'   # OpenAI 兼容 /embeddings；也可用 baseUrlEnv
       model: 'bge-m3'
-      timeoutMs: 8000      # 冷启动要重新加载模型（约 2.8s），默认 1.5s 会中断自己
-      weight: 0.3
-      minLexicalHits: 3    # 词法召回 ≥3 条时不再调用（不花冤枉时间）
-      minSimilarity: 0.5
-      maxAdditions: 2      # 每次最多补几条纯语义命中，防止注入 token 膨胀
+      timeoutMs: 8000        # 冷启动要重载模型（~2.8s），默认 1.5s 会把自己中断
+      minLexicalHits: 3      # 词法已召回 ≥3 条时不再调用
+      maxAdditions: 2        # 每次最多补几条纯语义命中
 ```
 
-**实测（19 条真实教训，词法 vs 混合）**：
+19 条真实教训上的对照（复跑需先 `npm run build`：`node scripts/eval-semantic.ts --root ~/.dsh/memory --minLex 3 --weight 0.3 --minSim 0.5 --maxAdd 2`）：
 
 | 指标 | 词法 | 混合 |
 |---|---|---|
 | Top-1 命中 | 6/9 | 6/9 |
 | **Top-3 命中** | 8/9 | **9/9** |
 | **改写问法 Top-3** | 5/6 | **6/6** |
-| 原词问法 Top-3 | 3/3 | 3/3 |
 | 平均耗时 | 0ms | +33ms |
 | 注入 token | 2670 | 3606 (+35%) |
 
-结论：**它救的是"换了说法就搜不到"那类查询**（本次是「家目录写不进去」→ 命中「写入可能被沙箱拒绝」），
-对原词查询无影响；代价是 +33ms 与约 +35% 注入 token。复跑实验：
+结论：它救的是"换个说法就搜不到"那类查询，对原词查询无影响。
+前提是端点**真有** embedding 模型——本机网关没有该通道（`text-embedding-3-small` / `bge-m3` 等全部
+`model_not_found`），所以默认配置下无法真机跑通；接上本地 Ollama 或独立端点后，用
+`memory_reindex({ embeddings: true })` 做一次全量回填，`memory_stats` 会显示索引量与最近错误。
 
-```bash
-node scripts/eval-semantic.ts --minLex 3 --weight 0.3 --minSim 0.5 --maxAdd 2
+## 上下文会不会被撑爆
+
+不会。三条入口都有硬上限，与库大小无关：
+
+| 入口 | 上限 |
+|---|---|
+| 常驻段 | 协议 240 + 索引 150 + L5 200 = **≤590 tok** |
+| 自动召回 | **600 tok / ≤5 条**，同会话幂等去重 |
+| 工具输出 | 单次 `memory_recall` ≤4000 tok；**会话累计 20k** 后明确拒答并说明如何调整 |
+
+实测 55 次注入：中位 234 tok、**最大 592**。增长的只有存储，且都有保留策略
+（情节 90 天、召回记账 180 天、换模型后的旧向量 30 天宽限；记录只归档不删除）。
+
+## 评估门禁
+
+```js
+memory_stats({ windowDays: 30 })     // 健康度 + 门禁判定：pass / regression / unknown
+memory_stats({ setBaseline: true, baselineReason: "用户要求；v0.3.2 发布后 7 天无回归" })
 ```
 
-真机日志会标明语义贡献了几条：
+对比四项指标：成功率↑、耗时↓、打扰↓、返工↓（容差：成功率 ±0.05、耗时 ±15%、打扰/返工 ±0.5）。
+**没有基线时判定只能是 `unknown`**——冻结基线是人工步骤：需要理由，子代理调用会被拒。
+`baseline.md` 里的基线任务集属于其他仓库，插件无法自动重放，只会列出清单供人工回归；
+它能自动判定的是任务日志实际承载的指标。
 
-```
-memory: injected 2 record(s) (~182 tok) [semantic +2, embedded 19] turn 10 step 1 → zh-960299aec0, shell
-```
+## 排障
 
-## 语义召回实现（可选，默认关）
+| 现象 | 先看什么 |
+|---|---|
+| 完全没生效 | `~/.dsh/memory-plugin.log` 有没有 `memory: ready`；没有多半是 bundle 被跳过（peer 版本，见[支持矩阵](#支持哪些宿主和端)） |
+| 工具报 `store unavailable` | Node 是否带 `node:sqlite`（`node -p "process.versions.node"`，需 ≥22.19 或 ≥24 的构建） |
+| 召回总是空 | 该作用域有没有 `active` 记录；`minScore` 是否过高；`memory_config({})` 看会话覆盖 |
+| 蒸馏没发生 | 该轮是否够"疼痛"（`minSignals`）、每会话/每日预算是否已用尽 |
+| 语义检索没贡献 | `memory_stats` 的索引行；多半是没配端点或没回填（`memory_reindex({ embeddings: true })`） |
 
-词法检索（FTS5 + CJK bigram）零成本、离线可用，是默认路径。当它召回不足时，可以叠加
-embedding 语义召回：
-
-```yaml
-- config:
-    - id: memory
-      config:
-        semantic:
-          enabled: true
-          baseUrl: 'https://api.example.com/v1'   # OpenAI 兼容 /embeddings
-          model: 'text-embedding-3-small'
-          apiKeyEnv: 'EMBEDDING_API_KEY'
-          weight: 0.5            # 0=纯词法，1=纯语义
-          minLexicalHits: 3      # 词法已召回 ≥N 条时不再调 embedding（不花冤枉钱）
-          minSimilarity: 0.35
-```
-
-端点也可以用环境变量间接给出（例如沿用会话同一个网关的地址）：
-
-```yaml
-        semantic:
-          enabled: true
-          baseUrlEnv: 'DEEPSEEK_BASE_URL'   # 或直接写 baseUrl
-          model: 'bge-m3'
-          apiKeyEnv: 'DEEPSEEK_API_KEY'
-```
-
-> ⚠️ 前提是那里**真的有 embedding 模型**。实测当前会话用的网关
-> `ai.wudi360.../v1` 没有任何 embedding 通道（`text-embedding-3-small` / `bge-m3` /
-> `embedding-2` / `gemini-embedding-001` 全部返回 `model_not_found`），所以语义召回
-> 在本机还无法真机跑通——需要另接一个 embedding 端点（或本地模型）。
-
-行为保证：仅当词法召回不足时才调用；单次调用有超时（默认 1.5s），失败**静默降级为词法**；
-向量按内容哈希缓存，未变动的教训永不重复嵌入；作用域内无记录时直接跳过。
-用 `memory_reindex({ embeddings: true })` 做一次全量回填，`memory_stats` 会显示索引与最近错误。
-
-## 蒸馏放哪跑：inline / jobs
-
-| 模式 | 行为 | 适用 |
-|---|---|---|
-| `inline`（出厂默认） | 在 `agent/turn-stopping` 里有界 await（默认 15s），轮次结束会等它 | 任何 surface 都成立 |
-| `jobs` | 交给 `ctx.jobs`，**轮次 4ms 就结束**，作业在作业列表可见 | 长驻交互会话（nvim-tui / web） |
-
-一次性 surface（`dsh --profile headless "任务"`、e2e）里 agent 在轮次结束即销毁、**作业会被取消**——
-所以插件带**补蒸馏**：`signals` 里没有对应 `distill` 审计行的组，会在下一个会话的首轮结束时
-用 inline 补跑（每作用域每作用域每进程一次，年龄 > 一次蒸馏超时 且轮次已结束才捡）。实测：
-
-```
-会话1: turn 18 distillation handed to job memory-distill-1 → job cancelled (owner disposed)
-会话2: recovered 1 undistilled signal(s) from session … turn 18 → created
-       （turn 18 | in 300 / out 216 | created 1）
-```
-
-即**作业被取消只损失一轮延迟，不丢教训**；崩溃/重启中途丢失同理。
-
-## 配置调参的可靠方式
-
-写进 profile 的 `cordis.patch.yml`（按 id 覆盖，不重复 insert）：
-
-```yaml
-- config:
-    - id: memory
-      config:
-        learn:
-          distillTimeoutMs: 15000   # 实测一次 flash 蒸馏约 4.2s，别设太小
-          distillRunner: jobs       # 不想让轮次等待就交给 ctx.jobs
-        recall:
-          budgetTokens: 800
-```
-
-> 实测注意：`dsh --patch <file>` 的 overlay **没有**作用到本插件的 config（六次真机运行的 ready 行始终是
-> 默认值）。调参请用上面的 profile patch。
-
-## 评估与门禁
-
-```
-memory_stats({ windowDays: 30 })                  # 现状 + 健康度 + 门禁判定 + 趋势
-memory_stats({ setBaseline: true, baselineReason: "用户要求；v0.4 发布后 7 天无回归" })  # 冻结基线（需理由 + 顶层会话，子代理被拒）
-```
-
-门禁对比四项指标（成功率↑、耗时↓、打扰↓、返工↓），带容差（成功率 ±0.05、耗时 ±15%、打扰/返工 ±0.5），
-退化时报告 `REGRESSION` 并列出退化项。`baseline.md` 是**人所有、插件只读**的文档，
-快照存在数据库的 `baseline_snapshots` 表里。
-
-> 说明：基线任务集是**其他仓库的真实任务**，插件无法自动重放，因此它会列出任务清单供人工回归；
-> 它能自动判定的是任务日志实际承载的指标。
-
-## 跑真机测试（推荐方式）
-
-一次性任务 + 隔离记忆根，既验证完整链路，又不碰你的真实记忆：
-
-```bash
-# 1) 隔离 profile（base + headless + 本插件）
-mkdir -p ~/.dsh/profiles/memlive
-cat > ~/.dsh/profiles/memlive/package.json <<'JSON'
-{ "name": "dsh-profile-memlive", "private": true, "dependencies": {},
-  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless", "dsh-memory"], "patchReload": "startup" } } }
-JSON
-printf '[]\n' > ~/.dsh/profiles/memlive/cordis.patch.yml
-
-# 2) 隔离记忆根（用真实语料播种，便于验证召回）
-mkdir -p /tmp/dsh-live-mem && cp -R ~/.dsh/memory/lessons /tmp/dsh-live-mem/lessons
-
-# 3) 真实模型跑一次性任务
-DSH_MEMORY_HOME=/tmp/dsh-live-mem dsh --profile memlive \
-  "调用 memory_search 搜索 'pnpm install 无 TTY'，然后调用 memory_stats 并汇报记录数"
-
-# 4) 看证据
-tail -20 ~/.dsh/memory-plugin.log
-```
-
-`DSH_MEMORY_HOME` 会把全局记忆根重定向到临时目录（项目级作用域由会话 cwd 决定，不受影响）。
+日志 `~/.dsh/memory-plugin.log` 超过 5 MB 自动轮转为 `.log.1`。插件从不写 stdout：
+TUI 拥有 stdout，web server 有自己的 console。
 
 ## 开发
 
 ```bash
-npm install           # peer @deepseek-ai/* 已在 devDependencies（干净 clone 也能构建）
-npm run build         # tsc → dist/（dist/ 入库，github: 安装免构建）
-npm test              # 构建后 node --test（Node 原生 TS 执行测试；v0.2.0 为 178 例）
-npm run typecheck     # 只做类型检查
+npm install        # peer @deepseek-ai/* 已在 devDependencies（干净 clone 也能构建）
+npm run build      # tsc → dist/（dist/ 入库，github: 安装免构建）
+npm test           # 构建后 node --test 跑全量（不写死用例数——写死的数字会过期）
+npm run typecheck  # 只做类型检查
 ```
 
-测试全部在仓库内 `.tmp-tests/` 运行，并把全局记忆根重定向到临时目录，**不会触碰
-真实的 `~/.dsh/memory`**。
+测试全部在仓库内 `.tmp-tests/` 运行，并把全局记忆根重定向到临时目录，**不会触碰真实的 `~/.dsh/memory`**。
+发布与安装链路（dev 链 vs 发布链、`tui` 为何拒绝 link）见 [`docs/RELEASE.md`](docs/RELEASE.md)。
 
-## 记忆会膨胀吗？
+真机验证（隔离 profile + 隔离记忆根，不碰真实记忆）：
 
-**上下文不会——它是 O(1) 的；会增长的是存储，且有保留策略。**
-
-进上下文的三条路径都有硬上限，与库大小无关：
-
-| 路径 | 上限 | 说明 |
-|---|---|---|
-| ① 常驻段（每次装配） | 协议 240 + 索引 150 + L5 200 = **≤590 tok** | 索引只放条数与最多 12 条标题 |
-| ② 自动召回（每轮） | **600 tok / ≤5 条**，同会话幂等去重 | 不做"越多越全" |
-| ③ 工具按需 | 单次：`memory_recall` ≤4000 tok、`maxItems` ≤20；**会话累计 `recall.sessionToolBudgetTokens`（默认 20k）** | 防止模型循环调用把上下文一点点填满 |
-| L1 情节 / signals | **从不注入** | 只在工具显式读取时出现 |
-
-实测（真实日志 55 次注入）：最小 93 / 中位 234 / **最大 592 tok**。库从 27 条涨到 27,000 条，注入量不变。
-
-存储侧的增长与保留策略：
-
-| 增长项 | 策略 |
-|---|---|
-| `signals` + 情节文件 | 保留 90 天（`episodic.retentionDays`）；**未蒸馏的欠账不会被清**（14 天恢复窗口） |
-| `usage`（召回记账） | 保留 180 天（`consolidate.usageRetentionDays`）；聚合信号已折算进记录，未归因的行永不删 |
-| 旧 embedding 模型向量 | 换模型后保留 30 天宽限（`semantic.foreignModelGraceDays`），之后清除 |
-| 记录（lessons） | **只增不减**（归档≠删除，设计取舍）；速率有界：门控合并 + 衰减 + 蒸馏日预算 200k tok / 每会话 3 次 |
-| `tasks` / `distill` / `proposals` | 每会话或每次尝试一行，量级极小 |
-
-清理动作挂在**惰性巩固**里（每 7 天或每 5 个任务一次），日志会打印本次清理量：
-
-```
-memory: consolidation (first-run) on global — archived 0, decayed 0, conflicts 0, proposals 1,
-        pruned 0 episode file(s) / 0 signal / 0 usage / 0 vector row(s)
+```bash
+mkdir -p ~/.dsh/profiles/memlive && printf '[]\n' > ~/.dsh/profiles/memlive/cordis.patch.yml
+cat > ~/.dsh/profiles/memlive/package.json <<'JSON'
+{ "name": "dsh-profile-memlive", "private": true, "dependencies": {},
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-headless", "dsh-memory"] } } }
+JSON
+cp -R ~/.dsh/memory/lessons /tmp/dsh-live-mem/lessons      # 用真实语料播种，便于验证召回
+DSH_MEMORY_HOME=/tmp/dsh-live-mem dsh --profile memlive "调用 memory_stats 并汇报记录数"
+tail -20 ~/.dsh/memory-plugin.log                          # 期望：memory: ready + 注入行
 ```
 
 ## 文档
@@ -363,10 +232,5 @@ memory: consolidation (first-run) on global — archived 0, decayed 0, conflicts
 |---|---|
 | [`docs/DESIGN.md`](docs/DESIGN.md) | 设计存档：分层模型、双库隔离、钩子方案、里程碑与实机验证记录 |
 | [`docs/RELEASE.md`](docs/RELEASE.md) | dev 链路 vs 发布链路、发布前检查、装进 profile 的步骤与回退 |
-| [`docs/REVIEW-2026-09-14.md`](docs/REVIEW-2026-09-14.md) | 一次全面代码审查：59 条发现、修复清单与验证方式 |
-| [`CHANGELOG.md`](CHANGELOG.md) | 版本变更（Keep a Changelog 格式） |
-
-## 日志
-
-`~/.dsh/memory-plugin.log`（插件绝不写 stdout：TUI 拥有 stdout，web 端有自己的
-server 日志）。日志超过 5 MB 自动轮转为 `.log.1`。
+| [`docs/REVIEW-2026-09-14.md`](docs/REVIEW-2026-09-14.md) | 一次全面代码审查：59 条发现与修复清单 |
+| [`CHANGELOG.md`](CHANGELOG.md) / [`UPGRADE.md`](UPGRADE.md) | 版本变更（Keep a Changelog）/ 跨宿主版本的升级指引 |

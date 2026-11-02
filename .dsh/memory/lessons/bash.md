@@ -1,6 +1,6 @@
 ---
 title: bash 因权限或路径不存在报错时不要在同一轮内连续重试
-confidence: 0.55
+confidence: 0.52
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

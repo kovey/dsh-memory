@@ -1,6 +1,6 @@
 ---
 title: 查看项目提交历史时，需过滤 dsh-memory 的 turn end 提交，以免干扰判断
-confidence: 0.53
+confidence: 0.5
 expires: permanent
 times_seen: 1
 updated: 2026-10-22

@@ -1,6 +1,6 @@
 ---
 title: 定位 @deepseek-ai/dsh-tools 包文件时不要假设 dist/ 或 lib/*.d.ts 路径
-confidence: 0.55
+confidence: 0.52
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

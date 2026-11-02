@@ -1,6 +1,6 @@
 ---
 title: bash 报 no such file or directory 时先用 test -f / ls 确认路径，再重发命令
-confidence: 0.55
+confidence: 0.52
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

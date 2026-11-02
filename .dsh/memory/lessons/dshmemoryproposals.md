@@ -1,6 +1,6 @@
 ---
 title: 访问 ~/.dsh/memory/proposals/ 前先确认路径真实存在
-confidence: 0.55
+confidence: 0.52
 expires: permanent
 times_seen: 1
 updated: 2026-09-30

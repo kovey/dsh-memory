@@ -1,12 +1,14 @@
 ---
 title: 同一轮内 bash 连续失败 2 次后应停止重试，先定位根因再改命令
-confidence: 0.52
+confidence: 0.42
 expires: permanent
 times_seen: 1
 updated: 2026-09-30
 tags: rework, retry, debugging, bash
 status: pending
 origin: distilled
+times_recalled: 1
+fail_after_recall: 1
 created: 2026-09-30
 evidence: rework×1, test-failure×1, tool-failure×1
 ---

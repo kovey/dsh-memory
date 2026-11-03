@@ -7,6 +7,7 @@ updated: 2026-11-03
 tags: 记忆注入, token预算, recency, 分类配额, 用户纠正
 status: pending
 origin: distilled
+times_recalled: 1
 created: 2026-11-03
 evidence: rework×1, tool-failure×2, user-correction×1
 ---

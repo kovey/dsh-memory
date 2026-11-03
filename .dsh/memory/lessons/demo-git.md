@@ -6,6 +6,7 @@ times_seen: 1
 updated: 2026-11-03
 tags: dsh-memory, test-isolation, project-memory-root
 origin: user
+times_recalled: 1
 created: 2026-11-03
 evidence: self-report×1
 ---

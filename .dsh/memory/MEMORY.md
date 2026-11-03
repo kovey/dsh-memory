@@ -1,10 +1,13 @@
 # MEMORY — 项目记忆 (/Users/zhangyong/workspace/deepseek/dsh-memory)
 
 > 本文件由 dsh-memory 插件自动生成（文本视图），勿手工编辑结构；内容真源为同目录 `memory.db`。
-> 生成时间: 2026-11-03T03:18:05.295Z · 条目: 21 (active 1 / pending 20 / archived 0)
+> 生成时间: 2026-11-03T03:30:03.817Z · 条目: 24 (active 1 / pending 23 / archived 0)
 
 | 标题 | 置信度 | 复现 | 到期 | 文件 |
 |---|---|---|---|---|
+| 裸 assert 失败只抛 AssertionError，缺少实际值导致无法定位 | 0.60 | 1 | permanent | [assert-assertionerror](lessons/assert-assertionerror.md) |
+| 用 heredoc/stdin 跑 Python 断言脚本时，报错只显示 <stdin> 行号，难以定位 | 0.60 | 1 | permanent | [heredocstdin-python-stdin](lessons/heredocstdin-python-stdin.md) |
+| pin 语义测试失败而迁移测试通过时，先查 pin 的新鲜度/过期分支，而不是 schema 迁移 | 0.53 | 1 | permanent | [pin-pin-schema](lessons/pin-pin-schema.md) |
 | 调整记忆注入预算时不要只按 recency 竞争，应按类别设保底/封顶 | 0.60 | 1 | permanent | [recency](lessons/recency.md) |
 | 同一轮 bash 超时后不要原样重试，缩小范围或换工具，连续 2 次失败即停止 | 0.60 | 1 | permanent | [bash-2-2](lessons/bash-2-2.md) |
 | 查看大源码文件时避免整文件打印导致 bash 超时，改用 grep/sed 限定输出范围 | 0.60 | 1 | permanent | [bash-grepsed](lessons/bash-grepsed.md) |

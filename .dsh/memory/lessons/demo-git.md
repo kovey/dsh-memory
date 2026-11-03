@@ -1,12 +1,13 @@
 ---
 title: 在仓库内跑临时 demo 会写进真实项目记忆根，必须用带 .git 的临时目录隔离
-confidence: 0.85
+confidence: 0.79
 expires: permanent
 times_seen: 1
 updated: 2026-11-03
 tags: dsh-memory, test-isolation, project-memory-root
 origin: user
-times_recalled: 1
+times_recalled: 2
+fail_after_recall: 1
 created: 2026-11-03
 evidence: self-report×1
 ---

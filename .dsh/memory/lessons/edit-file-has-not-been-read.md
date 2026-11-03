@@ -1,12 +1,14 @@
 ---
 title: 编辑文件前必须先读取，否则 edit 会报 file has not been read
-confidence: 0.6
+confidence: 0.56
 expires: permanent
 times_seen: 1
 updated: 2026-11-03
 tags: edit, read, file-not-read, tool-failure
 status: pending
 origin: distilled
+times_recalled: 1
+fail_after_recall: 1
 created: 2026-11-03
 evidence: rework×2, tool-failure×3
 ---

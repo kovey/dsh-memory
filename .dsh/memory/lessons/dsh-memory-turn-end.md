@@ -6,7 +6,6 @@ times_seen: 1
 updated: 2026-10-22
 tags: git-log, dsh-memory, pathspec
 status: pending
-origin: distilled
 created: 2026-10-22
 evidence: tool-failure×1
 ---

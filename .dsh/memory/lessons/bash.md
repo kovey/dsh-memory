@@ -6,7 +6,6 @@ times_seen: 1
 updated: 2026-09-30
 tags: bash, 重试, EPERM, 路径不存在, rework
 status: pending
-origin: distilled
 created: 2026-09-30
 evidence: rework×1, tool-failure×3, user-correction×1
 ---

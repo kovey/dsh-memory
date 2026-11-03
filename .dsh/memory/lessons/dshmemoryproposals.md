@@ -6,7 +6,6 @@ times_seen: 1
 updated: 2026-09-30
 tags: bash, ls, 目录不存在, dsh-memory
 status: pending
-origin: distilled
 created: 2026-09-30
 evidence: rework×1, tool-failure×2
 ---

@@ -6,7 +6,6 @@ times_seen: 1
 updated: 2026-09-30
 tags: rework, retry, debugging, bash
 status: pending
-origin: distilled
 times_recalled: 1
 fail_after_recall: 1
 created: 2026-09-30

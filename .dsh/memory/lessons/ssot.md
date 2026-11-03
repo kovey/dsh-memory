@@ -6,7 +6,6 @@ times_seen: 1
 updated: 2026-11-03
 tags: SSOT, 一致性, 设计文档, SQLite, 导出
 status: pending
-origin: distilled
 created: 2026-11-03
 evidence: tool-failure×1, user-correction×1
 ---

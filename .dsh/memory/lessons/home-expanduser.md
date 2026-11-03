@@ -6,7 +6,6 @@ times_seen: 1
 updated: 2026-09-30
 tags: bash, 路径展开, tilde, python, PermissionError
 status: pending
-origin: distilled
 created: 2026-09-30
 evidence: rework×1, tool-failure×2
 ---

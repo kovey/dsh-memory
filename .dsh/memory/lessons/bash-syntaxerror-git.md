@@ -1,12 +1,13 @@
 ---
 title: bash 复合命令报 syntaxerror 时，应拆成单条 git 命令重跑验证
-confidence: 0.57
+confidence: 0.5
 expires: permanent
 times_seen: 1
 updated: 2026-10-22
 tags: bash, syntaxerror, git-log, quoting
 status: pending
-origin: distilled
+times_recalled: 1
+fail_after_recall: 1
 created: 2026-10-22
 evidence: tool-failure×1
 ---

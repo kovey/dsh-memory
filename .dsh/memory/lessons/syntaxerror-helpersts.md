@@ -6,7 +6,6 @@ times_seen: 1
 updated: 2026-09-30
 tags: test-failure, esm, named-export, SyntaxError, vitest
 status: pending
-origin: distilled
 created: 2026-09-30
 evidence: rework×1, test-failure×1, tool-failure×1
 ---

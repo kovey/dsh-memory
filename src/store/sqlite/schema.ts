@@ -7,7 +7,7 @@
  * degrades to a plain-table index when the SQLite build lacks it.
  */
 
-export const SCHEMA_VERSION = 5
+export const SCHEMA_VERSION = 6
 
 export const CORE_TABLES_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS records (
   fail_after_recall INTEGER NOT NULL DEFAULT 0,
   superseded_by TEXT,
   status TEXT NOT NULL DEFAULT 'active',
+  -- v6: pinned records never decay or archive on their own (DESIGN §8).
+  pinned INTEGER NOT NULL DEFAULT 0,
   origin TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,

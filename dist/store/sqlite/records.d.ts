@@ -35,6 +35,7 @@ export declare function materialize(draft: {
     origin?: string;
     source?: MemoryRecord['source'];
     status?: RecordStatus;
+    pinned?: boolean;
 }, now?: string): MemoryRecord;
 export declare function clamp01(value: number): number;
 export declare function rowToRecord(row: Record<string, unknown> | undefined): MemoryRecord | undefined;

@@ -110,8 +110,10 @@ export function statsTool(deps: StatsToolDeps) {
                 const recall = recallStats(store.db)
                 const metrics = summarizeMetrics(store.db)
                 const episodes = episodeDigest(store.db)
+                const pinnedRow = store.db.prepare('SELECT COUNT(*) AS n FROM records WHERE pinned = 1').get()
+                const pinnedCount = typeof pinnedRow?.['n'] === 'number' ? pinnedRow['n'] : 0
                 lines.push(
-                    `  records: ${counts.total} (active ${counts.active} / pending ${counts.pending} / archived ${counts.archived}) · expired ${counts.expired} · superseded ${counts.superseded}`,
+                    `  records: ${counts.total} (active ${counts.active} / pending ${counts.pending} / archived ${counts.archived}) · expired ${counts.expired} · superseded ${counts.superseded}${pinnedCount > 0 ? ` · pinned ${pinnedCount}` : ''}`,
                 )
                 // The database can be ahead of the git-tracked text view when an
                 // export failed; a rebuild would then delete those records, so the

@@ -46,6 +46,16 @@ export interface RankOptions {
  * raw value is 0) scores 1.
  */
 export declare const MIN_RELEVANCE = 0.15;
+/**
+ * Freshness floor for a pinned record.
+ *
+ * Freshness is the largest single swing in the score (0.2 … 1.0 over 120 days),
+ * so an old-but-curated lesson is systematically out-competed by anything recent.
+ * Pinning is the human statement "this stays relevant"; the floor keeps the
+ * recency penalty from erasing it without opting the record out of the budget or
+ * the score floor (DESIGN §6).
+ */
+export declare const PINNED_FRESHNESS_FLOOR = 0.6;
 export declare function normalizeRelevance(raw: Map<string, number>): Map<string, number>;
 /** Exponential decay with a configurable half-life; never returns 0. */
 export declare function freshness(updatedAt: string, now: Date, halfLifeDays?: number): number;

@@ -18,6 +18,15 @@
   `force: true` 作为唯一越过护栏的入口。`memory_sync` 的自动重建**永不 force**。
   此前"导出失败 → 重建"会让一次瞬时失败变成永久丢失，且只有代码注释知道这件事。
 
+### Added（2026-11 记录生命周期：pinned）
+
+- **`pinned`（schema v6）**：`memory_save({ pin: true })` 把一条记录钉住——**免置信度衰减、免自动归档**，
+  召回时 `freshness` 不低于 0.6（只刷新下限，不是加分）；矛盾检测照常标记，退役仍需显式 `memory_forget`。
+  每根每层上限 20 条，超额时**拒绝 pin 但保留写入**并提示先 unpin。
+- 迁移：`records` 新增 `pinned INTEGER NOT NULL DEFAULT 0`（旧库 `ALTER TABLE` 原地升级，新库直接建模）；
+  frontmatter 增加 `pinned: true` 并参与导出/导入往返，`rebuild` 后不丢。
+- `memory_stats` 的 records 行新增 `pinned N`（仅在有钉住记录时出现）。
+
 ### Added（2026-11 召回形状与花费可见性）
 
 - **`recall.maxBodyChars`（默认 220）**：单条命中保留的正文长度从写死常量变成配置。实测 117 条记录里

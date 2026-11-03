@@ -17,6 +17,8 @@ export interface LessonFrontmatter {
     tags?: string[];
     status?: string;
     origin?: string;
+    /** v6: pinned records survive decay/archival (DESIGN §8). */
+    pinned?: boolean;
     timesRecalled?: number;
     successAfterRecall?: number;
     failAfterRecall?: number;

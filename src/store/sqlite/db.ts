@@ -93,6 +93,16 @@ export function migrate(db: DatabaseSync, fts5: boolean): void {
     db.exec(CORE_TABLES_SQL)
     const current = Number(getMeta(db, 'schema_version') ?? '0')
     const needsV2 = Number.isFinite(current) && current > 0 && current < 2
+    // v6 is additive: an existing root gains the column, a fresh root already has
+    // it from CORE_TABLES_SQL. A duplicate-column error means it is already there.
+    const needsV6 = Number.isFinite(current) && current > 0 && current < 6
+    if (needsV6) {
+        try {
+            db.exec('ALTER TABLE records ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0')
+        } catch (error) {
+            log('debug', 'memory: v5→v6 migration skipped:', error)
+        }
+    }
     if (needsV2) {
         try {
             db.exec(MIGRATE_V2_SQL)

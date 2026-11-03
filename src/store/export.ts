@@ -176,6 +176,7 @@ export function renderRecord(record: MemoryRecord, evidenceSummary?: string): st
             updated: record.updatedAt.slice(0, 10),
             tags: record.tags,
             status: record.status,
+            ...(record.pinned ? { pinned: true } : {}),
             origin: record.origin,
             timesRecalled: record.timesRecalled,
             successAfterRecall: record.successAfterRecall,

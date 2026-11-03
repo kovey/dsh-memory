@@ -99,8 +99,8 @@ memory.db(+wal/shm)  派生索引，不入库（.gitignore 已含）
 |---|---|
 | `memory_search` / `memory_get` | 检索（标题+摘要）/ 按 id 读全文 |
 | `memory_recall` | 一次取回召回包（已排序、按预算裁剪） |
-| `memory_save` | 写长期经验（默认项目级；同一门控负责去重/合并/拒收） |
-| `memory_stats` | 健康度 + 评估门禁 + 趋势 + 当月花费 |
+| `memory_save` | 写长期经验（默认项目级；同一门控负责去重/合并/拒收）；`pin: true/false` 钉住/取消（免衰减、免归档、召回下限 0.6，每层上限 20） |
+| `memory_stats` | 健康度（含 pinned 数）+ 评估门禁 + 趋势 + 当月花费 |
 | `memory_consolidate` / `memory_forget` | 巩固（默认 dry-run）/ 退役（归档不删） |
 | `memory_sync` | 提交 → fetch/rebase → 冲突按规则合并 → 重建（`push=true` 才推） |
 | `memory_reindex` | 从文本视图重建索引；`rebuild=true` 全量重建（只删盘上已无、且早于上次成功导出的记录；`force=true` 才连未导出的也删） |

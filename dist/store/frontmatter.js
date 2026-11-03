@@ -59,6 +59,9 @@ export function parseLesson(text) {
         if (raw !== undefined && raw !== '' && Number.isFinite(Number(raw)))
             frontmatter[target] = Number(raw);
     }
+    const pinned = fields.get('pinned');
+    if (pinned !== undefined && pinned.trim().toLowerCase() === 'true')
+        frontmatter.pinned = true;
     const supersededBy = fields.get('superseded_by');
     if (supersededBy !== undefined && supersededBy !== '')
         frontmatter.supersededBy = supersededBy;
@@ -135,6 +138,7 @@ export function renderLesson(frontmatter, body, extras = {}) {
         ['success_after_recall', frontmatter.successAfterRecall !== undefined && frontmatter.successAfterRecall > 0 ? String(frontmatter.successAfterRecall) : undefined],
         ['fail_after_recall', frontmatter.failAfterRecall !== undefined && frontmatter.failAfterRecall > 0 ? String(frontmatter.failAfterRecall) : undefined],
         ['evidence', frontmatter.evidence !== undefined && frontmatter.evidence !== '' ? frontmatter.evidence : undefined],
+        ['pinned', frontmatter.pinned === true ? 'true' : undefined],
         ['superseded_by', frontmatter.supersededBy !== undefined && frontmatter.supersededBy !== '' ? frontmatter.supersededBy : undefined],
         ['created', frontmatter.created !== undefined && frontmatter.created !== '' ? frontmatter.created : undefined],
     ];

@@ -54,6 +54,9 @@ export function planDecay(db: DatabaseSync, now = new Date()): DecayPlan {
     const records = listRecords(db, { status: ['active', 'pending'] })
     const archive: { record: MemoryRecord; reason: string }[] = []
     for (const record of records) {
+        // A pinned record is an explicit human decision to keep it: neither its
+        // confidence nor its status may be changed by an automatic pass.
+        if (record.pinned) continue
         if (record.expiresAt !== undefined && record.expiresAt < today) {
             archive.push({ record, reason: `expired ${record.expiresAt}` })
             continue
@@ -104,6 +107,7 @@ export function applyDecay(
             const survivors = listRecords(db, { status: ['active', 'pending'] })
             const decayStatement = db.prepare('UPDATE records SET confidence = ? WHERE id = ?')
             for (const record of survivors) {
+                if (record.pinned) continue
                 const next = Math.round(clamp01(record.confidence * plan.factor) * 1000) / 1000
                 if (next === record.confidence) continue
                 decayStatement.run(next, record.id)

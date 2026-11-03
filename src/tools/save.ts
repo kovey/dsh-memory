@@ -10,6 +10,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import { appendProfileLine, isProfileName } from '../learn/profile.js'
 import { log } from '../log.js'
 import { applyDraft } from '../learn/gate.js'
+import { getRecord, upsertRecord } from '../store/sqlite/records.js'
 import type { CandidateDraft } from '../learn/gate.js'
 import { ScopeResolver, sessionIdOf } from '../scope/resolver.js'
 import type { AgentLike } from '../scope/resolver.js'
@@ -57,6 +58,21 @@ function evidenceKind0(args: { evidence?: string }): string {
 export const MAX_SAVE_BODY_CHARS = 4_000
 export const MAX_SAVE_TITLE_CHARS = 120
 export const MAX_SAVE_TAGS = 8
+/**
+ * Ceiling on pinned records per layer, per root.
+ *
+ * Pinning skips decay and gets a freshness floor, so "pin everything" would
+ * quietly disable both the quality workflow and the recency signal. The cap
+ * keeps it what it is meant to be: a small curated set.
+ */
+export const MAX_PINNED_PER_LAYER = 20
+
+/** How many records of `layer` are pinned in this root. */
+export function pinnedCount(db: Parameters<typeof getRecord>[0], layer: string): number {
+    const row = db.prepare('SELECT COUNT(*) AS n FROM records WHERE pinned = 1 AND layer = ?').get(layer)
+    const value = row?.['n']
+    return typeof value === 'number' ? value : typeof value === 'bigint' ? Number(value) : 0
+}
 
 /**
  * The one refusal text every write-class tool returns to a subagent
@@ -121,6 +137,11 @@ export function saveTool(deps: SaveToolDeps) {
                 description: 'What backs this lesson: tool-failure, user-correction, test-failure, self-report…',
             },
             evidenceDetail: { type: 'string', description: 'One-line description of the concrete evidence.' },
+            pin: {
+                type: 'boolean',
+                description:
+                    `Keep this record through automatic decay and archival, and give it a freshness floor when ranking. true pins, false unpins. Pinning is a human decision: at most ${MAX_PINNED_PER_LAYER} per layer.`,
+            },
         },
         output: { schema: TEXT_OUTPUT, render: (_args, value) => [{ type: 'text', text: value }] },
         async execute(args, exec) {
@@ -185,13 +206,34 @@ export function saveTool(deps: SaveToolDeps) {
                 if (result.action === 'reject') {
                     return `rejected by the memory gate: ${result.reason}. Write a concrete trigger + action (include command/flag/path), or raise confidence if the fix was verified.`
                 }
+                let pinNote = ''
+                if (args.pin !== undefined) {
+                    const record = getRecord(store.db, result.recordId)
+                    if (record !== undefined && record.pinned !== args.pin) {
+                        if (args.pin === true) {
+                            const pinned = pinnedCount(store.db, record.layer)
+                            if (pinned >= MAX_PINNED_PER_LAYER) {
+                                return [
+                                    `refused: ${record.layer} already has ${pinned} pinned record(s) (cap ${MAX_PINNED_PER_LAYER}).`,
+                                    'Unpin one first with memory_save({ ... , pin: false }) on an existing record id — a pin is a curated decision, not a bulk flag.',
+                                    `the record itself was saved: ${result.recordId}`,
+                                ].join('\n')
+                            }
+                        }
+                        record.pinned = args.pin
+                        record.updatedAt = new Date().toISOString()
+                        upsertRecord(store.db, record)
+                        pinNote = args.pin ? 'pinned: true (exempt from decay/archival, freshness floor 0.6)' : 'pinned: false'
+                    }
+                }
                 deps.registry.exportScope(store.scope)
                 const where = scope.kind === 'project' ? `项目记忆 (${scope.repo ?? scope.root})` : '全局记忆'
                 const verb = result.action === 'merge' ? 'merged into existing lesson' : 'saved'
                 return [
                     `${verb}: ${result.recordId}`,
                     `scope: ${where}`,
-                    `confidence: ${result.confidence.toFixed(2)} · status: ${result.record?.status ?? 'active'}`,
+                    `confidence: ${result.confidence.toFixed(2)} · status: ${result.record?.status ?? 'active'}${result.record?.pinned === true ? ' · pinned' : ''}`,
+                    pinNote,
                     `path: ${scope.root}/lessons/${result.recordId}.md`,
                     profilePath !== undefined ? `profile: ${profilePath}` : '',
                     result.action === 'merge' ? `merge reason: ${result.reason}` : '',

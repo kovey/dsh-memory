@@ -24,6 +24,10 @@ export function planDecay(db, now = new Date()) {
     const records = listRecords(db, { status: ['active', 'pending'] });
     const archive = [];
     for (const record of records) {
+        // A pinned record is an explicit human decision to keep it: neither its
+        // confidence nor its status may be changed by an automatic pass.
+        if (record.pinned)
+            continue;
         if (record.expiresAt !== undefined && record.expiresAt < today) {
             archive.push({ record, reason: `expired ${record.expiresAt}` });
             continue;
@@ -64,6 +68,8 @@ export function applyDecay(db, plan, options = {}) {
             const survivors = listRecords(db, { status: ['active', 'pending'] });
             const decayStatement = db.prepare('UPDATE records SET confidence = ? WHERE id = ?');
             for (const record of survivors) {
+                if (record.pinned)
+                    continue;
                 const next = Math.round(clamp01(record.confidence * plan.factor) * 1000) / 1000;
                 if (next === record.confidence)
                     continue;

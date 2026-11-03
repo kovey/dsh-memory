@@ -262,6 +262,7 @@ export function recordFromLesson(
             ...(frontmatter.tags !== undefined ? { tags: frontmatter.tags } : {}),
             origin: 'imported',
             ...(frontmatter.status !== undefined ? { status: frontmatter.status as RecordStatus } : {}),
+            ...(frontmatter.pinned === true ? { pinned: true } : {}),
         },
         `${frontmatter.updated}T00:00:00.000Z`,
     )

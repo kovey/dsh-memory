@@ -42,6 +42,7 @@ export function materialize(draft, now = new Date().toISOString()) {
         successAfterRecall: 0,
         failAfterRecall: 0,
         status: draft.status ?? (confidence < 0.6 ? 'pending' : 'active'),
+        pinned: draft.pinned === true,
         ...(draft.origin !== undefined ? { origin: draft.origin } : {}),
         createdAt: now,
         updatedAt: now,
@@ -81,6 +82,7 @@ export function rowToRecord(row) {
         failAfterRecall: intOf(row['fail_after_recall'], 0),
         ...(supersededBy !== undefined ? { supersededBy } : {}),
         status: row['status'] ?? 'active',
+        pinned: row['pinned'] === 1 || row['pinned'] === true,
         ...(origin !== undefined ? { origin } : {}),
         createdAt: typeof row['created_at'] === 'string' ? row['created_at'] : new Date().toISOString(),
         updatedAt: typeof row['updated_at'] === 'string' ? row['updated_at'] : new Date().toISOString(),
@@ -110,8 +112,8 @@ export function upsertRecord(db, record) {
     db.prepare(`INSERT INTO records (
             id, layer, scope_kind, repo, title, body, tags, confidence, expires_at,
             times_seen, times_recalled, success_after_recall, fail_after_recall,
-            superseded_by, status, origin, created_at, updated_at, source, cjk
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            superseded_by, status, pinned, origin, created_at, updated_at, source, cjk
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             layer = excluded.layer,
             scope_kind = excluded.scope_kind,
@@ -127,10 +129,11 @@ export function upsertRecord(db, record) {
             fail_after_recall = excluded.fail_after_recall,
             superseded_by = excluded.superseded_by,
             status = excluded.status,
+            pinned = excluded.pinned,
             origin = excluded.origin,
             updated_at = excluded.updated_at,
             source = excluded.source,
-            cjk = excluded.cjk`).run(record.id, record.layer, record.scopeKind, record.repo ?? null, record.title, record.body, JSON.stringify(record.tags), record.confidence, record.expiresAt ?? null, record.timesSeen, record.timesRecalled, record.successAfterRecall, record.failAfterRecall, record.supersededBy ?? null, record.status, record.origin ?? null, record.createdAt, record.updatedAt, record.source !== undefined ? JSON.stringify(record.source) : null, cjkBigrams(`${record.title} ${record.body} ${record.tags.join(' ')}`));
+            cjk = excluded.cjk`).run(record.id, record.layer, record.scopeKind, record.repo ?? null, record.title, record.body, JSON.stringify(record.tags), record.confidence, record.expiresAt ?? null, record.timesSeen, record.timesRecalled, record.successAfterRecall, record.failAfterRecall, record.supersededBy ?? null, record.status, record.pinned ? 1 : 0, record.origin ?? null, record.createdAt, record.updatedAt, record.source !== undefined ? JSON.stringify(record.source) : null, cjkBigrams(`${record.title} ${record.body} ${record.tags.join(' ')}`));
     // Evidence is authoritative on the record: replace the stored rows instead
     // of appending, otherwise a merge would duplicate every earlier signal.
     // An empty list is left alone so a text-view re-import cannot erase history.

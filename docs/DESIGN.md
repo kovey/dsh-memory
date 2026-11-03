@@ -176,6 +176,7 @@ records(
   fail_after_recall INTEGER NOT NULL DEFAULT 0,
   superseded_by TEXT,
   status TEXT NOT NULL DEFAULT 'active',  -- active | pending | archived
+  pinned INTEGER NOT NULL DEFAULT 0,      -- v6：人工钉住，免衰减/免自动归档（§8）
   origin TEXT,                         -- distilled | user | skill | imported | no-project-context
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
   source TEXT                          -- JSON {sessionId, turn, taskId}
@@ -381,9 +382,21 @@ conf_next = clamp( conf_base
 | | 无触发场景/无证据/泛泛而谈 | 拒收，或降为 pending（`conf ≤ 0.6`） |
 | 证据加权 | 每条必须有 `evidence` | `self-report` 权重最低；`tool-failure`/`user-correction` 最高 |
 | 使用反馈 | 召回后 outcome | 调整 conf 与排序权重（轻量 bandit） |
-| 遗忘 | `expires < today`，或 `conf<0.6` 且 60 天未复现 | 移入 `archive/`（可回查） |
+| 遗忘 | `expires < today`，或 `conf<0.6` 且 60 天未复现 | 移入 `archive/`（可回查）；**`pinned` 记录跳过这一行** |
+| 钉住（v6） | 人在 `memory_save` 里显式 `pin: true` | 免置信度衰减、免自动归档、召回时 `freshness` 不低于 0.6；每层上限 20 条 |
 | 晋升 | `times_seen≥3` 且形成稳定流程 | **提案给人** → 落 `~/.dsh/skills/<name>/SKILL.md`，教训降为链接 |
 | 防退化门禁 | baseline 7 任务 | 成功率不降、成本不升、打扰不升、返工不升 |
+
+**`pinned` 的语义边界**（v6，schema 与 frontmatter 同步）：
+
+- **它只挡自动工序，不挡人**：衰减/归档跳过它，矛盾检测照常标记（新旧冲突要能看见），
+  退役仍然只能显式 `memory_forget`。
+- **它不豁免召回纪律**：`minScore` 与 token 预算照旧生效，否则"钉住"会变成无关注入的后门。
+- **它影响排序的方式是刷新下限，不是加分**：`freshness = max(0.6, 衰减值)`。
+  加分（例如 ×1.15）会把钉住记录推高到与相关性无关的位置；下限精确对治"时间惩罚"这一项。
+- **它有上限**（每根每层 20 条）：`memory_save({pin:true})` 超额时**拒绝 pin 但保留写入**，
+  并提示先 unpin——否则"全钉住"会同时废掉质量工序和新鲜度信号。
+- **门槛是人**：蒸馏永远不会产生 `pinned`，只有人类明说时才写。
 
 ---
 

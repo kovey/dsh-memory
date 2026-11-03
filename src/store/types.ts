@@ -60,6 +60,12 @@ export interface MemoryRecord {
     failAfterRecall: number
     supersededBy?: string
     status: RecordStatus
+    /**
+     * Pinned records are protected from automatic decay and archival and get a
+     * freshness floor when ranking (DESIGN §6, §8). It is an explicit human
+     * decision, never set by distillation.
+     */
+    pinned: boolean
     /** How the record entered the store: distilled | user | skill | imported. */
     origin?: string
     createdAt: string

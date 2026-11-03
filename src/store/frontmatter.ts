@@ -18,6 +18,8 @@ export interface LessonFrontmatter {
     tags?: string[]
     status?: string
     origin?: string
+    /** v6: pinned records survive decay/archival (DESIGN §8). */
+    pinned?: boolean
     timesRecalled?: number
     successAfterRecall?: number
     failAfterRecall?: number
@@ -92,6 +94,8 @@ export function parseLesson(text: string): ParsedLesson | undefined {
         const raw = fields.get(key)
         if (raw !== undefined && raw !== '' && Number.isFinite(Number(raw))) frontmatter[target] = Number(raw)
     }
+    const pinned = fields.get('pinned')
+    if (pinned !== undefined && pinned.trim().toLowerCase() === 'true') frontmatter.pinned = true
     const supersededBy = fields.get('superseded_by')
     if (supersededBy !== undefined && supersededBy !== '') frontmatter.supersededBy = supersededBy
     const created = fields.get('created')
@@ -167,6 +171,7 @@ export function renderLesson(frontmatter: LessonFrontmatter, body: string, extra
         ['success_after_recall', frontmatter.successAfterRecall !== undefined && frontmatter.successAfterRecall > 0 ? String(frontmatter.successAfterRecall) : undefined],
         ['fail_after_recall', frontmatter.failAfterRecall !== undefined && frontmatter.failAfterRecall > 0 ? String(frontmatter.failAfterRecall) : undefined],
         ['evidence', frontmatter.evidence !== undefined && frontmatter.evidence !== '' ? frontmatter.evidence : undefined],
+        ['pinned', frontmatter.pinned === true ? 'true' : undefined],
         ['superseded_by', frontmatter.supersededBy !== undefined && frontmatter.supersededBy !== '' ? frontmatter.supersededBy : undefined],
         ['created', frontmatter.created !== undefined && frontmatter.created !== '' ? frontmatter.created : undefined],
     ]

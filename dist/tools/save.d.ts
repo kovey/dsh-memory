@@ -1,3 +1,4 @@
+import { getRecord } from '../store/sqlite/records.js';
 import { ScopeResolver } from '../scope/resolver.js';
 import type { AgentLike } from '../scope/resolver.js';
 import type { StoreRegistry } from '../store/store.js';
@@ -13,6 +14,16 @@ export declare function parseTtl(ttl: string | undefined, now?: Date): string | 
 export declare const MAX_SAVE_BODY_CHARS = 4000;
 export declare const MAX_SAVE_TITLE_CHARS = 120;
 export declare const MAX_SAVE_TAGS = 8;
+/**
+ * Ceiling on pinned records per layer, per root.
+ *
+ * Pinning skips decay and gets a freshness floor, so "pin everything" would
+ * quietly disable both the quality workflow and the recency signal. The cap
+ * keeps it what it is meant to be: a small curated set.
+ */
+export declare const MAX_PINNED_PER_LAYER = 20;
+/** How many records of `layer` are pinned in this root. */
+export declare function pinnedCount(db: Parameters<typeof getRecord>[0], layer: string): number;
 /**
  * The one refusal text every write-class tool returns to a subagent
  * (`routing.subagentWrite` off). Shared verbatim so the model gets the same

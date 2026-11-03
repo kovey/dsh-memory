@@ -59,6 +59,7 @@ export function materialize(
         origin?: string
         source?: MemoryRecord['source']
         status?: RecordStatus
+        pinned?: boolean
     },
     now: string = new Date().toISOString(),
 ): MemoryRecord {
@@ -78,6 +79,7 @@ export function materialize(
         successAfterRecall: 0,
         failAfterRecall: 0,
         status: draft.status ?? (confidence < 0.6 ? 'pending' : 'active'),
+        pinned: draft.pinned === true,
         ...(draft.origin !== undefined ? { origin: draft.origin } : {}),
         createdAt: now,
         updatedAt: now,
@@ -116,6 +118,7 @@ export function rowToRecord(row: Record<string, unknown> | undefined): MemoryRec
         failAfterRecall: intOf(row['fail_after_recall'], 0),
         ...(supersededBy !== undefined ? { supersededBy } : {}),
         status: (row['status'] as RecordStatus | undefined) ?? 'active',
+        pinned: row['pinned'] === 1 || row['pinned'] === true,
         ...(origin !== undefined ? { origin } : {}),
         createdAt: typeof row['created_at'] === 'string' ? row['created_at'] : new Date().toISOString(),
         updatedAt: typeof row['updated_at'] === 'string' ? row['updated_at'] : new Date().toISOString(),
@@ -145,8 +148,8 @@ export function upsertRecord(db: DatabaseSync, record: MemoryRecord): void {
         `INSERT INTO records (
             id, layer, scope_kind, repo, title, body, tags, confidence, expires_at,
             times_seen, times_recalled, success_after_recall, fail_after_recall,
-            superseded_by, status, origin, created_at, updated_at, source, cjk
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            superseded_by, status, pinned, origin, created_at, updated_at, source, cjk
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
             layer = excluded.layer,
             scope_kind = excluded.scope_kind,
@@ -162,6 +165,7 @@ export function upsertRecord(db: DatabaseSync, record: MemoryRecord): void {
             fail_after_recall = excluded.fail_after_recall,
             superseded_by = excluded.superseded_by,
             status = excluded.status,
+            pinned = excluded.pinned,
             origin = excluded.origin,
             updated_at = excluded.updated_at,
             source = excluded.source,
@@ -182,6 +186,7 @@ export function upsertRecord(db: DatabaseSync, record: MemoryRecord): void {
         record.failAfterRecall,
         record.supersededBy ?? null,
         record.status,
+        record.pinned ? 1 : 0,
         record.origin ?? null,
         record.createdAt,
         record.updatedAt,

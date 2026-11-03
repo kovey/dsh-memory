@@ -11,6 +11,16 @@ import { LAYER_WEIGHT } from '../store/types.js';
  * raw value is 0) scores 1.
  */
 export const MIN_RELEVANCE = 0.15;
+/**
+ * Freshness floor for a pinned record.
+ *
+ * Freshness is the largest single swing in the score (0.2 … 1.0 over 120 days),
+ * so an old-but-curated lesson is systematically out-competed by anything recent.
+ * Pinning is the human statement "this stays relevant"; the floor keeps the
+ * recency penalty from erasing it without opting the record out of the budget or
+ * the score floor (DESIGN §6).
+ */
+export const PINNED_FRESHNESS_FLOOR = 0.6;
 export function normalizeRelevance(raw) {
     if (raw.size === 0)
         return new Map();
@@ -89,7 +99,8 @@ export function scoreRecord(record, options = {}) {
     const now = options.now ?? new Date();
     const relevance = options.relevance?.get(record.id) ?? 1;
     const confidence = 0.5 + 0.5 * clamp01(record.confidence);
-    const fresh = freshness(record.updatedAt, now, options.freshnessHalfLifeDays ?? 120);
+    const rawFresh = freshness(record.updatedAt, now, options.freshnessHalfLifeDays ?? 120);
+    const fresh = record.pinned ? Math.max(PINNED_FRESHNESS_FLOOR, rawFresh) : rawFresh;
     const layerWeight = options.layerWeights?.[record.layer] ?? LAYER_WEIGHT[record.layer] ?? 1;
     const frequency = frequencyBoost(record.timesSeen);
     const history = recallBoost(record.timesRecalled);

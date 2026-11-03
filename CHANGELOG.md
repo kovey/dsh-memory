@@ -3,7 +3,7 @@
 本文件记录 dsh-memory 的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.4.0] — 2026-11-03
 
 ### Added
 
@@ -399,6 +399,8 @@
 - 库中已存在的历史重复 id 不会自动删除（import 只保证不再新增），需要显式 dedupe。
 - `tui` 等生产面只消费发布版本（tag/NPM），不走本地 link。
 
+[0.4.0]: https://github.com/kovey/dsh-memory/releases/tag/v0.4.0
+[0.3.2]: https://github.com/kovey/dsh-memory/releases/tag/v0.3.2
 [0.3.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.3.1
 [0.3.0]: https://github.com/kovey/dsh-memory/releases/tag/v0.3.0
 [0.2.3]: https://github.com/kovey/dsh-memory/releases/tag/v0.2.3

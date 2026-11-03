@@ -3,7 +3,7 @@
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）的分层记忆插件：
 **项目级 / 全局记忆严格分离**，任务前自动召回，任务后自动学习，不依赖模型"记得去复盘"。
 
-- 当前版本 **v0.3.2**｜变更 [`CHANGELOG.md`](CHANGELOG.md)｜跨宿主升级 [`UPGRADE.md`](UPGRADE.md)
+- 当前版本 **v0.4.0**｜变更 [`CHANGELOG.md`](CHANGELOG.md)｜跨宿主升级 [`UPGRADE.md`](UPGRADE.md)
 - 宿主兼容见[支持矩阵](#支持哪些宿主和端)；Node `^22.19 || >=24`（依赖内置 `node:sqlite`）
 - 类型：host 插件（cordis v4），TypeScript / ESM，运行期零第三方依赖
 - 设计存档（唯一决策来源）：[`docs/DESIGN.md`](docs/DESIGN.md)
@@ -26,7 +26,7 @@
 
 ```bash
 # 发布版（推荐，固定 tag）
-dsh plugin --profile nvim-tui add github:kovey/dsh-memory#v0.3.2
+dsh plugin --profile nvim-tui add github:kovey/dsh-memory#v0.4.0
 # 再把 "dsh-memory" 追加到 ~/.dsh/profiles/<profile>/package.json 的 dsh.profile.bundles
 # ⚠️ dsh plugin add 只是在 profile 里执行 pnpm；只 add 不加 bundles = 装了但不加载
 
@@ -59,7 +59,7 @@ ln -sfn "$PWD" ~/.dsh/profiles/node_modules/dsh-memory
 
 | 宿主 dsh | 该用的 dsh-memory |
 |---|---|
-| `0.2.0-rc.2` / `0.2.1-rc.x` / `0.2.1` | **v0.3.2**（范围锚定 `>=0.2.0-rc.2 <0.2.2`） |
+| `0.2.0-rc.2` / `0.2.1-rc.x` / `0.2.1` | **v0.4.0**（范围锚定 `>=0.2.0-rc.2 <0.2.2`） |
 | `0.1.7-rc.2` | v0.2.1 |
 | `0.1.7-rc.1` | v0.2.0 |
 | `0.2.0-rc.1` | v0.2.2 |
@@ -183,7 +183,7 @@ memory.db(+wal/shm)  派生索引，不入库（.gitignore 已含）
 
 ```js
 memory_stats({ windowDays: 30 })     // 健康度 + 门禁判定：pass / regression / unknown
-memory_stats({ setBaseline: true, baselineReason: "用户要求；v0.3.2 发布后 7 天无回归" })
+memory_stats({ setBaseline: true, baselineReason: "用户要求；v0.4.0 发布后 7 天无回归" })
 ```
 
 对比四项指标：成功率↑、耗时↓、打扰↓、返工↓（容差：成功率 ±0.05、耗时 ±15%、打扰/返工 ±0.5）。

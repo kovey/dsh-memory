@@ -214,6 +214,63 @@ conflicts(id INTEGER PRIMARY KEY, winner_id TEXT, loser_id TEXT, reason TEXT, at
 - **引导导入**：DB 为空时自动从文本视图导入（`bootstrap import`），因此 M0 无需任何手工迁移脚本。
 - 旧脚本（`memory-lesson.sh`）写出的 MD：下次 import 时增量并入（降级路径永远可用）。
 
+### 5.3.1 一致性语义：谁是 SSOT、导出何时算成功
+
+前面几节只说了"写操作后单向导出"，没说**导出失败**时两边谁可信。补充如下（对应实现：
+`src/store/watermark.ts`、`src/store/rebuild.ts`、`src/tools/stats.ts`）：
+
+**两句话定义**
+
+- **写入期以 SQLite 为准**：记录先落库，再同步导出。写成功而导出失败时，库是对的，文本视图落后。
+- **恢复期以文本视图为准**：换机器、clone、索引损坏都只能从 git 里的文件重建，所以**导出失败的窗口
+  一旦被"重建"穿过，就变成永久丢失**。
+
+两个"为准"不冲突，冲突的是**中间的窗口**，所以要能被看见。
+
+**导出是同步的、全量快照、逐文件原子写**
+
+| 问题 | 事实 |
+|---|---|
+| 同步还是异步批量？ | **同步**。`exportAll()` 在写路径上调用（save / distill / consolidate / import / sync 冲突解决），没有后台批量队列 |
+| 一次导出写多少？ | **全量快照**：重写每条 `lessons/*.md` 与 `MEMORY.md`、`metrics.jsonl`。**没有递增序号**，所以不存在"从位点续推" |
+| 单个文件会写坏吗？ | 不会半写：`writeAtomic` 写同目录临时文件再 `rename` |
+| 导出失败会怎样？ | 只记 `warn`，**变更工具仍然返回成功**（这是刻意：记忆写入不能因为 git 目录只读就失败） |
+| 一共产出几次？ | 每次变更后一次；`task-end` 的提交临界区内**再导一次**（持跨进程锁）；`memory_sync` 在 fetch/rebase 前先提交（含导出） |
+
+**水位（`meta.last_export`）**
+
+- 只有**完全成功**的导出写 `{ at, records, maxUpdatedAt }`；部分失败保持旧水位（安全方向：继续告警）。
+- DB 为空且由 bootstrap 从文本视图导入时补种一次水位——这种库按构造就与文本视图一致（fresh clone），
+  不该报滞后。**非空但没有水位的库**（从没有水位的旧版本升级上来）保持未标记，等下一次真实导出；
+  在此之前它的状态不可知，`memory_stats` 会说"未记录过成功导出"。
+- `memory_stats` 每次比对当前库形状：
+  - 一致 → `text view: up to date (exported N record(s) at …)`
+  - 有更新（`maxUpdatedAt > at` 或条数变多）→ `⚠️ text view may lag: N record(s) written after the last successful export`
+
+**重建的护栏**
+
+`rebuild` 处理"库里有、盘上没有"的记录时不再无条件删除：
+
+| 记录 | 处理 |
+|---|---|
+| `updated_at <= 水位.at`（文件是人删的） | 删除（原行为） |
+| `updated_at > 水位.at`，或无水位 | **保留**，列进 `keptUnexported` 并在工具输出里给出补救路径 |
+| 显式 `force: true`（仅 `memory_reindex`） | 全部删除——这是唯一能越过护栏的入口，且要人明确写出来 |
+| `memory_sync` 的自动重建 | **永不 force**：它发生在 rebase 之后，不能顺手删掉本机从未导出的记录 |
+
+被保留时水位**不前进**（否则告警会自愈），原样保留旧标记，`memory_stats` 继续报滞后。
+
+**失败之后怎么恢复**（按优先级）
+
+1. 让下一次导出发生：任何记忆写入（`memory_save` / 蒸馏 / 巩固都会在写路径上全量导出），或等本轮 `task-end` 的自动提交。
+   （`memory_reindex()` **不能**消除滞后：它只从文本视图导入并重写 `MEMORY.md`，不做反向导出。）
+2. 确认滞后已消除（`memory_stats` 的 text view 行）。
+3. 再考虑 `memory_reindex({ rebuild: true })`；确实要丢弃那些记录时才加 `force: true`。
+
+**sidecar 不参与导出**：`usage` / `signals` / `tasks` / `proposals` / `conflicts` / `baseline_snapshots`
+只存在于 SQLite，重建时按主键旁路保留（§5.3 上一段），它们不构成文本视图的一致性问题。
+
+
 ---
 
 ## 6. 召回设计：三级渐进披露

@@ -148,10 +148,18 @@ function rebuildLine(deps, scope) {
     if (store === undefined)
         return ['  rebuild: skipped (store unavailable)'];
     try {
+        // Never force here: a sync rebuild follows a rebase and must not be able
+        // to delete records this machine never exported (DESIGN §5.3.1).
         const result = rebuildScope(store.db, store.scope, store.fts5);
-        return [
+        const lines = [
             `  rebuild: imported ${result.imported}, removed ${result.removed}, metrics ${result.metrics}, episodes ${result.episodes}${result.errors.length > 0 ? ` (errors: ${result.errors.join('; ')})` : ''}`,
         ];
+        if (result.keptUnexported.length > 0) {
+            const shown = result.keptUnexported.slice(0, 8).join(', ');
+            const more = result.keptUnexported.length > 8 ? `, +${result.keptUnexported.length - 8} more` : '';
+            lines.push(`  rebuild kept ${result.keptUnexported.length} unexported record(s) (${shown}${more}) — the text view cannot restore them; any memory write re-exports the whole store, then memory_reindex({ rebuild: true }) if they must go`);
+        }
+        return lines;
     }
     catch (error) {
         return [`  rebuild: failed — ${message(error)}`];

@@ -3,6 +3,26 @@
 本文件记录 dsh-memory 的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+
+- **文本视图一致性语义与水位（DESIGN §5.3.1）。** 导出仍是写路径上的同步全量快照，但现在每次**完全成功**
+  的导出都在 `meta.last_export` 记 `{ at, records, maxUpdatedAt }`：
+  - `memory_stats` 每库多一行 `text view: up to date (…)`；库比文本视图新时改为
+    `⚠️ text view may lag: N record(s) written after the last successful export`。此前这个偏差只存在于日志里，
+    用户无从判断。
+  - bootstrap 从文本视图导入（fresh clone）时补种水位；非空但无水位（旧版本升级）保持未标记并如实报告。
+- **`rebuild` 的护栏：不再删除本机从未导出的记录。** `updated_at` 晚于水位（或无水位）的记录会被保留、
+  列进 `keptUnexported` 并给出补救路径，而不是当成"盘上已删除"清理掉；`memory_reindex` 新增
+  `force: true` 作为唯一越过护栏的入口。`memory_sync` 的自动重建**永不 force**。
+  此前"导出失败 → 重建"会让一次瞬时失败变成永久丢失，且只有代码注释知道这件事。
+
+### Changed
+
+- `rebuildScope()` 的签名变为 `(db, scope, fts5, options?: { force?: boolean })`，返回值新增
+  `keptUnexported: string[]`（内部 API，工具层已同步）。
+
 ## [0.3.2] — 2026-10-19
 
 > **兼容性修复**：dsh **0.2.1** 起本插件不再被跳过。0.2.0 仍兼容，升级是安全的。

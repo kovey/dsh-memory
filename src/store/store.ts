@@ -20,6 +20,7 @@ import type { RecordCounts } from './sqlite/records.js'
 import { CORE_TABLES_SQL, FTS_REBUILD_SQL, FTS_SQL, SCHEMA_VERSION } from './sqlite/schema.js'
 import type { MemoryScope } from './types.js'
 import { probeVersioning } from './versioning.js'
+import { readWatermark, recordExport } from './watermark.js'
 
 type SqliteModule = typeof import('node:sqlite')
 
@@ -198,12 +199,22 @@ export class StoreRegistry {
             // diagnostics must never break a bootstrap
         }
         try {
+            // A database that starts empty and is filled from the text view is, by
+            // construction, in sync with it (a fresh clone). Seeding the watermark
+            // here keeps `memory_stats` from reporting a lag that never existed.
+            // A non-empty database without a mark is an upgraded store: it stays
+            // unmarked until the next real export, because whether it is ahead is
+            // unknowable at this point (DESIGN §5.3.1).
+            const wasEmpty = countRecords(store.db).total === 0
             const imported = bootstrapImport(store.db, store.scope)
             if (imported !== undefined && imported.imported > 0) {
                 log('info', `memory: bootstrapped ${imported.imported} records for ${store.scope.root}`)
             }
             const metrics = importMetrics(store.db, store.scope)
             if (metrics > 0) log('info', `memory: imported ${metrics} task metrics for ${store.scope.root}`)
+            if (wasEmpty && readWatermark(store.db) === undefined && countRecords(store.db).total > 0) {
+                recordExport(store.db)
+            }
         } catch (error) {
             log('warn', 'memory: bootstrap import failed:', error)
         }

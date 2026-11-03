@@ -9,14 +9,30 @@ export interface RebuildResult {
     errors: string[];
     /** Rows carried across the rebuild because the text view cannot reproduce them. */
     preserved: Record<string, number>;
+    /**
+     * Records kept because they were written after the last successful export.
+     *
+     * They exist only in the database; the text view cannot reproduce them, so a
+     * rebuild deletes them only with `force` (DESIGN §5.3.1).
+     */
+    keptUnexported: string[];
+}
+/** @see rebuildScope */
+export interface RebuildOptions {
+    /** Delete DB-only records even when they may never have been exported. */
+    force?: boolean;
 }
 /** Import `<root>/sessions/*.jsonl` rows into the `signals` table. */
 export declare function importEpisodes(db: DatabaseSync, scope: MemoryScope): number;
 /**
  * Rebuild one scope from disk: import lessons and metrics, drop records whose
  * lesson file no longer exists, restore episodes, and refresh the search index.
+ *
+ * Records written after the last fully successful export exist only in the
+ * database; deleting them would make that transient export failure permanent,
+ * so they are kept and listed unless `force` says otherwise (DESIGN §5.3.1).
  */
-export declare function rebuildScope(db: DatabaseSync, scope: MemoryScope, fts5: boolean): RebuildResult;
+export declare function rebuildScope(db: DatabaseSync, scope: MemoryScope, fts5: boolean, options?: RebuildOptions): RebuildResult;
 /**
  * Compare two roots' records for equivalence — used to prove that a rebuild
  * from the text view reproduces the same memory (M4 acceptance).

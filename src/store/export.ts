@@ -18,6 +18,7 @@ import { exportMetrics } from './metrics.js'
 import { countRecords, listRecords } from './sqlite/records.js'
 import { rowInt, rowStr } from './sqlite/db.js'
 import type { MemoryRecord, MemoryScope } from './types.js'
+import { recordExport } from './watermark.js'
 
 export interface ExportResult {
     root: string
@@ -253,5 +254,9 @@ export function exportAll(db: DatabaseSync, scope: MemoryScope, options: ExportO
         result.errors.push(`metrics: ${error instanceof Error ? error.message : String(error)}`)
         log('warn', 'memory: metrics.jsonl export failed:', error)
     }
+    // Only a fully successful snapshot may advance the watermark. A partial one
+    // keeps the old mark so `memory_stats` and `rebuild` still see the database
+    // as ahead of the text view — the safe direction (DESIGN §5.3.1).
+    if (result.errors.length === 0) recordExport(db)
     return result
 }

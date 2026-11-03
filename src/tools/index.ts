@@ -311,6 +311,11 @@ function reindexTool(deps: ToolDeps) {
                 type: 'boolean',
                 description: 'When true, drop existing records first (full rebuild from disk).',
             },
+            force: {
+                type: 'boolean',
+                description:
+                    'With rebuild=true: also delete records that exist only in the database because they were never exported. Default false — they are kept and listed, since the text view cannot restore them.',
+            },
             embeddings: {
                 type: 'boolean',
                 description: 'Also (re)build the semantic index for every changed record. Requires semantic.enabled.',
@@ -352,10 +357,20 @@ function reindexTool(deps: ToolDeps) {
                         lines.push(`${scope.kind} (${scope.root}): store unavailable`)
                         continue
                     }
-                    const result = rebuildScope(store.db, store.scope, store.fts5)
+                    const result = rebuildScope(store.db, store.scope, store.fts5, {
+                        ...(args.force === true ? { force: true } : {}),
+                    })
                     lines.push(
                         `${scope.kind} (${scope.root}): rebuilt — imported ${result.imported}, removed ${result.removed}, metrics ${result.metrics}, episodes ${result.episodes}${result.errors.length > 0 ? ` (errors: ${result.errors.join('; ')})` : ''}`,
                     )
+                    if (result.keptUnexported.length > 0) {
+                        const shown = result.keptUnexported.slice(0, 8).join(', ')
+                        const more = result.keptUnexported.length > 8 ? `, +${result.keptUnexported.length - 8} more` : ''
+                        lines.push(
+                            `  kept ${result.keptUnexported.length} record(s) that exist only in the database (never exported): ${shown}${more}`,
+                            '  they were NOT deleted: the text view cannot restore them. Export first (any memory write, or run this without rebuild), then rebuild again — or pass force=true if you are certain they are not worth keeping.',
+                        )
+                    }
                     continue
                 }
                 const imported = deps.registry.reimport(scope)

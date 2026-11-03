@@ -1,10 +1,13 @@
 /**
  * Rebuilding a scope's database from its text view (DESIGN §5.3).
  *
- * The SQLite database is a derived artifact: cloning the memory repository onto
+ * The text view is the **recovery source**: cloning the memory repository onto
  * another machine, or a corrupted index, must both be recoverable from the
- * tracked text alone. Episodes (L1) and the metric ledger are re-imported too,
- * so a rebuild loses nothing that was worth keeping.
+ * tracked files alone. The database is what writes land in first, and the text
+ * view is its synchronous export — which means the database can be *ahead* when
+ * an export failed. Deleting "records without a lesson file" is therefore
+ * guarded (DESIGN §5.3.1): a record written after the last successful export is
+ * kept and reported instead of silently dropped.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -14,6 +17,7 @@ import { importLessons } from './import.js';
 import { importMetrics } from './metrics.js';
 import { rebuildFts, transact } from './sqlite/db.js';
 import { listRecords } from './sqlite/records.js';
+import { readWatermark, recordExport } from './watermark.js';
 /**
  * Local, non-reproducible data (DESIGN §5.3 "sidecar").
  *
@@ -146,9 +150,22 @@ export function importEpisodes(db, scope) {
 /**
  * Rebuild one scope from disk: import lessons and metrics, drop records whose
  * lesson file no longer exists, restore episodes, and refresh the search index.
+ *
+ * Records written after the last fully successful export exist only in the
+ * database; deleting them would make that transient export failure permanent,
+ * so they are kept and listed unless `force` says otherwise (DESIGN §5.3.1).
  */
-export function rebuildScope(db, scope, fts5) {
-    const result = { root: scope.root, imported: 0, removed: 0, metrics: 0, episodes: 0, errors: [], preserved: {} };
+export function rebuildScope(db, scope, fts5, options = {}) {
+    const result = {
+        root: scope.root,
+        imported: 0,
+        removed: 0,
+        metrics: 0,
+        episodes: 0,
+        errors: [],
+        preserved: {},
+        keptUnexported: [],
+    };
     const sidecar = snapshotSidecar(db);
     const imported = importLessons(db, scope);
     result.imported = imported.imported;
@@ -175,13 +192,21 @@ export function rebuildScope(db, scope, fts5) {
         // no archive directory: nothing archived in this root yet
     }
     const stale = listRecords(db).filter((record) => !onDisk.has(record.id));
-    if (stale.length > 0) {
+    // Records older than the watermark are files a human deleted — safe to drop.
+    // Anything newer may simply never have reached disk; keep it and say so.
+    const watermark = readWatermark(db);
+    const unexported = new Set(options.force === true
+        ? []
+        : stale.filter((record) => watermark === undefined || record.updatedAt > watermark.at).map((record) => record.id));
+    const deletable = stale.filter((record) => !unexported.has(record.id));
+    result.keptUnexported = stale.filter((record) => unexported.has(record.id)).map((record) => record.id);
+    if (deletable.length > 0) {
         transact(db, () => {
             const statement = db.prepare('DELETE FROM records WHERE id = ?');
-            for (const record of stale)
+            for (const record of deletable)
                 statement.run(record.id);
         });
-        result.removed = stale.length;
+        result.removed = deletable.length;
     }
     try {
         result.metrics = importMetrics(db, scope);
@@ -200,7 +225,12 @@ export function rebuildScope(db, scope, fts5) {
     // failed) would be lost if this ran before it.
     result.preserved = restoreSidecar(db, sidecar);
     rebuildFts(db, fts5);
-    log('info', `memory: rebuilt ${scope.root} — imported ${result.imported}, removed ${result.removed}, metrics ${result.metrics}, episodes ${result.episodes}`);
+    // The rebuild re-read the store from disk, so a clean one proves the text view
+    // covers every record — only then may the watermark advance. With records kept
+    // aside, the old mark stays so the gap keeps being reported.
+    if (result.errors.length === 0 && result.keptUnexported.length === 0)
+        recordExport(db);
+    log('info', `memory: rebuilt ${scope.root} — imported ${result.imported}, removed ${result.removed}, metrics ${result.metrics}, episodes ${result.episodes}${result.keptUnexported.length > 0 ? `, kept ${result.keptUnexported.length} unexported record(s)` : ''}`);
     return result;
 }
 export function fingerprint(db) {

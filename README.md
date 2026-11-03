@@ -103,7 +103,7 @@ memory.db(+wal/shm)  派生索引，不入库（.gitignore 已含）
 | `memory_stats` | 健康度 + 评估门禁 + 趋势 |
 | `memory_consolidate` / `memory_forget` | 巩固（默认 dry-run）/ 退役（归档不删） |
 | `memory_sync` | 提交 → fetch/rebase → 冲突按规则合并 → 重建（`push=true` 才推） |
-| `memory_reindex` | 从文本视图重建索引；`rebuild=true` 做全量重建 |
+| `memory_reindex` | 从文本视图重建索引；`rebuild=true` 全量重建（只删盘上已无、且早于上次成功导出的记录；`force=true` 才连未导出的也删） |
 | `memory_import` / `memory_config` | 导入外部 lesson / 会话级降噪（不落盘） |
 
 注册失败的工具不会出现在常驻协议段里——能力由**实际注册结果**推导，不是"打算注册什么"。
@@ -197,6 +197,7 @@ memory_stats({ setBaseline: true, baselineReason: "用户要求；v0.3.2 发布�
 | 召回总是空 | 该作用域有没有 `active` 记录；`minScore` 是否过高；`memory_config({})` 看会话覆盖 |
 | 蒸馏没发生 | 该轮是否够"疼痛"（`minSignals`）、每会话/每日预算是否已用尽 |
 | 语义检索没贡献 | `memory_stats` 的索引行；多半是没配端点或没回填（`memory_reindex({ embeddings: true })`） |
+| `memory_stats` 报 `text view may lag` | 库比 git 里的文本视图新（某次导出失败）：先让一次导出发生（例如 `memory_save`，写入即全量导出），**再**考虑 rebuild——护栏会保留这些记录 |
 
 日志 `~/.dsh/memory-plugin.log` 超过 5 MB 自动轮转为 `.log.1`。插件从不写 stdout：
 TUI 拥有 stdout，web server 有自己的 console。

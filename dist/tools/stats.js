@@ -16,6 +16,7 @@ import { indexStats } from '../recall/semantic.js';
 import { ScopeResolver, sessionIdOf } from '../scope/resolver.js';
 import { summarizeMetrics } from '../store/metrics.js';
 import { countRecords } from '../store/sqlite/records.js';
+import { exportLag } from '../store/watermark.js';
 import { refuseWrite } from './save.js';
 const TEXT_OUTPUT = { type: 'string' };
 export function statsTool(deps) {
@@ -71,6 +72,19 @@ export function statsTool(deps) {
                 const metrics = summarizeMetrics(store.db);
                 const episodes = episodeDigest(store.db);
                 lines.push(`  records: ${counts.total} (active ${counts.active} / pending ${counts.pending} / archived ${counts.archived}) · expired ${counts.expired} · superseded ${counts.superseded}`);
+                // The database can be ahead of the git-tracked text view when an
+                // export failed; a rebuild would then delete those records, so the
+                // gap has to be visible here rather than inferred from logs.
+                const lag = exportLag(store.db);
+                if (lag.kind === 'fresh') {
+                    lines.push(`  text view: up to date (exported ${lag.watermark.records} record(s) at ${lag.watermark.at})`);
+                }
+                else if (lag.kind === 'lagging') {
+                    lines.push(`  ⚠️ text view may lag: ${lag.unexported} record(s) written after the last successful export (${lag.watermark.at}) — a rebuild would delete them, so write it out first (any memory write re-exports the whole store)`);
+                }
+                else if (lag.kind === 'missing' && counts.total > 0) {
+                    lines.push('  ⚠️ text view: no successful export recorded for this store — any memory write exports automatically; do that before rebuilding');
+                }
                 lines.push(`  conflicts ${conflictCount(store.db)} · open proposals ${openProposalsCount(store.db)} · episodes ${episodes.signals} signal(s)`);
                 lines.push(`  recall: ${recall.injections} injection(s), ${recall.attributed} attributed (success ${recall.success} / failure ${recall.failure})`);
                 lines.push(`  tasks: ${metrics.tasks} (success ${metrics.success} / partial ${metrics.partial} / failed ${metrics.failed}) · lessons logged ${metrics.lessons}`);

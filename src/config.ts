@@ -384,6 +384,10 @@ export function resolveConfig(raw: unknown): MemoryConfig {
     const d = DEFAULT_CONFIG
 
     const memoryHome = root['memoryHome']
+    // The quota invariant is defined against the *resolved* budget, not the
+    // default one: resolving 1200 with a default 600 silently clamped
+    // `projectMaxTokens` to 300 and made a valid pair look invalid.
+    const recallBudgetTokens = num(recall['budgetTokens'], d.recall.budgetTokens, 0, 20_000)
     return {
         enabled: bool(root['enabled'], d.enabled),
         logFile: str(root['logFile'], d.logFile),
@@ -413,12 +417,12 @@ export function resolveConfig(raw: unknown): MemoryConfig {
         },
         recall: {
             autoInject: bool(recall['autoInject'], d.recall.autoInject),
-            budgetTokens: num(recall['budgetTokens'], d.recall.budgetTokens, 0, 20_000),
+            budgetTokens: recallBudgetTokens,
             maxItems: num(recall['maxItems'], d.recall.maxItems, 0, 100),
             minScore: num(recall['minScore'], d.recall.minScore, 0, 1),
             sessionToolBudgetTokens: num(recall['sessionToolBudgetTokens'], d.recall.sessionToolBudgetTokens, 0, 1_000_000),
             maxBodyChars: num(recall['maxBodyChars'], d.recall.maxBodyChars, 0, 4_000),
-            quota: quotaOf(recall['quota'], d.recall.quota, d.recall.budgetTokens),
+            quota: quotaOf(recall['quota'], d.recall.quota, recallBudgetTokens),
             layers: layers(recall['layers'], d.recall.layers),
         },
         learn: {

@@ -162,6 +162,14 @@ test('the quota pair is clamped so it can never overspend the pack budget', () =
     assert.equal(resolved.recall.quota.projectMaxTokens, 100)
 })
 
+test('the quota invariant is checked against the configured budget, not the default', () => {
+    // 300 + 720 fits in 1200 but not in the default 600; clamping against the
+    // default silently turned a valid pair into [300, 300] on the live profile.
+    const resolved = resolveConfig({ recall: { budgetTokens: 1200, quota: { globalMinTokens: 300, projectMaxTokens: 720 } } })
+    assert.equal(resolved.recall.budgetTokens, 1200)
+    assert.deepEqual(resolved.recall.quota, { globalMinTokens: 300, projectMaxTokens: 720 })
+})
+
 // ---- embedding budget -------------------------------------------------------
 
 test('embedding spend is recorded per UTC day and the cap is a setting', async (t) => {

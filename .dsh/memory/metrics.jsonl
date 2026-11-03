@@ -8,4 +8,4 @@
 {"task_id":"s-2026-09-30-d24db3f6","date":"2026-09-30","project":"session","summary":"auto: 1 turn(s), 0 tool call(s), 7 signal(s)","outcome":"failed","duration_min":11,"disturb_count":1,"rework_rounds":2,"lessons":0,"tokens":0}
 {"task_id":"s-2026-10-12-bc388ef3","date":"2026-10-12","project":"session","summary":"auto: 45 turn(s), 2 tool call(s), 10 signal(s)","outcome":"failed","duration_min":17467,"disturb_count":4,"rework_rounds":2,"lessons":7,"tokens":2785}
 {"task_id":"s-2026-10-22-faa166dd","date":"2026-10-22","project":"session","summary":"auto: 3 turn(s), 69 tool call(s), 0 signal(s)","outcome":"failed","duration_min":12,"disturb_count":0,"rework_rounds":0,"lessons":2,"tokens":726}
-{"task_id":"s-2026-11-03-faa166dd","date":"2026-11-03","project":"session","summary":"auto: 14 turn(s), 7 tool call(s), 20 signal(s)","outcome":"failed","duration_min":0,"disturb_count":2,"rework_rounds":5,"lessons":11,"tokens":5323}
+{"task_id":"s-2026-11-03-faa166dd","date":"2026-11-03","project":"session","summary":"auto: 14 turn(s), 7 tool call(s), 20 signal(s)","outcome":"failed","duration_min":286,"disturb_count":2,"rework_rounds":5,"lessons":12,"tokens":5824}

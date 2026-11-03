@@ -77,7 +77,7 @@ async function injectRecall(deps, payload, decision) {
     // cancelled while it ran, and an aborted step must not receive a message.
     if (isAborted(payload.signal))
         return decision;
-    const text = renderRecallPack(outcome.hits, outcome.dropped);
+    const text = renderRecallPack(outcome.hits, outcome.dropped, deps.config.recall.maxBodyChars);
     const message = createUserMessage({
         content: [{ type: 'text', text }],
         source: {

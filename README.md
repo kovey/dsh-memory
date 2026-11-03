@@ -100,7 +100,7 @@ memory.db(+wal/shm)  派生索引，不入库（.gitignore 已含）
 | `memory_search` / `memory_get` | 检索（标题+摘要）/ 按 id 读全文 |
 | `memory_recall` | 一次取回召回包（已排序、按预算裁剪） |
 | `memory_save` | 写长期经验（默认项目级；同一门控负责去重/合并/拒收） |
-| `memory_stats` | 健康度 + 评估门禁 + 趋势 |
+| `memory_stats` | 健康度 + 评估门禁 + 趋势 + 当月花费 |
 | `memory_consolidate` / `memory_forget` | 巩固（默认 dry-run）/ 退役（归档不删） |
 | `memory_sync` | 提交 → fetch/rebase → 冲突按规则合并 → 重建（`push=true` 才推） |
 | `memory_reindex` | 从文本视图重建索引；`rebuild=true` 全量重建（只删盘上已无、且早于上次成功导出的记录；`force=true` 才连未导出的也删） |
@@ -116,6 +116,8 @@ memory.db(+wal/shm)  派生索引，不入库（.gitignore 已含）
 |---|---|---|
 | `recall.autoInject` / `budgetTokens` / `maxItems` / `minScore` | `true` / 600 / 5 / 0.35 | 每轮自动召回 |
 | `recall.sessionToolBudgetTokens` | 20000 | 会话内工具输出累计上限 |
+| `recall.maxBodyChars` | 220 | 单条命中保留的正文长度（实测 76% 记录超过它，调大即多带细节、也多花 token） |
+| `recall.quota.globalMinTokens` / `projectMaxTokens` | 0 / 0 | 分层配额：全局保底 / 项目封顶，两者都 0 = 关闭（默认行为） |
 | `routing.subagentWrite` | `false` | 子代理默认不能写记忆（写类工具统一拒绝） |
 | `learn.collectSignals` | `true` | 信号采集：失败命令 / 请求失败 / 用户纠正 / 返工 |
 | `learn.autoDistill` / `distillTimeoutMs` / `maxDistillPerSession` | `true` / 15000 / 3 | 疼痛轮次蒸馏 |
@@ -127,7 +129,7 @@ memory.db(+wal/shm)  派生索引，不入库（.gitignore 已含）
 | `eval.autoFreezeBaseline` | `false` | 基线默认人工冻结（见[评估门禁](#评估门禁)） |
 | `git.autoCommit` / `checkpointMinutes` | `task-end` / 30 | `off` / `task-end` / `immediate`；插件**永不 push**（`git.autoPush` 是字面量 `false`，没有开关） |
 | `sqlite.journalMode` / `maxOpenRoots` | `wal` / 4 | 派生库 |
-| `semantic.enabled` | `false` | 语义召回（下一节） |
+| `semantic.enabled` / `maxTokensPerDay` | `false` / 200000 | 语义召回；日预算，0 = 不限 |
 
 完整键表与取值范围以 [`src/config.ts`](src/config.ts) 的 `DEFAULT_CONFIG` 为准。
 
@@ -146,6 +148,7 @@ memory.db(+wal/shm)  派生索引，不入库（.gitignore 已含）
       timeoutMs: 8000        # 冷启动要重载模型（~2.8s），默认 1.5s 会把自己中断
       minLexicalHits: 3      # 词法已召回 ≥3 条时不再调用
       maxAdditions: 2        # 每次最多补几条纯语义命中
+      maxTokensPerDay: 200000   # 日预算（0 = 不限）；耗尽后降级为词法
 ```
 
 19 条真实教训上的对照（复跑需先 `npm run build`：`node scripts/eval-semantic.ts --root ~/.dsh/memory --minLex 3 --weight 0.3 --minSim 0.5 --maxAdd 2`）：

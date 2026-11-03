@@ -17,6 +17,7 @@ import { ScopeResolver, sessionIdOf } from '../scope/resolver.js';
 import { summarizeMetrics } from '../store/metrics.js';
 import { countRecords } from '../store/sqlite/records.js';
 import { exportLag } from '../store/watermark.js';
+import { embeddingSpendMonth } from '../recall/embed-budget.js';
 import { refuseWrite } from './save.js';
 const TEXT_OUTPUT = { type: 'string' };
 export function statsTool(deps) {
@@ -166,6 +167,18 @@ export function statsTool(deps) {
                     autoFreeze: deps.config.eval.autoFreezeBaseline,
                     ...(autoFreezeBlocked !== undefined ? { autoFreezeBlocked } : {}),
                 }, baselineHealth));
+                // "这个月记忆层花了多少 token" must be directly answerable, not a
+                // grep across two databases. Distillation spend comes from its
+                // audit table; embedding spend from the daily meta counters.
+                const month = new Date().toISOString().slice(0, 7);
+                const spendRow = store.db
+                    .prepare(`SELECT COUNT(*) AS runs, COALESCE(SUM(COALESCE(tokens_in, 0) + COALESCE(tokens_out, 0)), 0) AS tokens
+                         FROM distill WHERE substr(at, 1, 7) = ?`)
+                    .get(month);
+                const runs = typeof spendRow?.['runs'] === 'number' ? spendRow['runs'] : 0;
+                const distillTokens = typeof spendRow?.['tokens'] === 'number' ? spendRow['tokens'] : 0;
+                const embedTokens = embeddingSpendMonth(store.db);
+                lines.push(`  spend ${month}: distillation ${distillTokens} tok / ${runs} run(s) · embeddings ${embedTokens} tok${deps.config.semantic.maxTokensPerDay > 0 ? ` (cap ${deps.config.semantic.maxTokensPerDay}/day)` : ''}`);
             }
             return lines.join('\n');
         },

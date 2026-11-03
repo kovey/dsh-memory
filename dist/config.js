@@ -13,6 +13,8 @@ export const DEFAULT_CONFIG = {
         minScore: 0.35,
         layers: ['project', 'global', 'profile'],
         sessionToolBudgetTokens: 20_000,
+        maxBodyChars: 220,
+        quota: { globalMinTokens: 0, projectMaxTokens: 0 },
     },
     learn: {
         collectSignals: true,
@@ -77,6 +79,7 @@ export const DEFAULT_CONFIG = {
         maxRecordsPerRun: 200,
         minSimilarity: 0.35,
         maxAdditions: 2,
+        maxTokensPerDay: 200_000,
     },
 };
 function obj(value) {
@@ -102,6 +105,22 @@ function layers(value, fallback) {
         return fallback;
     const picked = value.filter((v) => typeof v === 'string' && LAYERS.includes(v));
     return picked.length > 0 ? picked : fallback;
+}
+/**
+ * Resolve the recall quota and enforce the pack invariant.
+ *
+ * `globalMinTokens + projectMaxTokens` may not exceed the recall budget: two
+ * independent caps that together overflow would silently break the token budget
+ * that everything else relies on. Clamping is deliberate (config resolution is
+ * total and never throws) — the effective values are what the report shows.
+ */
+function quotaOf(value, fallback, budgetTokens) {
+    const raw = obj(value);
+    const budget = Math.max(0, budgetTokens);
+    const floor = num(raw['globalMinTokens'], fallback.globalMinTokens, 0, budget);
+    const cap = num(raw['projectMaxTokens'], fallback.projectMaxTokens, 0, budget);
+    const [globalMinTokens, projectMaxTokens] = floor + cap <= budget ? [floor, cap] : [Math.min(floor, budget), Math.max(0, budget - Math.min(floor, budget))];
+    return { globalMinTokens, projectMaxTokens };
 }
 /** Resolve raw loader config into a total, validated configuration. */
 export function resolveConfig(raw) {
@@ -149,6 +168,8 @@ export function resolveConfig(raw) {
             maxItems: num(recall['maxItems'], d.recall.maxItems, 0, 100),
             minScore: num(recall['minScore'], d.recall.minScore, 0, 1),
             sessionToolBudgetTokens: num(recall['sessionToolBudgetTokens'], d.recall.sessionToolBudgetTokens, 0, 1_000_000),
+            maxBodyChars: num(recall['maxBodyChars'], d.recall.maxBodyChars, 0, 4_000),
+            quota: quotaOf(recall['quota'], d.recall.quota, d.recall.budgetTokens),
             layers: layers(recall['layers'], d.recall.layers),
         },
         learn: {
@@ -219,6 +240,7 @@ export function resolveConfig(raw) {
             maxRecordsPerRun: num(semantic['maxRecordsPerRun'], d.semantic.maxRecordsPerRun, 0, 5_000),
             minSimilarity: num(semantic['minSimilarity'], d.semantic.minSimilarity, 0, 1),
             maxAdditions: num(semantic['maxAdditions'], d.semantic.maxAdditions, 0, 50),
+            maxTokensPerDay: num(semantic['maxTokensPerDay'], d.semantic.maxTokensPerDay, 0, 100_000_000),
             budgetMs: num(semantic['budgetMs'], d.semantic.budgetMs, 200, 120_000),
             foreignModelGraceDays: num(semantic['foreignModelGraceDays'], d.semantic.foreignModelGraceDays, 1, 3_650),
         },

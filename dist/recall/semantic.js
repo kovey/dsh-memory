@@ -3,6 +3,7 @@ import { transact } from '../store/sqlite/db.js';
 import { listRecords } from '../store/sqlite/records.js';
 import { hash } from '../store/rebuild.js';
 import { extractTerms } from '../store/sqlite/records.js';
+import { chargeEmbedding, embeddingBudgetExhausted, embeddingSpend, estimateEmbeddingTokens } from './embed-budget.js';
 /** Helper: an awaited call can invalidate TS' narrowing of `signal.aborted`. */
 function isAborted(signal) {
     return signal?.aborted === true;
@@ -238,15 +239,34 @@ export async function ensureEmbeddings(db, provider, model, options = {}) {
     const pending = pendingRecords(db, model, limit);
     if (pending.length === 0)
         return 0;
-    const vectors = await provider.embed(pending.map(embeddingText), options.signal);
+    let records = pending;
+    if (options.maxTokens !== undefined && options.maxTokens > 0) {
+        const kept = [];
+        let used = 0;
+        for (const record of pending) {
+            const cost = estimateEmbeddingTokens([embeddingText(record)]);
+            if (used + cost > options.maxTokens)
+                break;
+            used += cost;
+            kept.push(record);
+        }
+        if (kept.length === 0)
+            return 0;
+        records = kept;
+    }
+    const texts = records.map(embeddingText);
+    const vectors = await provider.embed(texts, options.signal);
     if (vectors === undefined)
         return 0;
-    saveVectors(db, model, pending.map((record, index) => ({
+    // The spend is recorded whether or not the vectors were useful: the provider
+    // was called, so the money is gone.
+    chargeEmbedding(db, estimateEmbeddingTokens(texts));
+    saveVectors(db, model, records.map((record, index) => ({
         recordId: record.id,
         vector: vectors[index] ?? [],
         hash: recordHash(record),
     })).filter((entry) => entry.vector.length > 0));
-    return pending.length;
+    return records.length;
 }
 export function cosine(a, b) {
     // Different lengths mean different embedding spaces: comparing prefixes would
@@ -321,12 +341,18 @@ export async function semanticRecall(deps, store, query, lexicalHitCount, option
     // the global store during a project session) are often empty.
     if (searchableRecords(store.db) === 0)
         return { ...empty, reason: 'no records to search' };
+    if (embeddingBudgetExhausted(deps.config, store.db)) {
+        return { ...empty, reason: 'daily embedding token budget exhausted' };
+    }
     const model = semantic.model;
     let embedded = 0;
     try {
+        const cap = semantic.maxTokensPerDay;
+        const remaining = cap > 0 ? Math.max(0, cap - embeddingSpend(store.db)) : undefined;
         embedded = await ensureEmbeddings(store.db, deps.provider, model, {
             ...(options.signal !== undefined ? { signal: options.signal } : {}),
             limit: semantic.maxRecordsPerRun,
+            ...(remaining !== undefined ? { maxTokens: remaining } : {}),
         });
     }
     catch (error) {
@@ -342,6 +368,7 @@ export async function semanticRecall(deps, store, query, lexicalHitCount, option
         if (vectors === undefined || vectors[0] === undefined) {
             return { ...empty, embedded, reason: deps.provider.lastError() ?? 'embedding failed' };
         }
+        chargeEmbedding(store.db, estimateEmbeddingTokens([query]));
         queryVector = new Float32Array(vectors[0]);
         cache.set(key, queryVector);
     }

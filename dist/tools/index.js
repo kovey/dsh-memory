@@ -18,6 +18,7 @@ import { syncTool } from './sync.js';
 import { statsTool } from './stats.js';
 import { rebuildScope } from '../store/rebuild.js';
 import { ensureEmbeddings, indexStats } from '../recall/semantic.js';
+import { embeddingBudgetExhausted, embeddingSpend } from '../recall/embed-budget.js';
 const TEXT_OUTPUT = { type: 'string' };
 const LAYER_ENUM = ['project', 'global', 'profile', 'episodic'];
 /**
@@ -136,7 +137,7 @@ function recallTool(deps) {
             if (outcome.hits.length === 0) {
                 return `no memory matched "${args.task}" (considered ${outcome.considered} record(s) in ${outcome.scopes.map((scope) => scope.kind).join(' + ') || 'no scope'})`;
             }
-            const pack = renderRecallPack(outcome.hits, outcome.dropped);
+            const pack = renderRecallPack(outcome.hits, outcome.dropped, deps.config.recall.maxBodyChars);
             return chargeToolOutput(deps, agent, 'memory_recall', pack) ?? pack;
         },
     });
@@ -281,13 +282,22 @@ function reindexTool(deps) {
                     return 'semantic recall is disabled (set semantic.enabled=true and configure semantic.baseUrl/model)';
                 }
                 const model = deps.config.semantic.model;
+                const cap = deps.config.semantic.maxTokensPerDay;
                 for (const scope of targets) {
                     const store = deps.registry.open(scope);
                     if (store === undefined)
                         continue;
-                    const embedded = await ensureEmbeddings(store.db, provider, model, { limit: -1 });
+                    if (embeddingBudgetExhausted(deps.config, store.db)) {
+                        lines.push(`${scope.kind} (${scope.root}): skipped — daily embedding budget exhausted (${embeddingSpend(store.db)} / ${cap} tok); it resets at the next UTC day`);
+                        continue;
+                    }
+                    const remaining = cap > 0 ? Math.max(0, cap - embeddingSpend(store.db)) : undefined;
+                    const embedded = await ensureEmbeddings(store.db, provider, model, {
+                        limit: -1,
+                        ...(remaining !== undefined ? { maxTokens: remaining } : {}),
+                    });
                     const stats = indexStats(store.db, model);
-                    lines.push(`${scope.kind} (${scope.root}): embedded ${embedded} record(s) — indexed ${stats.indexed}, pending ${stats.pending}${provider.lastError() !== undefined ? ` (last error: ${provider.lastError()})` : ''}`);
+                    lines.push(`${scope.kind} (${scope.root}): embedded ${embedded} record(s) — indexed ${stats.indexed}, pending ${stats.pending}, spent today ${embeddingSpend(store.db)}${cap > 0 ? ` / ${cap}` : ''} tok${provider.lastError() !== undefined ? ` (last error: ${provider.lastError()})` : ''}`);
                 }
                 return lines.join('\n') || 'no scope resolved';
             }

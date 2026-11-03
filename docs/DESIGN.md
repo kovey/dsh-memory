@@ -294,7 +294,33 @@ score = bm25_norm(title, body, tags)            # FTS5 bm25，归一化
 
 四条硬约束：**阈值门**（`minScore`，低分不注入）、**预算截断**（超出部分提示"还有 N 条可用 memory_search"）、**会话内幂等**（`sessionId+recordId` 去重集合）、**可审计**（`usage` 表记账）。
 
+**单条体积是独立旋钮**：`recall.maxBodyChars`（默认 220）决定每个命中保留多少正文字符。它曾经是写死的常量，
+而实测 117 条记录里有 89 条（76%）正文超过 220 字符——也就是说多数教训进上下文时是被截断的。
+调大它会同时抬高单条 token 成本，所以与 `budgetTokens` / `maxItems` 一起看。
+
 召回顺序：项目 lessons（全量索引常驻）→ 全局（关键词命中）→ L5 偏好（常驻）→ 需要证据时才读项目 signals。
+
+### 6.1 分层配额（可选，默认关）
+
+默认是**一张按分数排序的列表**：项目和全局的候选合并后统一竞争。这带来一个可量化的偏差——
+`freshness` 是摆动最大的单项乘数（120 天半衰期、下限 0.2，即 **5×**），叠加全局层权重 0.85，
+一条 120 天前的高价值全局教训要跟一条全新的项目记录竞争，需要 relevance/confidence 高出约 **5.9 倍**。
+语料年轻时（当前最老记录 76 天）看不出来，但随时间推移会系统性地把"老而好"的教训挤出包外。
+
+因此提供**可选**的两级配额（`recall.quota`，两者默认 0 = 关闭，关闭时行为与历史完全一致）：
+
+| 键 | 含义 |
+|---|---|
+| `quota.globalMinTokens` | 全局根记录的**保底切片**：先按分数取，但最多用掉这么多 token |
+| `quota.projectMaxTokens` | 项目记录的**总量上限**：在所有分配阶段都生效（含最后的竞争填充） |
+
+分配算法（`fitBudgetQuoted`）：① 全局保底 → ② 项目上限 → ③ 剩余预算全体按分数竞争。
+三个 pass 都受 `minScore` 约束——配额是"空间"的上下限，不是注入噪声的许可证。
+**不变量**：`globalMinTokens + projectMaxTokens ≤ budgetTokens`，在配置解析期就被 clamp
+（解析是 total 的、永不抛错），所以一对写坏的数不会撑破包预算。
+
+没有立即做成默认，是因为它改变的是召回形状而不是修 bug：先让需要的人打开并计量，
+等语料跨过 120 天、能观测到"老记录召回率是否低于其 relevance 排名"再决定默认值。
 
 ---
 
@@ -510,6 +536,12 @@ audit: turn 7 | model=deepseek-official/deepseek-v4-flash | in 299 / out 232 | c
   `lexical` 与余弦相似度 `semantic` 按 `weight` 混合，其余权重（置信度/新鲜度/层权/复现）不变。
 - 成本控制：`enabled` 默认 false；仅当词法命中的**记录数** < `minLexicalHits` 才嵌入查询；
   调用有 `timeoutMs`；失败静默降级词法；向量按内容哈希增量缓存；空作用域直接跳过。
+- **日预算与记账**（§2「不偷偷花钱」的补齐）：`semantic.maxTokensPerDay`（默认 200k，0 = 不限）。
+  每次成功调用按发送文本的 `estimateTokens` 记进 `meta['embed_spend:<UTC 日>']`，跨重启有效；
+  预算耗尽后召回直接降级为词法（返回 reason `daily embedding token budget exhausted`），
+  全量回填 `memory_reindex({ embeddings: true })` 也受同一条闸门约束，并按剩余额度截断本批。
+  `memory_stats` 的 `spend <YYYY-MM>` 行同时给出蒸馏与 embedding 的当月花费。
+  不读端点返回的 `usage.total_tokens`：并非所有 OpenAI 兼容端点都返回它，静默读到 0 的护栏比估算更糟。
 - 验证：假 embedding 服务 + 真实 HTTP 服务端到端；增量缓存（未改动不重复调用）；降级路径；
   "无语义时找不到、有语义时命中"的对照。
 - 顺带修正：`normalizeRelevance` 原为 min-max 归一，会把两个真实命中里较弱的一个压成 0 分、

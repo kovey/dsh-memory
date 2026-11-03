@@ -46,6 +46,29 @@ export interface MemoryConfig {
          * loop and fill its own context one capped answer at a time.
          */
         sessionToolBudgetTokens: number;
+        /**
+         * Characters of a lesson body kept in one injected hit.
+         *
+         * The rendered item is what `budgetTokens` pays for, so this is the knob
+         * that decides how much of a lesson actually reaches the model: the real
+         * corpus has 76% of records longer than the old hardcoded 220, which is
+         * why the constant became a setting. 0 keeps only the title line.
+         */
+        maxBodyChars: number;
+        /**
+         * Hard tier split for the pack (DESIGN §6.1). Both default to 0 = off,
+         * which keeps the historical behaviour: one score-ordered list.
+         *
+         * `globalMinTokens` reserves a slice for lessons from the *global* root
+         * before the rest competes; `projectMaxTokens` caps how much of the pack
+         * project records may take. The invariant `globalMinTokens +
+         * projectMaxTokens <= budgetTokens` is enforced by clamping at resolve
+         * time, so a bad pair can never overspend the pack.
+         */
+        quota: {
+            globalMinTokens: number;
+            projectMaxTokens: number;
+        };
     };
     learn: {
         collectSignals: boolean;
@@ -203,6 +226,14 @@ export interface MemoryConfig {
          * ~2× for no accuracy gain (measured on the real corpus).
          */
         maxAdditions: number;
+        /**
+         * Daily ceiling for embedding spend, in estimated tokens (UTC day, same
+         * boundary as distillation). `0` disables the cap.
+         *
+         * Embeddings were the one paid path with no ceiling and no accounting;
+         * once exhausted the recall pass degrades to lexical and says why.
+         */
+        maxTokensPerDay: number;
     };
 }
 export declare const DEFAULT_CONFIG: MemoryConfig;

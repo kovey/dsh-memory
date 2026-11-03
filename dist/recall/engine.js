@@ -89,12 +89,18 @@ export async function recall(deps, request) {
         .filter((item) => item.score >= minScore || semanticOnlyIds.has(item.record.id));
     const budgetTokens = Math.max(0, (request.budgetTokens ?? deps.config.recall.budgetTokens) - estimateTokens(HEADER));
     const scopeOf = (item) => scopeByItem.get(item) ?? stores[0].scope;
-    const fitted = fitBudget(ranked, (item) => renderHit({ record: item.record, scope: scopeOf(item), score: item.score }), {
+    const maxBodyChars = deps.config.recall.maxBodyChars;
+    const render = (item) => renderHit({ record: item.record, scope: scopeOf(item), score: item.score }, maxBodyChars);
+    const fitOptions = {
         budgetTokens,
         maxItems: request.maxItems ?? deps.config.recall.maxItems,
         minScore: 0,
         ...(request.exclude !== undefined ? { skip: request.exclude } : {}),
-    });
+    };
+    const quota = deps.config.recall.quota;
+    const fitted = quota.globalMinTokens > 0 || quota.projectMaxTokens > 0
+        ? fitBudgetQuoted(ranked, render, fitOptions, (item) => scopeOf(item).kind === 'global', quota)
+        : fitBudget(ranked, render, fitOptions);
     let dropped = fitted.dropped;
     const hits = [];
     for (const item of fitted.selected) {
@@ -139,6 +145,81 @@ function recallStores(deps, request) {
     }
     return stores;
 }
+/**
+ * Fit the pack with a hard two-tier quota (DESIGN §6.1).
+ *
+ * The default path is one score-ordered list, which lets a fresh project record
+ * outrank an older global lesson by ~5.9× (freshness 0.2 over 120 days, times
+ * the 0.85 global layer weight). When a quota is configured the pack is filled
+ * in three passes instead:
+ *
+ *   1. `globalMinTokens` — a reserved slice for lessons from the global root,
+ *      taken in score order but bounded by the slice (never by the whole pack);
+ *   2. `projectMaxTokens` — a ceiling on what project records may take;
+ *   3. the rest of the budget, all candidates competing by score.
+ *
+ * Passes are greedy and `minScore` applies to every one of them: a quota is a
+ * ceiling/floor on *space*, not a licence to inject noise.
+ */
+export function fitBudgetQuoted(ranked, render, options, isGlobal, quota) {
+    const candidates = options.skip === undefined ? ranked : ranked.filter((item) => !options.skip(item.record.id));
+    const selected = [];
+    const taken = new Set();
+    let used = 0;
+    let projectSpent = 0;
+    /** Shared admission test; the project ceiling applies in every pass. */
+    const take = (item, sliceUsed, sliceLimit) => {
+        if (selected.length >= options.maxItems)
+            return undefined;
+        if (taken.has(item.record.id))
+            return undefined;
+        if (item.score < options.minScore)
+            return undefined;
+        const cost = estimateTokens(render(item));
+        if (used + cost > options.budgetTokens)
+            return undefined;
+        if (sliceLimit > 0 && sliceUsed + cost > sliceLimit)
+            return undefined;
+        if (!isGlobal(item) && quota.projectMaxTokens > 0 && projectSpent + cost > quota.projectMaxTokens)
+            return undefined;
+        selected.push(item);
+        taken.add(item.record.id);
+        used += cost;
+        if (!isGlobal(item))
+            projectSpent += cost;
+        return cost;
+    };
+    // 1) reserved slice for the global root
+    if (quota.globalMinTokens > 0) {
+        let spent = 0;
+        for (const item of candidates) {
+            if (!isGlobal(item))
+                continue;
+            const cost = take(item, spent, quota.globalMinTokens);
+            if (cost !== undefined)
+                spent += cost;
+        }
+    }
+    // 2) ceiling for project records
+    if (quota.projectMaxTokens > 0) {
+        let spent = 0;
+        for (const item of candidates) {
+            if (isGlobal(item))
+                continue;
+            const cost = take(item, spent, quota.projectMaxTokens);
+            if (cost !== undefined)
+                spent += cost;
+        }
+    }
+    // 3) the remainder competes by score, whatever the root
+    for (const item of candidates) {
+        if (selected.length >= options.maxItems)
+            break;
+        take(item, 0, 0);
+    }
+    selected.sort((a, b) => b.score - a.score);
+    return { selected, dropped: candidates.length - selected.length, tokensUsed: used };
+}
 /** Render one hit as a compact, model-readable line pair. */
 export function renderHit(hit, maxBodyChars = 220) {
     const record = hit.record;
@@ -148,16 +229,16 @@ export function renderHit(hit, maxBodyChars = 220) {
     return `${record.title} [${flags.join(' · ')} · id ${record.id}]\n   ${body}`;
 }
 /** Render the whole pack injected into a step. */
-export function renderRecallPack(hits, dropped = 0) {
+export function renderRecallPack(hits, dropped = 0, maxBodyChars = 220) {
     const lines = [HEADER];
-    hits.forEach((hit, index) => lines.push(`${index + 1}. ${renderHit(hit)}`));
+    hits.forEach((hit, index) => lines.push(`${index + 1}. ${renderHit(hit, maxBodyChars)}`));
     if (dropped > 0)
         lines.push(`（另有 ${dropped} 条相关记忆未展开，可用 memory_search 检索）`);
     lines.push('以上为历史经验，可能与当前情况不符；以实际验证为准，冲突时以当前事实为准。');
     return lines.join('\n');
 }
 /** Estimated cost of one rendered pack (used by tests and budgets). */
-export function packTokens(hits, dropped = 0) {
-    return estimateTokens(renderRecallPack(hits, dropped));
+export function packTokens(hits, dropped = 0, maxBodyChars = 220) {
+    return estimateTokens(renderRecallPack(hits, dropped, maxBodyChars));
 }
 //# sourceMappingURL=engine.js.map

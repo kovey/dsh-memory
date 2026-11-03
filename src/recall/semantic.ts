@@ -23,6 +23,7 @@ import type { MemoryRecord } from '../store/types.js'
 import type { StoreRegistry, ScopeStore } from '../store/store.js'
 import { hash } from '../store/rebuild.js'
 import { extractTerms } from '../store/sqlite/records.js'
+import { chargeEmbedding, embeddingBudgetExhausted, embeddingSpend, estimateEmbeddingTokens } from './embed-budget.js'
 
 export interface EmbeddingProvider {
     id: string
@@ -302,6 +303,12 @@ export interface EnsureOptions {
     signal?: AbortSignal
     /** Cap for this pass; `-1` means "everything pending". */
     limit?: number
+    /**
+     * Token ceiling for this pass (the remaining part of the daily embedding
+     * budget). Records are taken in order until the estimate would exceed it, so
+     * a big backfill cannot blow a cap that is meant to bound spend.
+     */
+    maxTokens?: number
 }
 
 /**
@@ -318,18 +325,35 @@ export async function ensureEmbeddings(
     const limit = options.limit !== undefined && options.limit >= 0 ? options.limit : 5_000
     const pending = pendingRecords(db, model, limit)
     if (pending.length === 0) return 0
-    const vectors = await provider.embed(pending.map(embeddingText), options.signal)
+    let records = pending
+    if (options.maxTokens !== undefined && options.maxTokens > 0) {
+        const kept: MemoryRecord[] = []
+        let used = 0
+        for (const record of pending) {
+            const cost = estimateEmbeddingTokens([embeddingText(record)])
+            if (used + cost > options.maxTokens) break
+            used += cost
+            kept.push(record)
+        }
+        if (kept.length === 0) return 0
+        records = kept
+    }
+    const texts = records.map(embeddingText)
+    const vectors = await provider.embed(texts, options.signal)
     if (vectors === undefined) return 0
+    // The spend is recorded whether or not the vectors were useful: the provider
+    // was called, so the money is gone.
+    chargeEmbedding(db, estimateEmbeddingTokens(texts))
     saveVectors(
         db,
         model,
-        pending.map((record, index) => ({
+        records.map((record, index) => ({
             recordId: record.id,
             vector: vectors[index] ?? [],
             hash: recordHash(record),
         })).filter((entry) => entry.vector.length > 0),
     )
-    return pending.length
+    return records.length
 }
 
 export function cosine(a: Float32Array, b: Float32Array): number {
@@ -427,13 +451,19 @@ export async function semanticRecall(
     // A scope with nothing to find must not cost a call: secondary roots (e.g.
     // the global store during a project session) are often empty.
     if (searchableRecords(store.db) === 0) return { ...empty, reason: 'no records to search' }
+    if (embeddingBudgetExhausted(deps.config, store.db)) {
+        return { ...empty, reason: 'daily embedding token budget exhausted' }
+    }
 
     const model = semantic.model
     let embedded = 0
     try {
+        const cap = semantic.maxTokensPerDay
+        const remaining = cap > 0 ? Math.max(0, cap - embeddingSpend(store.db)) : undefined
         embedded = await ensureEmbeddings(store.db, deps.provider, model, {
             ...(options.signal !== undefined ? { signal: options.signal } : {}),
             limit: semantic.maxRecordsPerRun,
+            ...(remaining !== undefined ? { maxTokens: remaining } : {}),
         })
     } catch (error) {
         log('debug', 'memory: embedding backfill failed:', error)
@@ -449,6 +479,7 @@ export async function semanticRecall(
         if (vectors === undefined || vectors[0] === undefined) {
             return { ...empty, embedded, reason: deps.provider.lastError() ?? 'embedding failed' }
         }
+        chargeEmbedding(store.db, estimateEmbeddingTokens([query]))
         queryVector = new Float32Array(vectors[0])
         cache.set(key, queryVector)
     }

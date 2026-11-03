@@ -95,6 +95,12 @@ export interface EnsureOptions {
     signal?: AbortSignal;
     /** Cap for this pass; `-1` means "everything pending". */
     limit?: number;
+    /**
+     * Token ceiling for this pass (the remaining part of the daily embedding
+     * budget). Records are taken in order until the estimate would exceed it, so
+     * a big backfill cannot blow a cap that is meant to bound spend.
+     */
+    maxTokens?: number;
 }
 /**
  * Bring the semantic index up to date, incrementally. Returns how many records

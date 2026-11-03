@@ -18,6 +18,19 @@
   `force: true` 作为唯一越过护栏的入口。`memory_sync` 的自动重建**永不 force**。
   此前"导出失败 → 重建"会让一次瞬时失败变成永久丢失，且只有代码注释知道这件事。
 
+### Added（2026-11 召回形状与花费可见性）
+
+- **`recall.maxBodyChars`（默认 220）**：单条命中保留的正文长度从写死常量变成配置。实测 117 条记录里
+  89 条（76%）正文超过 220 字符，也就是说多数教训进上下文时被截断；调大它需要同时看 `budgetTokens`。
+- **`recall.quota`（默认关闭）**：可选的两级配额——`globalMinTokens` 给全局根源记录保底、
+  `projectMaxTokens` 封顶项目记录，剩余预算仍按分数竞争。`globalMinTokens + projectMaxTokens >
+  budgetTokens` 在配置解析期被 clamp，写坏的数不会撑破包预算。默认 0 时行为与历史完全一致。
+- **`semantic.maxTokensPerDay`（默认 200k，0 = 不限）+ embedding 记账**：此前 embedding 是唯一
+  没有日预算、没有 token 记账的付费路径。现在按 UTC 日记入 `meta['embed_spend:<日>']`，
+  耗尽后召回降级为词法、全量回填按剩余额度截断。
+- **`memory_stats` 新增 `spend <YYYY-MM>` 行**：每个库一行给出当月蒸馏（tok / 次数）与 embedding 花费，
+  「这个月记忆层花了多少 token」不必再翻两个库的日志。
+
 ### Changed
 
 - `rebuildScope()` 的签名变为 `(db, scope, fts5, options?: { force?: boolean })`，返回值新增

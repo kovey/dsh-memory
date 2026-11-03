@@ -43,6 +43,29 @@ export interface MemoryConfig {
          * loop and fill its own context one capped answer at a time.
          */
         sessionToolBudgetTokens: number
+        /**
+         * Characters of a lesson body kept in one injected hit.
+         *
+         * The rendered item is what `budgetTokens` pays for, so this is the knob
+         * that decides how much of a lesson actually reaches the model: the real
+         * corpus has 76% of records longer than the old hardcoded 220, which is
+         * why the constant became a setting. 0 keeps only the title line.
+         */
+        maxBodyChars: number
+        /**
+         * Hard tier split for the pack (DESIGN §6.1). Both default to 0 = off,
+         * which keeps the historical behaviour: one score-ordered list.
+         *
+         * `globalMinTokens` reserves a slice for lessons from the *global* root
+         * before the rest competes; `projectMaxTokens` caps how much of the pack
+         * project records may take. The invariant `globalMinTokens +
+         * projectMaxTokens <= budgetTokens` is enforced by clamping at resolve
+         * time, so a bad pair can never overspend the pack.
+         */
+        quota: {
+            globalMinTokens: number
+            projectMaxTokens: number
+        }
     }
     learn: {
         collectSignals: boolean
@@ -197,6 +220,14 @@ export interface MemoryConfig {
          * ~2× for no accuracy gain (measured on the real corpus).
          */
         maxAdditions: number
+        /**
+         * Daily ceiling for embedding spend, in estimated tokens (UTC day, same
+         * boundary as distillation). `0` disables the cap.
+         *
+         * Embeddings were the one paid path with no ceiling and no accounting;
+         * once exhausted the recall pass degrades to lexical and says why.
+         */
+        maxTokensPerDay: number
     }
 }
 
@@ -215,6 +246,8 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         minScore: 0.35,
         layers: ['project', 'global', 'profile'],
         sessionToolBudgetTokens: 20_000,
+        maxBodyChars: 220,
+        quota: { globalMinTokens: 0, projectMaxTokens: 0 },
     },
     learn: {
         collectSignals: true,
@@ -279,6 +312,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
         maxRecordsPerRun: 200,
         minSimilarity: 0.35,
         maxAdditions: 2,
+        maxTokensPerDay: 200_000,
     },
 }
 
@@ -311,6 +345,24 @@ function layers(value: unknown, fallback: Layer[]): Layer[] {
     if (!Array.isArray(value)) return fallback
     const picked = value.filter((v): v is Layer => typeof v === 'string' && (LAYERS as readonly string[]).includes(v))
     return picked.length > 0 ? picked : fallback
+}
+
+/**
+ * Resolve the recall quota and enforce the pack invariant.
+ *
+ * `globalMinTokens + projectMaxTokens` may not exceed the recall budget: two
+ * independent caps that together overflow would silently break the token budget
+ * that everything else relies on. Clamping is deliberate (config resolution is
+ * total and never throws) — the effective values are what the report shows.
+ */
+function quotaOf(value: unknown, fallback: { globalMinTokens: number; projectMaxTokens: number }, budgetTokens: number): { globalMinTokens: number; projectMaxTokens: number } {
+    const raw = obj(value)
+    const budget = Math.max(0, budgetTokens)
+    const floor = num(raw['globalMinTokens'], fallback.globalMinTokens, 0, budget)
+    const cap = num(raw['projectMaxTokens'], fallback.projectMaxTokens, 0, budget)
+    const [globalMinTokens, projectMaxTokens] =
+        floor + cap <= budget ? [floor, cap] : [Math.min(floor, budget), Math.max(0, budget - Math.min(floor, budget))]
+    return { globalMinTokens, projectMaxTokens }
 }
 
 /** Resolve raw loader config into a total, validated configuration. */
@@ -365,6 +417,8 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             maxItems: num(recall['maxItems'], d.recall.maxItems, 0, 100),
             minScore: num(recall['minScore'], d.recall.minScore, 0, 1),
             sessionToolBudgetTokens: num(recall['sessionToolBudgetTokens'], d.recall.sessionToolBudgetTokens, 0, 1_000_000),
+            maxBodyChars: num(recall['maxBodyChars'], d.recall.maxBodyChars, 0, 4_000),
+            quota: quotaOf(recall['quota'], d.recall.quota, d.recall.budgetTokens),
             layers: layers(recall['layers'], d.recall.layers),
         },
         learn: {
@@ -456,6 +510,7 @@ export function resolveConfig(raw: unknown): MemoryConfig {
             maxRecordsPerRun: num(semantic['maxRecordsPerRun'], d.semantic.maxRecordsPerRun, 0, 5_000),
             minSimilarity: num(semantic['minSimilarity'], d.semantic.minSimilarity, 0, 1),
             maxAdditions: num(semantic['maxAdditions'], d.semantic.maxAdditions, 0, 50),
+            maxTokensPerDay: num(semantic['maxTokensPerDay'], d.semantic.maxTokensPerDay, 0, 100_000_000),
             budgetMs: num(semantic['budgetMs'], d.semantic.budgetMs, 200, 120_000),
             foreignModelGraceDays: num(semantic['foreignModelGraceDays'], d.semantic.foreignModelGraceDays, 1, 3_650),
         },

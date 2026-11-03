@@ -6,6 +6,7 @@
  * the caller decides how (and whether) to inject it.
  */
 import type { MemoryConfig } from '../config.js';
+import type { FitResult, ScoredRecord } from './rank.js';
 import type { StoreRegistry } from '../store/store.js';
 import type { Layer, MemoryRecord, MemoryScope } from '../store/types.js';
 import type { AgentLike } from '../scope/resolver.js';
@@ -60,10 +61,35 @@ export interface RecallOutcome {
 }
 /** Retrieve and rank memory for one query (lexical, optionally blended). */
 export declare function recall(deps: RecallDeps, request: RecallRequest): Promise<RecallOutcome>;
+/**
+ * Fit the pack with a hard two-tier quota (DESIGN §6.1).
+ *
+ * The default path is one score-ordered list, which lets a fresh project record
+ * outrank an older global lesson by ~5.9× (freshness 0.2 over 120 days, times
+ * the 0.85 global layer weight). When a quota is configured the pack is filled
+ * in three passes instead:
+ *
+ *   1. `globalMinTokens` — a reserved slice for lessons from the global root,
+ *      taken in score order but bounded by the slice (never by the whole pack);
+ *   2. `projectMaxTokens` — a ceiling on what project records may take;
+ *   3. the rest of the budget, all candidates competing by score.
+ *
+ * Passes are greedy and `minScore` applies to every one of them: a quota is a
+ * ceiling/floor on *space*, not a licence to inject noise.
+ */
+export declare function fitBudgetQuoted(ranked: readonly ScoredRecord[], render: (item: ScoredRecord) => string, options: {
+    budgetTokens: number;
+    maxItems: number;
+    minScore: number;
+    skip?: (recordId: string) => boolean;
+}, isGlobal: (item: ScoredRecord) => boolean, quota: {
+    globalMinTokens: number;
+    projectMaxTokens: number;
+}): FitResult;
 /** Render one hit as a compact, model-readable line pair. */
 export declare function renderHit(hit: RecallHit, maxBodyChars?: number): string;
 /** Render the whole pack injected into a step. */
-export declare function renderRecallPack(hits: readonly RecallHit[], dropped?: number): string;
+export declare function renderRecallPack(hits: readonly RecallHit[], dropped?: number, maxBodyChars?: number): string;
 /** Estimated cost of one rendered pack (used by tests and budgets). */
-export declare function packTokens(hits: readonly RecallHit[], dropped?: number): number;
+export declare function packTokens(hits: readonly RecallHit[], dropped?: number, maxBodyChars?: number): number;
 //# sourceMappingURL=engine.d.ts.map

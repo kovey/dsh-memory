@@ -1,11 +1,13 @@
 ---
 title: 访问 ~/.dsh/memory/proposals/ 前先确认路径真实存在
-confidence: 0.52
+confidence: 0.42
 expires: permanent
 times_seen: 1
 updated: 2026-09-30
 tags: bash, ls, 目录不存在, dsh-memory
 status: pending
+times_recalled: 1
+fail_after_recall: 1
 created: 2026-09-30
 evidence: rework×1, tool-failure×2
 ---

@@ -6,7 +6,7 @@ times_seen: 1
 updated: 2026-09-30
 tags: background-subagent, user-correction, stop, 任务收尾
 status: pending
-times_recalled: 2
+times_recalled: 3
 fail_after_recall: 2
 created: 2026-09-30
 evidence: user-correction×1

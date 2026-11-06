@@ -30,3 +30,6 @@ node_modules/
 .dsh/state/
 .dsh/specs/
 .dsh/kb/
+
+# 项目记忆只留在本地（2026-11-06 决定：不随仓库发布）
+.dsh/memory/

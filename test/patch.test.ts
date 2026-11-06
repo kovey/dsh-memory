@@ -155,6 +155,27 @@ function compareVersions(a: string, b: string): number {
     return x.pre < y.pre ? -1 : 1
 }
 
+test('the declared ranges cover the 0.2.2 line without admitting the next one', () => {
+    // The upper bound is what keeps a host the plugin was NOT verified against
+    // from silently loading it. "Support the whole 0.2.2 line" therefore means
+    // admitting 0.2.2-rc.* and 0.2.2, and refusing 0.2.3.
+    const dshPeer = (pkg.peerDependencies as Record<string, string>)['@deepseek-ai/dsh-tools'] as string
+    for (const version of ['0.2.0-rc.2', '0.2.1', '0.2.1-rc.5', '0.2.2-rc.1', '0.2.2']) {
+        assert.ok(admits(dshPeer, version), `${dshPeer} must admit ${version}`)
+    }
+    for (const version of ['0.2.3-rc.1', '0.2.3', '0.3.0']) {
+        assert.ok(!admits(dshPeer, version), `${dshPeer} must NOT admit ${version}`)
+    }
+    // cordis: 0.2.0/0.2.1 hosts run 4.0.4, 0.2.2 hosts run 4.1.0.
+    const cordisPeer = (pkg.peerDependencies as Record<string, string>)['@deepseek-ai/cordis'] as string
+    assert.ok(admits(cordisPeer, '4.0.4'), `${cordisPeer} must admit 4.0.4`)
+    assert.ok(admits(cordisPeer, '4.1.0'), `${cordisPeer} must admit 4.1.0`)
+    // The host compares with `includePrerelease`, so a plain `<4.2.0` would also
+    // admit 4.2.0-rc.1. `-0` is the boundary that stops at the tested line.
+    assert.ok(!admits(cordisPeer, '4.2.0-rc.1'), `${cordisPeer} must NOT admit 4.2.0-rc.1`)
+    assert.ok(!admits(cordisPeer, '4.2.0'), `${cordisPeer} must NOT admit 4.2.0`)
+})
+
 test('peer anchors track the installed dsh runtime', async () => {
     // rc.2 added a hard peer gate: a bundle whose peers do not match the running
     // dsh is *skipped* at load time. Forgetting to bump these anchors after a dsh

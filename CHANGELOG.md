@@ -3,6 +3,28 @@
 本文件记录 dsh-memory 的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.1] — 2026-11-06
+
+### Added
+
+- **支持 dsh 0.2.2-rc.1（整个 0.2.2 版本线）**：peer 上界 `<0.2.2` → **`<0.2.3-0`**；
+  `@deepseek-ai/cordis` peer 改为 `>=4.0.4 <4.2.0-0`（0.2.0/0.2.1 宿主是 4.0.4，0.2.2 宿主是 4.1.0）。
+  上界写成 `-0` 不是笔误：宿主求值器用 `includePrerelease: true`，`<0.2.3` 会把 **0.2.3-rc.1**
+  也算进来（未核实版本），`<0.2.3-0` 才是"到 0.2.2 为止"的精确边界。
+  顺带修正一个认知：旧上界 `<0.2.2` 在 `includePrerelease` 下**本来就 admits 0.2.2-rc.1**，
+  所以 v0.4.0 在 0.2.2-rc.1 上是"能加载但没核实"；本版把它变成明确的、经核实的支持。
+- 兼容性核实（在 0.2.2-rc.1 + cordis 4.1.0 的真实依赖树上）：
+  `tsc` 零错误、全量测试通过；宿主的 `evaluatePluginCompatibility()` 与 bundle 跳过逻辑
+  与 0.2.1-rc.2 **逐字一致**；我们依赖的 7 个事件（agent/pre-step、agent/created、
+  agent/turn-stopping、agent/request-error、session/created、session/disposed、tools/result）、
+  `systemPrompt.section()`、消息 source 的 merge-extensible 语义均未变。
+- API 面新增（均为增量，不影响既有调用）：`PromptPresentation`（`PromptAssembly` 现继承它）、
+  `projectToolSchema()`、`TurnBoundaryProjection`。
+
+### Changed
+
+- devDependencies 对齐 `0.2.2-rc.1` / `cordis ~4.1.0`，让类型检查与测试跑在目标宿主上。
+
 ## [0.4.0] — 2026-11-03
 
 ### Added
@@ -399,6 +421,7 @@
 - 库中已存在的历史重复 id 不会自动删除（import 只保证不再新增），需要显式 dedupe。
 - `tui` 等生产面只消费发布版本（tag/NPM），不走本地 link。
 
+[0.4.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.4.1
 [0.4.0]: https://github.com/kovey/dsh-memory/releases/tag/v0.4.0
 [0.3.2]: https://github.com/kovey/dsh-memory/releases/tag/v0.3.2
 [0.3.1]: https://github.com/kovey/dsh-memory/releases/tag/v0.3.1

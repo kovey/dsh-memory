@@ -3,6 +3,24 @@
 本文件记录 dsh-memory 的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.4.2] — 2026-11-12
+
+### Added
+
+- **适配 dsh 0.2.2-rc.2**（npm 的 `next` 标签；`latest` 仍是 rc.1）：devDependencies 对齐 rc.2，
+  并补装它新要求的宿主 peer 包（`dsh-error`、`dsh-session-projection`、`dsh-workspace`、`dsh-util-values`）。
+  缺 `dsh-error` 时，rc.2 的 `dsh-llm` 在测试环境里会直接 `ERR_MODULE_NOT_FOUND`。
+- **API 面核实（rc.1 → rc.2），均不影响本插件**：
+  - `dsh-tools`：`checkGuards()` 返回类型由 `string` 改为 `ToolGuardDenial`（本插件不实现 ToolGuard）。
+  - `dsh-agent`：`Scope.enter(agent)` 去掉 owner 参数，移除 `parentAgent` / `isOwnedBy` / `roots()`
+    （本插件只用事件载荷里的 `agent.session`，不用所有权 API）。
+  - `dsh-session`：新增批量 `append(inputs[])` 与 `SessionEventInput`（增量）。
+  - `dsh-llm`：`LlmError` 的 code 收窄为 `BuiltinLlmFailureCode`，新增 `fromFailure()`（本插件不构造 LlmError）。
+  - `dsh-system-prompt`：仅 token 预算常量增减，`section()` 签名未变。
+- peer 范围**不变**：`>=0.2.0-rc.2 <0.2.3-0`。在宿主的 `includePrerelease` 语义下它已涵盖 0.2.2-rc.2，
+  守卫用例继续验证 `0.2.3-rc.1` 被拒绝。
+- 验证：rc.2 依赖树下 `tsc` 零错误、全量 **262 例**通过。
+
 ## [0.4.1] — 2026-11-06
 
 ### Added

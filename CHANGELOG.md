@@ -3,6 +3,23 @@
 本文件记录 dsh-memory 的版本变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+
+- **核对 dsh 0.2.2-rc.3 / rc.4（npm `next`；`latest` 仍 0.2.2-rc.1）**：devDependencies 对齐 `0.2.2-rc.4`，
+  **运行时代码无任何改动**。核对依据：
+  - 五个依赖包中 **4 个 d.ts 逐字相同**（dsh-tools / dsh-agent / dsh-session / dsh-system-prompt，
+    含 events/contracts/types 子文件）；**dsh-llm 仅 `error.d.ts` 新增一个错误码成员**
+    `CONTENT_REFUSED`（rc.4「优化模型异常响应」），本插件不枚举该联合类型，`grep` 零引用。
+  - 宿主 `evaluatePluginCompatibility()` 与 `satisfies(..., { includePrerelease: true })` 与 rc.2 逐字一致。
+  - 五个包的 `peerDependencies` 键集合完全一致，只有版本字符串变化（cordis 仍 `~4.1.0`）。
+  - 发布说明：rc.3 新增实验性「DeepSeek 会话导入」插件 + Windows 桌面更新修复；rc.4 修模型异常响应与
+    LiveShare 桌面分享——均与本插件无关。
+- peer 范围仍为 `>=0.2.0-rc.2 <0.2.3-0`（`includePrerelease` 下涵盖 rc.4，仍拒绝 0.2.3-rc.1）。
+- 验证：rc.4 依赖树下 `tsc` 零错误、全量 **262 例**通过（守卫用例确认 devDeps 与运行时一致）。
+- 本次只动 `devDependencies`，**不影响发布产物**（`files` 与 `peerDependencies` 未变），因此不单独发版。
+
 ## [0.4.2] — 2026-11-12
 
 ### Added
